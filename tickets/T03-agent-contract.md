@@ -1,7 +1,7 @@
 ---
 id: T03
 title: "Agent contract: AGENTS.md, six house skills, the bridges"
-status: open
+status: done
 depends_on: [T00]
 parallel_with: [T01, T02, T04]
 branch: ticket/t03-agent-contract
@@ -359,6 +359,27 @@ explained above; each B phrase still on a line outside every block (`untrusted` 
   `uv run --frozen prek run lychee --files README.md || :` hides a failed lychee binary
   download as well as lychee's verdict. The fix T00's Open points propose for
   `install-hooks` applies here too: check afterwards that the binary exists.
+
+### Close-out (commit 8407295)
+
+Raw log `ai_tmp/T03/check-review-fixes.log`:
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+exit 0
+$ git diff 69f0d14 -- .agents > ai_tmp/agents.diff; echo "exit $?"
+exit 0
+$ rg '^[-+](name|description):' ai_tmp/agents.diff; echo "exit $?"
+exit 1
+```
+
+Every acceptance criterion has evidence: `check-agents` and the B phrases (Verification
+and the checkpoint re-run), the reference lists with the `docs/specs/` exemption
+(Reference check), the unchanged frontmatter with its positive control (above), and the
+review (checkpoint 1). Status is `done`.
 
 ## Open points
 
