@@ -856,22 +856,23 @@ reporting on. The maintainer may change any of it at the stop.
 
 Each claim was reasoned from source or documentation but not executed here. The named
 ticket runs the check and records the outcome; a claim that fails is a design change
-that comes back through this document. T05 carries every claim still open after wave 1.
+that comes back through this document. T05 carries every claim still open after wave 1;
+the last column is its outcome and the ticket whose hand-back notes hold the evidence.
 
-| # | Claim | Check | Owner |
-| --- | --- | --- | --- |
-| 1 | The `tooling` group's own floor locks, syncs and runs on the real `pyproject.toml` as on the scratch project of §1 fact 1, and `UV_NO_GROUP=tooling` with `UV_PYTHON=3.13` runs every `floor` recipe | `uv lock`, `just sync`, then the `floor` recipes under those variables | T00, T01 |
-| 2 | `uv lock --check --offline` passes on a warm cache with B as a git source, and fails on a stale lock | `just lock-check`, then with a pin edited in a scratch copy | T00 |
-| 3 | `uv build --offline` finds `hatchling==1.33.0` in the cache after `just sync` on a fresh clone | `just build` under §11's network denial | T00 |
-| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv pip install --offline --require-hashes -r` (from the cache) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 |
-| 5 | `uv export` writes no file outside `-o` and does not touch `uv.lock` | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 |
-| 6 | prek builds the ripsecrets hook with the machine's cargo, and the macOS and Ubuntu runners have one | `just install-hooks`, then T01's first `gate` run on each OS | T00, T01 |
-| 7 | `ruff check` and `mypy` lint an explicitly named file that their config excludes, so the positive controls fire | each recipe, then with the fixture's violation removed in a scratch copy (for ruff, `F401` and `E501` in turn) | T00 first, T02 |
-| 8 | `rovo.cli:app` as a console-script target runs the Typer app, and `--version` as an eager callback option exits 0 before `no_args_is_help` | `just wheel-smoke`'s last line; `rovo` alone prints help and exits as Typer documents | T00 |
-| 9 | `coverage combine` succeeds when the only data comes from one process, and subprocess coverage (for the installed-script test) needs `[run] patch = subprocess` in `.coveragerc` (INI syntax; the bracketed list form is TOML-only and `.coveragerc` rejects it as `Unknown patch`) | `just coverage`, then T02's subprocess test | T00, T02 |
-| 10 | `bg-validate-agents` accepts six skills and B's adapter strings with no `.claude/settings.json` | `just check-agents` | T00 |
-| 11 | B's git dependency installs in `BiscuitBin` CI with no credential | T00's stub run, then T01's full run | T01 |
-| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 |
+| # | Claim | Check | Owner | Outcome (T05) |
+| --- | --- | --- | --- | --- |
+| 1 | The `tooling` group's own floor locks, syncs and runs on the real `pyproject.toml` as on the scratch project of §1 fact 1, and `UV_NO_GROUP=tooling` with `UV_PYTHON=3.13` runs every `floor` recipe | `uv lock`, `just sync`, then the `floor` recipes under those variables | T00, T01 | Holds. Local: T00 part 1, T01 step 6. CI: T05, `floor` green at `0d75e51` (run 41018370415), all five recipes on 3.13.18 |
+| 2 | `uv lock --check --offline` passes on a warm cache with B as a git source, and fails on a stale lock | `just lock-check`, then with a pin edited in a scratch copy | T00 | Holds: T00 part 1 |
+| 3 | `uv build --offline` finds `hatchling==1.33.0` in the cache after `just sync` on a fresh clone | `just build` under §11's network denial | T00 | Holds. Warm: T00 part 1 step 6. Cold: T05, an empty `UV_CACHE_DIR` under the denial, and the macOS `gate` leg on a missed uv cache |
+| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv pip install --offline --require-hashes -r` (from the cache) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 | Failed on a cold cache: the `-r` install needs index pages `just sync` never caches (T01 run 2, H2). T05 `9af0452` replaced that step with `uv sync` into the smoke venv, which holds cold under the denial on 3.14 and 3.13 (T05) |
+| 5 | `uv export` writes no file outside `-o` and does not touch `uv.lock` | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 | Held (T00 part 1). `wheel-smoke` no longer runs `uv export` (T05 `9af0452`); `git status` and the `uv.lock` checksum are unchanged around T05's cold run |
+| 6 | prek builds the ripsecrets hook with the machine's cargo, and the macOS and Ubuntu runners have one | `just install-hooks`, then T01's first `gate` run on each OS | T00, T01 | Holds. Recipe: T00 part 4 (fresh clone). Runners: Ubuntu, T01 runs 1 and 2 (rustc 1.99.1, the runner's rustup); macOS, T05 run 41018370415 on a cold prek cache (1.99.1, `/opt/homebrew/opt/rustup/bin/rustc`) |
+| 7 | `ruff check` and `mypy` lint an explicitly named file that their config excludes, so the positive controls fire | each recipe, then with the fixture's violation removed in a scratch copy (for ruff, `F401` and `E501` in turn) | T00 first, T02 | Holds: T00 part 1, T02 step 2 |
+| 8 | `rovo.cli:app` as a console-script target runs the Typer app, and `--version` as an eager callback option exits 0 before `no_args_is_help` | `just wheel-smoke`'s last line; `rovo` alone prints help and exits as Typer documents | T00 | Holds: T00 part 1; T02 pins bare `rovo` at exit 2 |
+| 9 | `coverage combine` succeeds when the only data comes from one process, and subprocess coverage (for the installed-script test) needs `[run] patch = subprocess` in `.coveragerc` (INI syntax; the bracketed list form is TOML-only and `.coveragerc` rejects it as `Unknown patch`) | `just coverage`, then T02's subprocess test | T00, T02 | Holds: T00 part 1 (one process), T02 (`patch = subprocess`) |
+| 10 | `bg-validate-agents` accepts six skills and B's adapter strings with no `.claude/settings.json` | `just check-agents` | T00 | Holds: T00 part 2 |
+| 11 | B's git dependency installs in `BiscuitBin` CI with no credential | T00's stub run, then T01's full run | T01 | Holds: T01 run 2 installed B from git with no credential on both 3.14 legs; T05 run 41018370415 ran B's checkers green on both |
+| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 | Not owned by T00 to T04: open, for T06 |
 
 ## 13. Risks every ticket states where it applies
 
