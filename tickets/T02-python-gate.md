@@ -279,6 +279,110 @@ Re-run of the Verification block with the fix uncommitted on `9c1eaf4` (raw
 `TOTAL 17 0 2 0 100%` exit 0, `just wheel-smoke` ending `rovo 0.0.0` exit 0,
 `check-docs` exit 0, the 3.13 run exit 0, `just sync` exit 0.
 
+### Steps 6 to 8 (commit 1e7687a)
+
+**Step 6, the text gates.** Each of the six files was compared with A's at `c8e1a46`.
+`.pre-commit-config.yaml` differs from A's only by the §5 deltas (the `exclude:`
+block, the two Python hooks, `uv run --frozen` entries, the `.venv/bin/bg-ripsecrets`
+entry); `.pre-commit-fix.yaml`, `.markdownlint-cli2.jsonc`, `lychee.toml` and
+`.editorconfig` are T00's §5 adaptations. Each fires below, so none changed: the hook
+ids the `Justfile` names are untouched. One change: `_typos.toml` keeps A's `mis` and
+`als`, and the comment now says why. A scratch copy without them failed `typos` on
+`tickets/T00-foundation.md:583`, which names them as A's words, and on nothing else.
+They can go once T00's notes stop quoting them (T05's call).
+
+**Step 7, the negative controls** (script `ai_tmp/T02/bin/controls.sh`, raw
+`ai_tmp/T02/controls.log` and `ai_tmp/T02/controls/`). Run on the tree committed as
+`1e7687a`, before that commit, with the same content. Each file was saved to
+`ai_tmp/scratch/`, edited, run, copied back (`cmp` identical), and the recipe run
+again. Two changes came out of the first pass:
+
+- An unguarded `import typer` made the smoke's `api` step die with a traceback.
+  It now reports the failure and the recorded attempt (`scripts/wheel_smoke.py`).
+- A branch in a function that no test calls reports as missed lines (`45-46`,
+  `BrPart 0`), not as a partial branch. When the false side jumps to a missed line,
+  coverage folds the arc into that line (`40`, `BrPart 1`). So the control uses a
+  condition that is always true, on the path the tests run.
+
+```text
+## 1a. __init__.py gains 'import typer'
+$ just coverage
+FAILED tests/test_api.py::test_invariant_1_import_rovo_never_imports_the_command_line
+E       AssertionError: assert ['typer', 'ty...matting', ...] == []
+exit 1
+$ just wheel-smoke
+wheel_smoke: import rovo failed (No module named 'typer'); it tried ['typer']
+exit 1
+## 1b. __init__.py gains a guarded 'try: import typer'
+$ just wheel-smoke
+wheel_smoke: import rovo tried to import ['typer']
+exit 1
+restored; $ just coverage -> exit 0
+restored; $ just wheel-smoke -> exit 0
+## 2. an untested branch in cli.py (version_command: `if rovo.__version__.startswith("0"):`)
+$ just coverage
+Name                   Stmts   Miss Branch BrPart  Cover   Missing
+src/rovo/cli.py           16      0      4      1    95%   39->41
+TOTAL                     19      0      4      1    96%
+exit 0
+## 3. the same scratch, floor 100
+$ just coverage_floor=100 coverage
+TOTAL                     19      0      4      1    96%
+Coverage failure: total of 96 is less than fail-under=100
+exit 2
+restored; $ just coverage -> exit 0
+## 4. an Any-returning function in src/
+$ just py-typecheck
+src/rovo/cli.py:46: error: Returning Any from function declared to return "int"  [no-any-return]
+exit 1
+restored; $ just py-typecheck -> exit 0
+## 5. print() in cli.py
+$ just py-lint
+T201 `print` found
+exit 1
+restored; $ just py-lint -> exit 0
+## 6. a misspelling in a docs page
+$ just check-docs
+typos....................................................................Failed
+  error: `<t-e-h>` should be `the`
+exit 1
+restored; $ just check-docs -> exit 0
+## 7. a heading level jump in a docs page
+$ just check-docs
+markdownlint.............................................................Failed
+  docs/how-to/test-and-debug.md:15 error MD001/heading-increment Heading levels should only increment by one level at a time [Expected: h2; Actual: h4]
+exit 1
+restored; $ just check-docs -> exit 0
+## 8. a tab-indented line in a .py file
+$ just lint
+EditorConfig.............................................................Failed
+  src/rovo/cli.py:
+    43: Wrong indent style found (tabs instead of spaces)
+exit 1
+restored; $ just lint -> exit 0
+## 9. a relative link to a missing file in a docs page
+$ just check-docs
+lychee...................................................................Failed
+  [ERROR] file://<worktree>/docs/how-to/missing-page.md (at 15:5) | File not found. Check if file exists and path is correct
+exit 1
+restored; $ just check-docs -> exit 0
+## 10. py.typed moved out of the build with git mv
+$ just wheel-smoke
+wheel_smoke: rovo/py.typed is not among the installed files
+exit 1
+restored; $ just wheel-smoke -> exit 0
+```
+
+`<t-e-h>` stands for the misspelling typos printed, which `typos` would flag in this
+file. In control 8 the `py-lint` hook failed as well (ruff on the tab), and the
+`EditorConfig` hook's failure is the one quoted. Control 2 passes the 90 floor (96%),
+because the floor is a combined total. The report's `39->41` is the evidence that
+branches are measured, and control 3 shows that the floor bites.
+
+**§12 outcomes.** Claim 7 holds (step 2's controls, above). Claim 9 holds: `combine`
+with one process (T00), and subprocess coverage needs `patch = subprocess`
+(before/after above).
+
 ## Open points
 
 - Whether the floor should rise to 100% while the package is this small. The maintainer
