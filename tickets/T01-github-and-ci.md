@@ -348,8 +348,147 @@ Re-run after the fixes, on `33e5cbe` with them uncommitted, with
 - Residual: the step accepts any cached `lychee-*` version, not only the pinned one, and
   the composite action has not yet run on a real runner (step 7).
 
-Steps 7 and later have not been done. Each one needs authorisation, and the work
-stops at step 6's **Adversarial review**.
+### Part 2 evidence, steps 7 and 8 (runs on `e2a83a4` and `4183def`)
+
+**Authorisation.** On 2026-10-30, the orchestrator relayed the maintainer's plan
+authorisation to push `bootstrap` and open one pull request, `bootstrap` into `main`.
+The harness keeps this agent inside its lane worktree, so the lane branch was
+fast-forwarded to `bootstrap` at `e2a83a4`, which holds T00 to T04. There `just check`
+exited 0 and ended `All checks passed and the worktree is unchanged.`, and
+`git status --short` printed nothing. Then `git push origin HEAD:bootstrap` (exit 0),
+and `gh pr create` opened PR #2, `Bootstrap rovo: tickets T00–T06`
+(`https://github.com/BiscuitBin/rove/pull/2`). No settings, protection or merge were
+touched.
+
+**Run 1**, CI `https://github.com/BiscuitBin/rove/actions/runs/41015997274` on
+`e2a83a4`, watched with `gh pr checks 2 --watch` (exit 1):
+
+```text
+floor                 fail  1m24s
+gate (ubuntu-latest)  fail  1m28s
+gate (macos-latest)   fail  1m48s
+check                 fail  4s
+audit                 pass  1m22s   (runs/41015997272)
+```
+
+Every leg failed in `just coverage` at `tests/test_cli.py:47` and `:58`. The
+`--help` output carried ANSI codes and rich boxes. Typer sets `FORCE_TERMINAL` when
+`GITHUB_ACTIONS` is set, reading it once at import (`typer/rich_utils.py` lines 78-84).
+So the `CliRunner` `env` cannot undo it, and it never happens locally. Locally,
+`GITHUB_ACTIONS=true uv run --frozen pytest -q tests/test_cli.py` reproduced it
+(`2 failed, 5 passed`), and with `_TYPER_FORCE_DISABLE_TERMINAL=1` added it gave
+`10 passed`. The fix, `4183def` (`T01: fix CLI help tests on runners; show the
+ripsecrets build`), sets `_TYPER_FORCE_DISABLE_TERMINAL: '1'` in `ci.yml`'s workflow
+`env` as a stopgap (hand-back H1 below). It also adds a setup-action step that names
+the ripsecrets binary prek built and its compiler, because prek prints no build line.
+Before the push, actionlint passed (exit 0) and `just check` passed.
+
+**Run 2**, CI `https://github.com/BiscuitBin/rove/actions/runs/41016347749` on
+`4183defeff8f28c2f8fdbe80f6513343eb86e141`, watched the same way:
+
+```text
+floor                 fail  21s
+gate (ubuntu-latest)  fail  30s
+gate (macos-latest)   fail  3m11s
+check                 fail  2s
+audit                 pass  16s     (runs/41016347788)
+```
+
+- **`floor` and `gate (ubuntu-latest)`** passed every recipe up to `just wheel-smoke`
+  (`coverage` 10 passed, 100%). The wheel-smoke API step passed, then:
+
+  ```text
+  error: No solution found when resolving dependencies
+    cause: Because annotated-doc==0.0.5 needs to be downloaded from a registry and you require annotated-doc==0.0.5, we can conclude that your requirements are unsatisfiable.
+  hint: Packages were unavailable because the network was disabled. When the network is disabled, registry packages may only be read from the cache.
+  ```
+
+  Reproduced locally on a cold cache (`ai_tmp/T01/cold-smoke.sh`, with its own
+  `UV_CACHE_DIR`). `uv sync --frozen` exits 0, but the offline
+  `uv pip install --require-hashes -r` then fails the same way: `annotated-doc was not
+  found in the cache`. `uv sync` installs from the lock's file URLs and never caches
+  the registry's index pages, which the offline `uv pip install -r` needs. Priming the
+  index first, with one online `uv pip install --require-hashes -r` into a throwaway
+  venv, makes the offline install pass. So `just wheel-smoke` passes only on a cache
+  that already held those index pages, and fails on a fresh clone. §12 claims 3 and 4
+  were proven warm. The fix belongs in the frozen `Justfile` (hand-back H2). T01 did not
+  paper over it in CI.
+- **`gate (macos-latest)`** failed earlier. In `just install-hooks`, lychee's
+  `cargo-binstall` hit `Timeout reached while checking fetcher` for every fetcher, then
+  `cargo-install does not support --install-path`. The recipe's `-` swallowed that, and
+  the checkpoint-1 lychee step then failed closed:
+  `lychee was not warmed; the gate would reach the network`. In run 1, lychee had
+  warmed on macOS (`/Users/runner/.cache/prek/repos/909c8f3d3d713742/.cargo/bin/lychee-0.24.2`),
+  so this looks like a transient fetch failure. It was not re-run, because the leg
+  would fail at wheel-smoke anyway (H2). See H3.
+
+**Quotes.**
+
+- `floor`'s interpreter, from the `uv run --frozen python --version` step in run 2:
+  `Python 3.13.18`. Also `Using CPython 3.13.18` and
+  `platform linux -- Python 3.13.18, pytest-9.2.0`. The log contains no
+  `biscuit` line (`grep -c biscuit` printed 0).
+- **Claim 6, runner half.**
+  - Ubuntu: run 1 started on a cold prek cache (`Cache not found for input keys:
+    Linux-X64-prek-817c4e...`). `just install-hooks` took 70.6 s, and `just check`'s lint
+    printed `ripsecrets....Passed`. Run 2 restored the cache that run 1's green `audit`
+    job saved. The new step printed
+    `ripsecrets built: /home/runner/.cache/prek/hooks/rust-uXbM8URxGofKOLpJXiOY/bin/ripsecrets`,
+    `"language_version": "1.99.1"` and
+    `"toolchain": "/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"`,
+    which is the runner's own rustup.
+  - macOS: run 1 started cold (`Cache not found ... macOS-ARM64-prek-...`), built the
+    hooks, and lint printed `ripsecrets....Passed`. Run 2's ripsecrets step did not run,
+    because the lychee step failed before it. So macOS has no compiler line yet.
+- **Claim 11.** `just sync` installed B from git with no credential on both 3.14 legs
+  (`+ biscuit-games-tooling==0.3.0 (from git+https://github.com/steven-cutting/biscuit_games_tooling@6c5c07f6...)`).
+  `bg-project-check` ran `just check` there, and B's other checkers never ran, because
+  the gate failed at wheel-smoke first.
+- **Claim 1, CI half.** `UV_NO_GROUP=tooling` with 3.13 synced and ran `lock-check`,
+  `py-lint`, `py-typecheck` and `coverage` green. `wheel-smoke` was red, from H2.
+- `All checks passed and the worktree is unchanged.` cannot be quoted from any leg yet.
+- Timings, for the macOS open point. In run 1 every leg failed at about the same
+  recipe: floor 1m24s, ubuntu 1m28s, macOS 1m48s, all on cold caches. In run 2 macOS
+  took 3m11s, failing in setup.
+
+**Step 8.**
+
+```text
+$ gh api repos/BiscuitBin/rove/commits/4183defeff8f28c2f8fdbe80f6513343eb86e141/check-runs --jq '.check_runs[] | {name, conclusion, app_id: .app.id, app: .app.slug}'
+{"app":"github-actions","app_id":15368,"conclusion":"failure","name":"check"}
+{"app":"github-actions","app_id":15368,"conclusion":"failure","name":"gate (macos-latest)"}
+{"app":"github-actions","app_id":15368,"conclusion":"failure","name":"floor"}
+{"app":"github-actions","app_id":15368,"conclusion":"failure","name":"gate (ubuntu-latest)"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"audit"}
+exit 0
+```
+
+The `check` context exists under app 15368, as §10 expected. It is red, so under §13
+step 9's protection must not be applied until it is green. The step 9 payloads,
+commands and before-state are prepared in `ai_tmp/T01/step9-payloads.md`, with
+`ai_tmp/protection.json` and `ai_tmp/T01/repo-hygiene.json`. Nothing was sent.
+
+**Hand-backs for T05.**
+
+- **H1** (`tests/test_cli.py`, T02's): the help tests assume rich is not in terminal
+  mode. Typer forces it under `GITHUB_ACTIONS`, `FORCE_COLOR` or `PY_COLORS`. Make the
+  tests independent of that, for example by patching
+  `typer.rich_utils.FORCE_TERMINAL` to `False` in a fixture, or by stripping ANSI. Then
+  drop `ci.yml`'s `_TYPER_FORCE_DISABLE_TERMINAL`, which is a private Typer switch that
+  a Typer upgrade could rename.
+- **H2** (`Justfile` `wheel-smoke`, frozen; and §12 claims 3 and 4): on a cold cache,
+  the offline `uv pip install --require-hashes -r` cannot resolve registry packages
+  after `just sync`. Either install the closure without the registry index (for
+  example a `uv sync --frozen --no-default-groups --no-install-project` into the smoke
+  venv via `UV_PROJECT_ENVIRONMENT`, which uses the lock's cached file URLs), or have
+  `just sync` or `install-hooks` prime the index. Then re-prove both claims from an
+  empty `UV_CACHE_DIR`. This blocks every green CI run.
+- **H3** (`Justfile` `install-hooks`, frozen, the same root as T00's C1): lychee's
+  `cargo-binstall` fetch can time out on macOS runners. The setup action now fails
+  closed on it. Consider a retry, or the run's `GITHUB_TOKEN` on that one step for
+  binstall's GitHub API calls, as A gives it, weighing the token reaching hook builds.
+
+Step 9 and later have not been done. They need authorisation and a green `check`.
 
 ## Open points
 
