@@ -34,15 +34,16 @@ Contributions arrive under no stated licence until the decision is made, and nob
 may reuse the code beyond what GitHub's terms allow. The release ticket is blocked on
 this record.
 
-Two settings exist only because of it, and lift with it: `ruff.toml` ignores rule
-`CPY001` (there is no copyright notice to write while the licence is undecided), and
-`_typos.toml` accepts `cpy`, the rule's prefix, while that ignore stands.
+One setting exists only because of it, and lifts with it: `ruff.toml` ignores rule
+`CPY001` (there is no copyright notice to write while the licence is undecided).
+`_typos.toml` accepts `cpy`, the rule's prefix, and that entry stays after the ignore
+lifts, because this record and T00's ticket keep naming the rule once superseded.
 
 ## What would reopen this
 
 The maintainer choosing a licence. That decision supersedes this record with a new one
-naming the licence, adds the `LICENSE` file and the metadata, lifts the two settings
-above, and unblocks the release ticket, which removes the upload guard.
+naming the licence, adds the `LICENSE` file and the metadata, lifts the `CPY001`
+ignore in `ruff.toml`, and unblocks the release ticket, which removes the upload guard.
 
 ## Related pages
 

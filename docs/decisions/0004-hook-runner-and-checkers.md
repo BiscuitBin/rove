@@ -44,12 +44,16 @@ replace registered pages, records and skills under a green gate.
 The cost is that the full gate is 3.14-only: on 3.13 the Python gates run, but nothing
 runs the validators or the snapshotting runner. prek's hook environments, and the
 lychee binary, reach the network the first time they are built, so a fresh worktree
-runs `just initialize` before `just check` can run offline.
+runs `just initialize` before `just check` can run offline. `just initialize` does
+not yet check that lychee's first-run download succeeded: a failed download still ends
+in `Ready`, and the next `just check` then needs the network. That check is handed back
+to T00's recipes (`CONVENTIONS.md` §4 `install-hooks`, §5 `scripts/initialize.sh`).
 
 ## What would reopen this
 
 The checkers being rewritten as binaries inside the shared package, or the validators
-becoming simple enough that a local rewrite is cheaper than the pin. A change must
+becoming simple enough to rewrite as a local check that runs on the package's 3.13
+floor, so that the gate no longer needs the 3.14-only `tooling` group. A change must
 replace the package's whole contract rather than only the ordered runner. The checkers
 lowering their Python floor is not a reopening of this record; it reopens decision 0001.
 

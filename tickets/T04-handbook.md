@@ -206,7 +206,8 @@ inexact: the export above lists seven packages besides typer (four of them typer
 requirements, three pulled in by rich), colorama under its Windows marker. Decision
 0003 names the list as locked.
 
-**Records.** 0004 alone opens with the carried-from line (§8); it is A's 0002 with the
+**Records.** 0004 opens with the carried-from line (§8), and since checkpoint 1 so does
+0005 (A's 0004, whose sentences it reuses); 0004 is A's 0002 with the
 twenty-two recipes become eight, A's pixi record (0006) become this repository's 0001,
 and the cost paragraph rewritten for the 3.14-only checkers. 0006 lists no licence
 options: none were named before this ticket ran. No record links 0008, which T06
@@ -225,6 +226,46 @@ exit 1
 ```
 
 Stopped at step 3's **Adversarial review**; the orchestrator runs §14 checkpoint 1.
+
+**Checkpoint 1, conformance and breakage lenses** (verdicts in
+`ai_tmp/review/T04-1/verdicts.md`). Applied to the records: 0005 scopes `uv.lock` to
+the runtime dependencies and both groups (the build backend's requirements are not
+locked) and carries the carried-from line; 0006 keeps `_typos.toml`'s `cpy` entry after
+the `CPY001` ignore lifts; 0004's second reopen condition is tied to the 3.13 floor, a
+departure from A's "cheaper than an interpreter", and its cost paragraph says a failed
+lychee download still ends in `Ready`; 0007 no longer says a soft keyword breaks an
+import. Hand-backs, not new: the lychee binary check is T00's (§4 `install-hooks`, §5
+`scripts/initialize.sh`, already in T00's hand-back notes); T00's ticket still says to
+lift the `cpy` entry with the ignore, which 0006 now contradicts, for T00's owner or the
+release ticket to reconcile.
+
+Review record, checkpoint 1 (run by the orchestrator over `7aeb572`). Harness: Codex
+CLI 0.165.0, `-m gpt-6-astra`, read-only sandbox, one reviewer per lens; triage by
+separate subagents. Nine raw findings, merged to six (C1=B2, C3=B3, C5=B4); six valid,
+none invalid, none high, so no second round:
+
+| Finding | Severity | Verdict | Reason | Outcome |
+| --- | --- | --- | --- | --- |
+| C1+B2 | medium | valid | `uv.lock` does not lock hatchling or its requirements | applied, 0005 |
+| C2 | medium | valid | lifting `cpy` would turn `typos` red on 0006 and T00's ticket | applied, 0006; T00 note handed back |
+| C3+B3 | low | valid | 0004's "cheaper than the pin" was untestable | applied, C3's wording |
+| C4 | low | valid | 0005 reused A 0004's sentences without the carried-from line | applied |
+| C5+B4 | low | valid | a soft keyword imports fine | applied, 0007 |
+| B1 | low | valid in part | a failed lychee download still ends in `Ready` | doc caveat applied, 0004; code fix handed back (T00) |
+
+Re-run after the fixes, at `7aeb572` with uncommitted changes:
+
+```text
+$ just check-docs
+markdownlint.............................................................Passed
+typos....................................................................Passed
+lychee...................................................................Passed
+uv run --frozen bg-validate-docs
+Validated 31 pages and 31 canonical topics.
+exit 0
+$ rg -n -i 'stub|T04 writes|todo|tbd|fixme' docs/decisions/000*.md
+exit 1
+```
 
 ## Open points
 

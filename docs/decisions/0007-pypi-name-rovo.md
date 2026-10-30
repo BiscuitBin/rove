@@ -16,8 +16,9 @@ share one. On 2026-10-29 `https://pypi.org/pypi/rovo/json` answered 404: no proj
 that name existed.
 
 An import name has constraints a distribution name does not. The installed package is
-imported as a top-level module, so a Python keyword or soft keyword makes every import
-of it a syntax error, and a name that already belongs to the standard library or to a
+imported as a top-level module, so a Python keyword makes every import of it a syntax
+error (a soft keyword such as `match` does not, but reads ambiguously and is avoided
+too), and a name that already belongs to the standard library or to a
 dependency's top-level module shadows that module for everything in the environment.
 `rovo` is none of these: it is not a keyword or a soft keyword, it is not in
 `sys.stdlib_module_names`, and no package in `uv.lock` has a top-level module of that
