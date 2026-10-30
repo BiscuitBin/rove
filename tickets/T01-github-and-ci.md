@@ -1,7 +1,7 @@
 ---
 id: T01
 title: "GitHub and CI: workflows, settings, branch protection"
-status: open
+status: done
 depends_on: [T00]
 parallel_with: [T02, T03, T04]
 branch: ticket/t01-github-and-ci
@@ -694,8 +694,62 @@ so no second round runs; nothing was handed back. Only GET calls were made.
 | C2/B1 | medium | valid | step 10's `jq -e` assertion did not check `required_pull_request_reviews` or `restrictions` | assertion and projection extended, re-run with two negative controls, quoted above |
 | C3 | low | valid | call 3's PUT exit status was not quoted | recorded as a departure under call 3 |
 
+### Close-out (verification at `debdb10`, notes at `7bc4b65`)
+
+The verification block, read-only, at 2026-10-30T21:53:35Z (raw
+`ai_tmp/T01/verification-final.log`):
+
+```text
+$ rg -n 'uses: [^.]' .github; echo "exit $?"
+.github/actions/setup/action.yml:21:    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+.github/actions/setup/action.yml:49:    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+.github/actions/setup/action.yml:80:      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+.github/workflows/ci.yml:39:      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+.github/workflows/ci.yml:56:      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+.github/workflows/audit.yml:29:      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+exit 0
+$ rg -n 'uses: [^.]' .github | rg -v '@[0-9a-f]{40} # '; echo "exit $?"
+exit 1
+$ uv run --frozen prek run actionlint --all-files
+Lint GitHub Actions workflow files.......................................Passed
+exit 0
+$ gh pr checks 2 --repo BiscuitBin/rove
+audit   pass  19s  (runs/41133147022)
+check   pass  3s   (runs/41133146908)
+floor   pass  23s  (runs/41133146908)
+gate (macos-latest)   pass  45s  (runs/41133146908)
+gate (ubuntu-latest)  pass  26s  (runs/41133146908)
+exit 0
+$ gh api repos/BiscuitBin/rove/branches/main/protection/required_status_checks --jq '[.checks[] | {context, app_id}]'
+[{"app_id":15368,"context":"check"}]
+exit 0
+$ gh api repos/BiscuitBin/rove --jq '{delete_branch_on_merge, allow_auto_merge}'
+{"allow_auto_merge":false,"delete_branch_on_merge":true}
+exit 0
+```
+
+Run `41133146908` tested `debdb10`, PR #2's head. `just check` last ran green on the
+working tree that became `debdb10` (`All checks passed and the worktree is unchanged.`,
+exit 0); it was not rerun for this notes-only commit, because another ticket had
+uncommitted edits in the shared worktree; the changed ticket files passed `prek run
+--files`.
+
+Acceptance criteria and their evidence: CI green on the pull request, `audit` not
+required (above, and "Step 7, green run"); `floor` on Python 3.13 with no
+`biscuit-games-tooling` install ("Step 7, green run"); every remote `uses:` SHA-pinned,
+with its positive control (above); protection requires exactly `check` from app 15368,
+read back ("Part 3 evidence" and above); §12 claims 1, 6 and 11 ("Step 7, green run");
+the three adversarial reviews ran, every valid finding applied, none handed back.
+
+**Carried.** Step 11, the merge of PR #2 and the first `ci.yml` run on `main`, is a
+maintainer stop that happens with T06's merge; it is carried to T06's merge stop,
+which quotes that run. Under the single-branch decision there is no separate closing
+pull request: `status: done` lands on `bootstrap`. The open point below is carried to
+the maintainer.
+
 ## Open points
 
 - Whether macOS should stay in every pull request's matrix once the gate is stable, or
   move to `main` pushes only. The maintainer decides after seeing step 7's timings,
-  quoted per job.
+  quoted per job. Carried to the maintainer: timings in run `41133146908` are floor
+  23s, ubuntu 26s, macOS 45s (warm caches).

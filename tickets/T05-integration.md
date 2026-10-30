@@ -523,6 +523,27 @@ exit 0
 One untested statement alone does not breach it: coverage rounds the total to its
 precision (0) before comparing, and 20 of 21 units rounds to 95.
 
+### Protection read-back after T01's step 9 (2026-10-30T21:53:35Z)
+
+T01 applied protection with the maintainer's authorisation (T01's "Part 3 evidence").
+Step 6's read-back now:
+
+```text
+$ gh api repos/BiscuitBin/rove/branches/main/protection/required_status_checks --jq '[.checks[] | {context, app_id}]'
+[{"app_id":15368,"context":"check"}]
+exit 0
+```
+
+This matches T01's hand-back: `check` alone, from the GitHub Actions app. The
+part B open point (protection absent) is closed. CI on PR #2's head `debdb10`: run
+`41133146908` (`check`, both `gate` legs, `floor`) and `41133147022` (`audit`), all
+`pass`.
+
+**Status.** Every acceptance criterion has evidence except "CI is green on `main` after
+merge", which exists only after the maintainer merges PR #2. That merge happens with
+T06's merge stop, so the criterion is carried there, and `status:` stays `open` until
+the first `ci.yml` run on `main` is quoted.
+
 ## Open points
 
 None at writing; step 2 may add some.
@@ -530,6 +551,6 @@ None at writing; step 2 may add some.
 - Carried from part A: README `blob/main` links (T04); `_typos.toml` `mis`/`als`
   (kept while tickets quote them); the rest of T04's re-check list, for the adversarial
   review; the maintainer decisions listed at the end of part A.
-- Protection on `main` is absent (part B read-back, HTTP 404 `Branch not protected`);
-  applying it is T01 steps 9 to 11, for the maintainer.
-- Step 7's adversarial review and step 8's merge and post-merge run on `main` are not done.
+- Protection on `main`: closed, applied by T01 and read back above.
+- Step 7's adversarial review ran (T05-1, recorded above). Step 8's merge and the first
+  `ci.yml` run on `main` are not done: carried to T06's merge stop.
