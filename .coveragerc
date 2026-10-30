@@ -2,6 +2,10 @@
 branch = True
 source_pkgs = rovo
 parallel = True
+# Measure the Python subprocesses the tests start (the API probe, the console
+# script, python -m rovo); without it only in-process lines count. INI syntax:
+# one value, not the TOML list form (CONVENTIONS.md §12 claim 9).
+patch = subprocess
 
 [report]
 show_missing = True

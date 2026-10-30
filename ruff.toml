@@ -35,5 +35,9 @@ ban-relative-imports = "all"
   "S603",   # The wheel smoke runs sys.executable with fixed arguments, without a shell.
 ]
 
-# All formatter settings retain their defaults.
+# Formatter settings retain their defaults, except its file set. ruff 0.17 also
+# formats Python blocks inside Markdown; those blocks are quotations (tickets
+# embed verbatim content, docs pages belong to their lanes and markdownlint),
+# and `just format` must never rewrite prose. Lint never reads Markdown.
 [format]
+exclude = ["*.md"]
