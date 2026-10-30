@@ -12,13 +12,14 @@ description: Review a change in this repository against its invariants, specific
      reverse, and `scripts/wheel_smoke.py api` still proves it on a wheel installed
      without dependencies.
    - The public API is exactly `__all__` in `src/rovo/__init__.py`; a new public name
-     without an `__all__` entry, or an `__all__` entry starting with `_`, is a finding,
-     and `src/rovo/py.typed` still ships.
+     without an `__all__` entry, or an `__all__` entry with a single leading `_` (a
+     private name; a dunder such as `__version__` is public), is a finding, and
+     `src/rovo/py.typed` still ships.
    - The version is written once, in `pyproject.toml`; a literal version under `src/`,
      `tests/` or `scripts/` is a finding.
    - ruff `select = ["ALL"]` and mypy strict stand; every `# noqa` and
-     `# type: ignore` names its rule and a reason, and every per-file ignore in
-     `ruff.toml` carries a comment.
+     `# type: ignore` names its rule and a reason, and every per-file or global ignore
+     in `ruff.toml` carries a comment.
    - Coverage of `src/rovo/**` stays at or above the `Justfile`'s floor, reached by
      tests, never by lowering the floor.
    - `uv.lock` is the pin: runtime dependencies are compatible ranges with a tested

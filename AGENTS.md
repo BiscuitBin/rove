@@ -51,7 +51,9 @@ release and a repository setting are each separately authorized. Destructive ope
 inside the worktree, such as discarding changes or deleting a branch, need the same
 authorization. The network recipes are `just initialize`, `just sync`, `just lock`,
 `just lock-upgrade`, `just install-hooks`, `just audit` and `just check-links-online`;
-each runs only when the task authorizes it, and `just check` never needs the network.
+each runs only when the task authorizes it. Once `just initialize` or `just sync` has run
+against the current `uv.lock`, `just check` needs no network; after `uv.lock` changes,
+run `just sync` (authorized) first.
 Never read, print or commit a credential. Scratch notes and intermediate output go in
 `ai_tmp/`, never in a commit. Work on one ticket per worktree. Hooks are never installed
 from a secondary worktree; the primary checkout runs `just install-hooks` once. Stop and

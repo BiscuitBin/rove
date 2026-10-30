@@ -16,12 +16,15 @@ description: Diagnose and repair a failing quality gate at its root instead of s
      `validate-agents` to `check-agents`. For the rest (whitespace, Markdown, typos,
      links, shell, workflows, secrets), run `just fix` for automatic repairs, then fix
      the remainder by hand. Remove a secret ripsecrets found; never allowlist it.
-     The hooks see only files Git tracks, so a new file is linted once it is added.
+     Hooks that take file names see only files Git tracks, so they check a new file
+     once it is added; `py-lint` and `py-typecheck` scan the tree themselves and already
+     see an untracked file.
    - `py-lint` — a ruff finding or unformatted code. Run `just format`, then fix the
      rest by hand. A rule wrong for one line gets `# noqa: RULE  reason`; a per-file
-     ignore in `ruff.toml` carries a comment. "ruff did not see the package" means an
-     exclude emptied the gate. Leave `tests/fixtures/py-lint-violation/ruff.py` failing:
-     it is the positive control.
+     ignore in `ruff.toml` carries a comment. Never add a rule to the global `ignore`
+     list in `ruff.toml` without a comment and a review. "ruff did not see the
+     package" means an exclude emptied the gate. Leave
+     `tests/fixtures/py-lint-violation/ruff.py` failing: it is the positive control.
    - `py-typecheck` — a mypy error under strict. Run `just py-typecheck` and fix the
      type; a `# type: ignore[code]` carries a reason, and `mypy.ini` stays strict.
      Leave `tests/fixtures/py-lint-violation/mypy.py` failing: it is the positive control.

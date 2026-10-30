@@ -187,6 +187,62 @@ that contain a slash or name a file were tested with `test -e`, resolving
   Their commits exist: `git -C <clone> cat-file -e c8e1a46^{commit}` on A and the same
   for `ccdd001` on L each exit 0.
 
+Re-run after the §14 review fixes (working tree on `72b9efa`, before the fix commit):
+`AGENTS.md` is now 1031 words (B1's scoped network sentence added 18); the recipe
+`comm -23` again printed nothing and exited 0; 119 unique code spans, of which
+46 are paths (the 45 above plus `src/`, added by `c4c00d9`). Each path with its `test -e`
+exit, after resolving `rovo/__init__.py` under `src/`, `scripts/wheel_smoke.py api` to
+the script and `src/rovo/**` to `src/rovo`; the five exits of 1 are the five above:
+
+```text
+0 .agents/skills/
+0 .claude/
+0 .claude/skills/
+0 .codex/
+0 .codex/skills/
+0 .github/copilot-instructions.md
+0 .python-version
+0 .venv/
+0 AGENTS.md
+0 ai_tmp/
+1 BiscuitBin/alliumpy
+0 CHANGELOG.md
+0 CLAUDE.md
+0 docs/
+0 docs/decisions/
+0 docs/decisions/0005-dependency-policy.md
+0 docs/manifest.yml
+0 docs/README.md
+0 docs/reference/api.md
+0 docs/reference/cli.md
+0 docs/reference/documentation-contract.md
+1 docs/specs/
+0 Justfile
+0 mypy.ini
+1 py.typed
+0 pyproject.toml
+0 rovo/__init__.py
+0 ruff.toml
+0 scripts/
+0 scripts/wheel_smoke.py api
+1 SKILL.md
+0 src/
+0 src/rovo/
+0 src/rovo/__init__.py
+0 src/rovo/**
+0 src/rovo/cli.py
+0 src/rovo/py.typed
+1 steven-cutting/libpawdoku
+0 tests/
+0 tests/fixtures/
+0 tests/fixtures/py-lint-violation/mypy.py
+0 tests/fixtures/py-lint-violation/ruff.py
+0 tests/test_api.py
+0 tickets/
+0 tickets/CONVENTIONS.md
+0 uv.lock
+```
+
 The other code spans name recipes, skills, hook ids (`py-lint`, `py-typecheck`,
 `validate-docs` and `validate-agents` are each an `id:` in `.pre-commit-config.yaml`),
 `bg-validate-docs` (executable in `.venv/bin/`), Python names and literal output.
@@ -226,8 +282,9 @@ the same `rg` printed the `-description:` and `+description:` lines and exited 0
   first command. Dropped with their gates: `check-toolchain`, `fmt-check`, `toml-check`,
   `clippy`, `metrics`, `features`, `test-doc`, `doc`, `deny`, `deps-unused`,
   `py-test`, `py-stubtest`, `version-check`, `snapshots-check`. A pytest failure now
-  routes through `coverage`, which runs the suite. Added: the `lint` hooks see only
-  tracked files (T00 Open points), and `check-clean` is named in step 5 rather than given
+  routes through `coverage`, which runs the suite. Added: the `lint` hooks that take
+  file names see only tracked files, while `py-lint` and `py-typecheck` scan the tree
+  (T00 Open points; scoped after the §14 review), and `check-clean` is named in step 5 rather than given
   a dispatch line, since it is not one of the eight gates.
 - `project-check`: pixi, rustup, `.tools/bin` and the twenty-two gates become uv, just,
   git, cargo for the ripsecrets hook, `.python-version` and the eight gates plus
@@ -247,7 +304,9 @@ paragraph instead, and `plan-change` also from the dependency block). Dropped fr
 core: the nested-`AGENTS.md` sentence and "read the whole diff before reporting", to
 stay near the word budget. Added: "a tag, a release and a repository setting are each
 separately authorized", organisation settings, GitHub App installs and installs outside
-the worktree in the authority list (§11), and "`just check` never needs the network".
+the worktree in the authority list (§11), and that `just check` needs no network once
+`just initialize` or `just sync` has run against the current `uv.lock` (first written
+as "never needs the network"; scoped after the §14 review).
 `AGENTS.md` writes American "authoriz-" throughout, because B's phrase is
 `explicit authorization`.
 
@@ -261,12 +320,46 @@ a failing gate or hand-back (`fix-quality`, `project-check`). `plan-change` and
 blocks: identity paragraph, project map, authority paragraph, hand-back rule and
 Provenance. No settled fact contradicts §7.
 
-### Adversarial review
+### Adversarial review, checkpoint 1 (step 5)
 
-Not run by this agent: the orchestrator runs §14 at step 5's checkpoint over
-`git diff 69f0d14...HEAD`. The record goes here when it has run.
+Run by the orchestrator under §14 over `git diff 69f0d14...HEAD` at `72b9efa`: two
+fresh-context Codex reviewers on `gpt-6-astra`, one per lens (conformance, breakage),
+then separate triage subagents that applied the valid fixes one at a time. Raw files:
+`ai_tmp/review/T03-1/`; verdicts: `ai_tmp/review/T03-1/verdicts.md`. Seven findings,
+six valid (none high), one invalid, so no second round.
+
+| Id | Severity | Verdict | Action |
+| --- | --- | --- | --- |
+| C1 | medium | valid: `review-change` flagged any `__all__` entry starting with `_`, which would flag `__version__` | applied: only a single leading `_` is private; a dunder is public |
+| B2 | medium | valid: duplicate of C1 | applied through C1's edit |
+| C2 | medium | valid: A's "no global ruff ignore without a comment and a review" was dropped without being listed | applied in `fix-quality` and `review-change` |
+| C3 | low | valid: "hooks see only tracked files" is false for `py-lint` and `py-typecheck`, which scan the tree | applied in `fix-quality` and these notes |
+| C4 | low | valid: the path list was counted, not quoted | applied: the re-run paragraph quotes every tested path |
+| B1 | medium | valid: "`just check` never needs the network" is false; `uv run --frozen` syncs after a `uv.lock` change or on a cold cache | applied: `AGENTS.md` scopes the claim to an environment synced against the current `uv.lock`; frozen parts handed back below |
+| B3 | medium | invalid: a probe with the real recorder shows `import rovo.cli` is recorded; argparse is standard library, outside the smoke's contract | none |
+
+Re-run after the fixes, on the uncommitted tree at `72b9efa` that was then committed as
+`T03: §14 review fixes`: `just check-agents` printed
+`Validated AGENTS.md, 2 adapters, and 6 skills.` (exit 0); `comm -23` of the named
+recipes against `just --summary` printed nothing (exit 0); the wrapped-reference search
+printed nothing (exit 1); 46 code-span paths tested, the misses exactly the five
+explained above; each B phrase still on a line outside every block (`untrusted` 1,
+`just check` 4, `explicit authorization` 1, `ai_tmp/` 2, `docs/specs/` 1, `runes` 1);
+`AGENTS.md` is 1031 words. The orchestrator approved the fast-forward from `61f2357` to
+`69f0d14`.
+
+### Hand-backs to T05 (frozen files)
+
+- `Justfile` (§14 T03-1 B1): the gate recipes run `uv run --frozen`, which still syncs
+  the environment, over the network, when `uv.lock` changed or the cache is cold, so
+  `just check` can reach the network. Proposed: `--offline` or `--no-sync` on the gate
+  recipes so the gate fails closed, and then the unconditional sentence returns to
+  `AGENTS.md`.
+- `scripts/initialize.sh` (§14 T03-1 B1): in the secondary-worktree branch,
+  `uv run --frozen prek run lychee --files README.md || :` hides a failed lychee binary
+  download as well as lychee's verdict. The fix T00's Open points propose for
+  `install-hooks` applies here too: check afterwards that the binary exists.
 
 ## Open points
 
-- The §14 review at step 5 is pending; `status:` stays `open` until it has run and its
-  valid findings are fixed or handed back.
+None. The two frozen-file follow-ups above are handed back to T05.
