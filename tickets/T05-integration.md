@@ -322,6 +322,73 @@ step 9); decision 0006's licence options (T04); whether macOS stays in every pul
 request's matrix (T01; timings above); T01 steps 9 to 11 (protection now has a green
 `check` to name); Renovate's org-wide `repository_selection: all` (T06).
 
+### Part B: fresh clone, read-back, freeze lift, index (orchestrator brief, 2026-10-30)
+
+Scope: steps 5 to 7 up to, not including, the adversarial review. `RUSTUP_TOOLCHAIN=stable`
+exported throughout (departure as in part A). Commits: `8777c90` (§11 freeze lifted),
+`165874d` (README status column from each ticket's frontmatter: T00, T02 to T04 `done`;
+T01, T05, T06 `open`). `develop-locally.md`'s "once" was already fixed in `06b48a2`.
+
+**Fresh clone** (`ai_tmp/T05/fresh-b.sh`, raw `ai_tmp/T05/fresh-b.log`): `git clone -b
+bootstrap` of the worktree into `ai_tmp/fresh`, with `UV_CACHE_DIR` and `PREK_HOME`
+pointed at new empty directories under `ai_tmp/T05/`:
+
+```text
+worktree HEAD 06b48a2
+clone exit 0
+clone HEAD 06b48a2
+uv cache entries:        0; prek entries:        0
+## just initialize
+Using CPython 3.14.8
+lychee 0.24.2 warmed: …/ai_tmp/T05/prek-cold-b/repos/909c8f3d3d713742/.cargo/bin/lychee-0.24.2
+Ready. Next: just check.
+initialize exit 0
+## just check
+TOTAL                     17      0      2      0   100%
+wheel_smoke cli: rovo 0.0.0, from python -m rovo and the console script alike
+All checks passed and the worktree is unchanged.
+check exit 0
+## git status --short
+status lines        0
+```
+
+The `floor` recipes, same clone, `UV_PYTHON=3.13 UV_NO_GROUP=tooling just py-lint
+py-typecheck coverage wheel-smoke`:
+
+```text
+Using CPython 3.13.13
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
+TOTAL                     17      0      2      0   100%
+Using Python 3.13.13 environment at: target/wheel-smoke/venv
+wheel_smoke api: rovo 0.0.0, no CLI module imported, exactly the four package files and the expected metadata
+wheel_smoke cli: rovo 0.0.0, from python -m rovo and the console script alike
+floor exit 0
+## git status --short after floor
+status lines        0
+```
+
+`ai_tmp/fresh` was then deleted. `8777c90` and `165874d` change only `tickets/`, after
+the clone's `HEAD`.
+
+**Protection read-back** (at `06b48a2`; read-only, nothing applied; T01 steps 9 to 11
+await the maintainer, and T01 owns the apply):
+
+```text
+$ gh api repos/BiscuitBin/rove/branches/main/protection/required_status_checks --jq '[.checks[] | {context, app_id}]'
+{"message":"Branch not protected","documentation_url":"https://docs.github.com/rest/branches/branch-protection#get-status-checks-protection","status":"404"}gh: Branch not protected (HTTP 404)
+exit 1
+$ gh api repos/BiscuitBin/rove/branches/main/protection
+{"message":"Branch not protected",…,"status":"404"}gh: Branch not protected (HTTP 404)
+exit 1
+$ gh api repos/BiscuitBin/rove --jq '.permissions.admin'
+true
+$ gh api repos/BiscuitBin/rove/rulesets --jq 'length'      → 0, exit 0
+$ gh api repos/BiscuitBin/rove/rules/branches/main --jq 'length'  → 0, exit 0
+```
+
+The 404 names absence and the token is admin, so protection is absent, matching T01's
+notes (nothing sent). Carried as an open point.
+
 ## Open points
 
 None at writing; step 2 may add some.
@@ -329,3 +396,6 @@ None at writing; step 2 may add some.
 - Carried from part A: README `blob/main` links (T04); `_typos.toml` `mis`/`als`
   (kept while tickets quote them); the rest of T04's re-check list, for the adversarial
   review; the maintainer decisions listed at the end of part A.
+- Protection on `main` is absent (part B read-back, HTTP 404 `Branch not protected`);
+  applying it is T01 steps 9 to 11, for the maintainer.
+- Step 7's adversarial review and step 8's merge and post-merge run on `main` are not done.
