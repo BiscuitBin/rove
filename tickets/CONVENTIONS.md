@@ -119,7 +119,10 @@ Facts, each verified on 2026-10-29, that shape the mechanism:
 9. **`uv export --frozen --no-default-groups --no-emit-project`** lists exactly the
    runtime closure (typer and seven other packages: four of typer's own requirements,
    colorama among them under its Windows marker, and three that rich pulls in; T04's
-   hand-back corrected "five dependencies", T05) and leaves out both groups; `--no-dev` alone would keep the `tooling` group. `uv build
+   hand-back corrected "five dependencies", T05) and leaves out both groups; `--no-dev`
+   alone would keep the `tooling` group. The gate no longer uses it: since T05,
+   `wheel-smoke` installs the closure with `uv sync` (§4), because an install from the
+   exported list needs index pages that no cache holds on a fresh clone. `uv build
    --offline --wheel` built `rovo-0.0.0-py3-none-any.whl` from a warm cache.
 
 ## 2. Toolchain and pins
@@ -738,12 +741,16 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   "0.13.6"`, its cache keyed on `uv.lock`), then just with
   `uv tool install rust-just==1.59.0` and `uv tool dir --bin` appended to
   `$GITHUB_PATH`, then `just sync`, then restores prek's hook cache keyed on the hash of
-  both prek configurations and `uv.lock`, which pins prek, then runs `just install-hooks`, as A's action does: on a cold
-  cache it builds every hook environment and warms lychee, which downloads its binary at
+  both prek configurations and `uv.lock`, which pins prek, then runs `just install-hooks`,
+  as A's action does, with the run's `github.token` as `GITHUB_TOKEN` on that step
+  alone (lychee's cargo-binstall otherwise shares the runner's anonymous API limit): on
+  a cold cache it builds every hook environment and warms lychee, which downloads its binary at
   first run (§4), so that no later step reaches the network (§11). `install-hooks` fails
   unless lychee's pinned binary is present (§4 `warm-lychee`, which retries the
-  download), so the action needs no presence check of its own. The shim it writes into
-  the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
+  download), so the action needs no presence check of its own. The cache is restored
+  with `actions/cache/restore` and saved with `actions/cache/save` as soon as the hooks
+  are warm, on a miss, so a later red step never leaves the next run cold (T05). The
+  shim it writes into the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
   `UV_PYTHON`.
 - **`ci.yml` jobs.** `gate`, a matrix over `ubuntu-latest` and `macos-latest` on
   Python 3.14, runs `just check`, the full gate with B. `floor`, on `ubuntu-latest`
@@ -864,8 +871,8 @@ the last column is its outcome and the ticket whose hand-back notes hold the evi
 | 1 | The `tooling` group's own floor locks, syncs and runs on the real `pyproject.toml` as on the scratch project of §1 fact 1, and `UV_NO_GROUP=tooling` with `UV_PYTHON=3.13` runs every `floor` recipe | `uv lock`, `just sync`, then the `floor` recipes under those variables | T00, T01 | Holds. Local: T00 part 1, T01 step 6. CI: T05, `floor` green at `0d75e51` (run 41018370415), all five recipes on 3.13.18 |
 | 2 | `uv lock --check --offline` passes on a warm cache with B as a git source, and fails on a stale lock | `just lock-check`, then with a pin edited in a scratch copy | T00 | Holds: T00 part 1 |
 | 3 | `uv build --offline` finds `hatchling==1.33.0` in the cache after `just sync` on a fresh clone | `just build` under §11's network denial | T00 | Holds. Warm: T00 part 1 step 6. Cold: T05, an empty `UV_CACHE_DIR` under the denial, and the macOS `gate` leg on a missed uv cache |
-| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv pip install --offline --require-hashes -r` (from the cache) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 | Failed on a cold cache: the `-r` install needs index pages `just sync` never caches (T01 run 2, H2). T05 `9af0452` replaced that step with `uv sync` into the smoke venv, which holds cold under the denial on 3.14 and 3.13 (T05) |
-| 5 | `uv export` writes no file outside `-o` and does not touch `uv.lock` | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 | Held (T00 part 1). `wheel-smoke` no longer runs `uv export` (T05 `9af0452`); `git status` and the `uv.lock` checksum are unchanged around T05's cold run |
+| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv sync --frozen --offline --no-default-groups --no-install-project --inexact` into the smoke venv (from the cache; until T05, `uv pip install --offline --require-hashes -r`, falsified on a cold cache in CI runs 41016347749 and 41017013414) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 | Failed on a cold cache: the `-r` install needs index pages `just sync` never caches (T01 run 2, H2). T05 `9af0452` replaced that step with `uv sync` into the smoke venv, which holds cold under the denial on 3.14 and 3.13 (T05) |
+| 5 | The smoke's `uv sync` writes nothing outside `target/` and does not touch `uv.lock` (until T05: `uv export` writes no file outside `-o`) | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 | Held (T00 part 1). `wheel-smoke` no longer runs `uv export` (T05 `9af0452`); `git status` and the `uv.lock` checksum are unchanged around T05's cold run |
 | 6 | prek builds the ripsecrets hook with the machine's cargo, and the macOS and Ubuntu runners have one | `just install-hooks`, then T01's first `gate` run on each OS | T00, T01 | Holds. Recipe: T00 part 4 (fresh clone). Runners: Ubuntu, T01 runs 1 and 2 (rustc 1.99.1, the runner's rustup); macOS, T05 run 41018370415 on a cold prek cache (1.99.1, `/opt/homebrew/opt/rustup/bin/rustc`) |
 | 7 | `ruff check` and `mypy` lint an explicitly named file that their config excludes, so the positive controls fire | each recipe, then with the fixture's violation removed in a scratch copy (for ruff, `F401` and `E501` in turn) | T00 first, T02 | Holds: T00 part 1, T02 step 2 |
 | 8 | `rovo.cli:app` as a console-script target runs the Typer app, and `--version` as an eager callback option exits 0 before `no_args_is_help` | `just wheel-smoke`'s last line; `rovo` alone prints help and exits as Typer documents | T00 | Holds: T00 part 1; T02 pins bare `rovo` at exit 2 |

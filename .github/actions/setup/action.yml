@@ -42,8 +42,12 @@ runs:
     # prek's own cache directory, outside the workspace, so check-clean's
     # snapshot never sees it: the hook clones, their toolchains and the
     # ripsecrets build, which a cold run would otherwise fetch. Keyed on both
-    # hook configurations and on uv.lock, which pins prek; saved on any branch.
-    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # hook configurations and on uv.lock, which pins prek. Restored here and
+    # saved explicitly once the hooks are proven warm (below), not by the
+    # action's post step, which saves only when the whole job succeeds: a
+    # later red `just check` would otherwise leave every run cold.
+    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      id: prek-cache
       with:
         path: ~/.cache/prek
         key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
@@ -52,8 +56,15 @@ runs:
     # cold one, `just check` would fetch every hook environment and lychee.
     # The recipe fails unless lychee's pinned binary is present (warm-lychee,
     # which retries the download), so no later step reaches the network.
+    # The run's own token, on this step only: lychee's cargo-binstall asks
+    # GitHub's API for the release, and without a token it shares the
+    # runner's per-IP limit of 60 requests an hour, whose exhaustion ends in
+    # a failed `cargo install` fallback (exit 100) on macOS. The workflow's
+    # `contents: read` bounds what the token can do.
     - run: just install-hooks
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
     # prek prints nothing when it builds a hook environment, so name the
     # ripsecrets binary it built with the runner's Rust, and that compiler.
     - run: |
@@ -62,3 +73,10 @@ runs:
         echo "ripsecrets built: $found"
         grep -o -E '"(language_version|toolchain)": *"[^"]*"' "${found%/bin/ripsecrets}/.prek-hook.json"
       shell: bash
+    # The hooks and lychee are warm (install-hooks and the step above would
+    # have failed otherwise), so save them now, whatever the gate does next.
+    - if: steps.prek-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/prek
+        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}

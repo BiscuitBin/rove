@@ -291,6 +291,20 @@ job logs (raw `ai_tmp/T05/run4-*.log`):
 `557f403` and `fc01d5c` (documents only: `CONVENTIONS.md`, `T00`'s note, these notes)
 were pushed after run 4; their run is quoted below if it differs.
 
+**After the CI diagnosis (`ai_tmp/ci-diag/PLAN.md`).** Run 4's macOS leg warmed lychee
+on its first try from a cold prek cache and saved it (`Cache saved with key:
+macOS-ARM64-prek-817c4e…`); run 5 (`b6dc55a`, `https://github.com/BiscuitBin/rove/actions/runs/41019047739`,
+all five green) restored it (`Cache restored from key: macOS-ARM64-prek-817c4e…`).
+The diagnosis found the earlier macOS failures were cargo-binstall's anonymous GitHub
+API limit (60 an hour per IP), which `warm-lychee`'s back-to-back retries share, and
+that `actions/cache` saves only when the whole job succeeds. So, as the orchestrator
+directed, the setup action now passes `github.token` as `GITHUB_TOKEN` to the
+`install-hooks` step alone (this supersedes "no token reaches hook builds" above), and
+splits the prek cache into `actions/cache/restore` (`id: prek-cache`) and
+`actions/cache/save` after the ripsecrets step on a miss. `CONVENTIONS.md` §10 follows,
+§12 claims 4 and 5 are restated for the new command, and §1 fact 9 says the gate no
+longer uses `uv export`.
+
 **Claim outcomes.** In `CONVENTIONS.md` §12's new column (`fc01d5c`). Claim 4 failed
 cold and its step was replaced; claim 5's command left the recipe; claim 12 is T06's.
 
