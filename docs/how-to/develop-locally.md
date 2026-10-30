@@ -39,7 +39,7 @@ The Git hook shim is installed from the primary checkout only, because every wor
 shares one `.git/hooks` and the shim names an absolute path into the worktree that
 installed it. In a secondary worktree `just initialize` says so and skips only the
 shim; it still prepares the hook environments. Run `just install-hooks` once from the
-primary checkout. Once the environments exist, `just check` runs offline.
+primary checkout; in a secondary worktree it refuses and changes nothing. Once the environments exist, `just check` runs offline.
 
 ## Which Python
 

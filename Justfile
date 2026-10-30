@@ -41,8 +41,11 @@ lock-check:
 # `just check` never fetches. A GITHUB_TOKEN (CI passes the run's) is for
 # warm-lychee's cargo-binstall API calls; the prepares compile ripsecrets, so
 # they run without it and no hook build script sees it.
+# Primary checkout only, by initialize's --git-common-dir test: the shim names
+# this worktree's .venv, and every worktree shares .git/hooks.
 install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
+    test "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" || { printf '%s\n' 'install-hooks: this is a secondary worktree, and every worktree shares .git/hooks; run it once from the primary checkout' >&2; exit 2; }
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
     env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
     env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml

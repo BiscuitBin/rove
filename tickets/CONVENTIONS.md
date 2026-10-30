@@ -329,8 +329,11 @@ lock-check:
 
 # The shim, then every hook environment, then lychee's binary, so that
 # `just check` never fetches.
+# Primary checkout only, by initialize's --git-common-dir test: the shim names
+# this worktree's .venv, and every worktree shares .git/hooks.
 install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
+    test "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" || { printf '%s\n' 'install-hooks: this is a secondary worktree, and every worktree shares .git/hooks; run it once from the primary checkout' >&2; exit 2; }
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
     uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
     uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
@@ -493,6 +496,11 @@ check:
 The recipes this document's §11 and `AGENTS.md` call **network recipes**: `initialize`,
 `sync`, `lock`, `lock-upgrade`, `install-hooks`, `audit`, `check-links-online`.
 
+`install-hooks` departs from A `Justfile`, which has no such test, in refusing to run
+in a secondary worktree: it exits 2 before touching anything when `git rev-parse
+--git-common-dir` and `--git-dir` differ, so the rule §5's `initialize.sh` applies
+holds for a direct `just install-hooks` too (final review F1).
+
 ## 5. Hooks and dotfiles
 
 `.pre-commit-config.yaml` is A `.pre-commit-config.yaml` with these deltas and no others:
@@ -608,7 +616,7 @@ frozen.
 - **`## Invariants`**, the six below verbatim, then A's authority paragraph adapted:
   anything leaving the worktree needs explicit authorization for each action; the
   network recipes of §4 by name; scratch in `ai_tmp/`; one ticket per worktree; hooks
-  never installed from a secondary worktree; `just check` is the proof, green as §11
+  never installed from a secondary worktree (the recipe itself refuses there); `just check` is the proof, green as §11
   defines it.
 - **Six `<important if="...">` blocks**: changing Python under `src/` or `tests/`;
   changing the command line; adding or moving a dependency; changing a page under
