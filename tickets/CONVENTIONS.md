@@ -805,8 +805,11 @@ reporting on. The maintainer may change any of it at the stop.
 - **No dependency is added in wave 1** beyond T00's. A lane that needs one hands it back.
 - **No path appears in two wave-1 lanes' Files touched.** An agent that needs another
   lane's file hands the change back instead.
-- **After T05 the frozen list lifts.** T06 may edit its own lines in any file and lists
-  each as `shared, own lines`.
+- **The freeze is lifted (T05).** The frozen list above bound wave 1 only. After T05,
+  any ticket, T06 included, may edit its own lines in a formerly frozen file and lists
+  each such file in its Files touched as `shared, own lines`. Tickets that share a file
+  merge one at a time, each rebased on the last; `uv.lock` is regenerated after a
+  rebase (`just lock`), never merged by hand.
 - **Self-contained.** A ticket embeds exact content or cites this document by section,
   and names the A, W, L or B material to read. It never cites a chat transcript, a
   scratch directory or a tool result.
