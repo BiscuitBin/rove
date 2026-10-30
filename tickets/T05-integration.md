@@ -544,6 +544,32 @@ merge", which exists only after the maintainer merges PR #2. That merge happens 
 T06's merge stop, so the criterion is carried there, and `status:` stays `open` until
 the first `ci.yml` run on `main` is quoted.
 
+### Final code review (bootstrap at `71011da`, 2026-10-30)
+
+Ten findings from the final code review, each checked by two adversarial verifiers.
+A finding was applied only when both verdicts held it real; each applied fix is its
+own commit with a negative and a positive control, and `just check` passed after the
+last (`090d25f`). Commands and exit codes: `ai_tmp/final-review/fix-log.md`.
+
+| Id | Finding | Verdicts | Outcome |
+| --- | --- | --- | --- |
+| F1 | `install-hooks` had no secondary-worktree guard; run there, it pointed the shared shim at that worktree's `.venv`. | real (low), real (medium) | Applied, `f234e9a`: the recipe exits 2 before touching anything when `--git-common-dir` and `--git-dir` differ. Refused in this worktree with the shared shim unchanged; installed in a scratch primary clone. |
+| F2 | `.markdownlint-cli2.jsonc`'s `globs: ["**/*.md"]` made every run lint, and `just fix` rewrite, every `.md` on disk, ignored ones included. | real (medium), real (medium) | Applied, `103e8b8`: `globs` removed. Scratch clone with defects in `.pytest_cache/` and `.claude/worktrees/`: old config failed on them (67 files linted for `README.md`), new one lints 1 file, 65 across `--all-files`, leaves them byte-identical under the fix config, and still fails a tracked `SECURITY.md` defect. |
+| F3 | `initialize.sh`'s secondary-worktree prepares kept `GITHUB_TOKEN` and `GH_TOKEN`, unlike `install-hooks`. | real (low), real (low) | Applied, `1524955`: both prepares run under `env -u`; `warm-lychee` keeps the token. Stub `uv`/`just` showed the tokens before and `unset` after. CONVENTIONS §4's `install-hooks` block now equals the `Justfile`. |
+| F4 | The maintain-dependencies how-to and decision 0008 said no gate compares lychee's rev comment with `LYCHEE_VERSION`, stale since `71011da`. | real (low), real (low) | Applied, `fcaad0b`: both say `install-hooks` fails on a mismatch and that nothing checks the SHA against the tag (a zeroed SHA passes the comparison; a changed comment fails it). |
+| F5 | `just check` runs py-lint, py-typecheck and the docs and agents checks twice (through `lint` and by name). | not real, not real | Not applied: CONVENTIONS §2/§4 fix the recipe list and order, §5 keeps the hooks, as A does; the repeats are read-only and deterministic. |
+| F6 | `floor` and `audit` run `install-hooks` though they run no hook. | not real, not real | Not applied: §10 has the setup action run `install-hooks` unconditionally with `python-version` its only input, as A's does. |
+| F7 | The lychee comment check is not in `just check`. | not real, real (low) | Not applied (split): §4 puts it in `warm-lychee`, and every CI setup fails on the drift, so it cannot merge. |
+| F8 | The prek cache key omitted the Python version, so the 3.13 floor and 3.14 Linux legs shared an entry whose python hook environment names an interpreter path. | real (low), real (low) | Applied, `090d25f`: restore and save keys carry `py<python-version>`. Rendered per job: floor `Linux-X64-prek-py3.13-…`, gate (ubuntu) and audit `…-py3.14-…`, where all three were one key before. Not yet run in CI. |
+| F9 | `floor` checks a clean tree with inline `git status --porcelain`, not a recipe. | not real, not real | Not applied: §10 prescribes it, because `check-clean` is B's and cannot run on 3.13. |
+| F10 | `cancel-in-progress: true` cancels a superseded `main` run and `check` then reports it failed. | not real, real (low) | Not applied (split): §10 requires A's `concurrency` block; nothing consumes a `main` run's result. |
+
+Maintainer action carried from F1: the shared shim at
+`/Users/scutting/projects/biscuitbin/rove/.git/hooks/pre-commit` still names this
+worktree's `.venv/bin/prek`. Once `main` has `f234e9a`, run `just install-hooks` once
+from the primary checkout (a network recipe, so it needs explicit authorization), and do
+it before this worktree is removed, or every commit fails.
+
 ## Open points
 
 None at writing; step 2 may add some.
