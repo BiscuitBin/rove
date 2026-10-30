@@ -50,9 +50,12 @@ def _fail(reason: str) -> int:
 def _api() -> int:
     recorder = _Recorder()
     sys.meta_path.insert(0, recorder)
-    import rovo  # noqa: PLC0415  The import is the test: it must run after the recorder.
-
-    sys.meta_path.remove(recorder)
+    try:
+        import rovo  # noqa: PLC0415  The import is the test: it must run after the recorder.
+    except ImportError as error:
+        return _fail(f"import rovo failed ({error}); it tried {sorted(set(recorder.seen))}")
+    finally:
+        sys.meta_path.remove(recorder)
     if recorder.seen:
         return _fail(f"import rovo tried to import {sorted(set(recorder.seen))}")
     if importlib.util.find_spec("typer") is not None:
