@@ -534,6 +534,81 @@ exit 0 on the expected shape. Committed as `T01: §14 checkpoint 2 fixes`. Resid
 the pull request's head moves before call 3, the green quote goes stale; the payload
 document says to re-read `check` first.
 
+### Part 3 evidence, steps 9 and 10 (PR head `490f48b`)
+
+The maintainer authorised calls 1 to 3 on 2026-10-30. Calls 1 and 2 were applied and
+read back by the orchestrator (`ai_tmp/T01/applied-calls-1-2.log`, quoted in full):
+
+```text
+2026-10-30 maintainer-authorised (AskUserQuestion): calls 1,2,3 approved.
+$ gh api -X PATCH repos/BiscuitBin/rove -F delete_branch_on_merge=true -F allow_auto_merge=false --jq '{delete_branch_on_merge, allow_auto_merge}'
+{"allow_auto_merge":false,"delete_branch_on_merge":true}
+exit 0
+$ gh api -X PUT repos/BiscuitBin/rove/private-vulnerability-reporting
+exit 0
+read-back: {"allow_auto_merge":false,"delete_branch_on_merge":true} exit 0 ; private-vulnerability-reporting enabled=true exit 0
+```
+
+Before call 3, `check` was re-read on the pull request's head, which matched the
+pushed branch tip:
+
+```text
+$ gh pr view 2 --json headRefOid --jq .headRefOid
+490f48b8f2f6563a4ce0fdf900a09f5223fa75be
+$ gh api repos/BiscuitBin/rove/commits/490f48b8f2f6563a4ce0fdf900a09f5223fa75be/check-runs --jq '.check_runs[] | select(.name == "check") | {name, conclusion, app_id: .app.id}'
+{"app_id":15368,"conclusion":"success","name":"check"}
+exit 0
+```
+
+The agent's call 3 was refused by the Claude Code permission system, so it was never
+sent; a read-back run alongside it gave the protection GET's 404 `Branch not
+protected` (exit 1) and the `jq -e` assertion `Cannot iterate over null`, exit 5. The
+maintainer then applied call 3 by hand, exactly as shown in step 9:
+`gh api -X PUT repos/BiscuitBin/rove/branches/main/protection --input
+ai_tmp/T01/protection.json`. Its response showed `checks` `[{context: check, app_id:
+15368}]`, `strict` false, `enforce_admins`, force pushes and deletions false. The
+orchestrator's read-back after it first failed closed (zsh `noclobber` kept the stale
+404 file: `GET exit 1`, `jq exit 5`), then passed (`GET exit 0`, `true`, `jq exit 0`).
+
+Step 10's read-back, the block in `ai_tmp/T01/step9-payloads.md` run verbatim at
+2026-10-30T21:43:02Z after removing the stale `ai_tmp/protection-after.json`:
+
+```text
+{"allow_auto_merge":false,"delete_branch_on_merge":true}
+exit 0
+true
+exit 0
+exit 0
+{
+  "required_status_checks": {
+    "url": "https://api.github.com/repos/BiscuitBin/rove/branches/main/protection/required_status_checks",
+    "strict": false,
+    "contexts": [
+      "check"
+    ],
+    "contexts_url": "https://api.github.com/repos/BiscuitBin/rove/branches/main/protection/required_status_checks/contexts",
+    "checks": [
+      {
+        "context": "check",
+        "app_id": 15368
+      }
+    ]
+  },
+  "enforce_admins": false,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+exit 0
+true
+exit 0
+```
+
+Changed from step 2's before-state: `delete_branch_on_merge` false to true; private
+vulnerability reporting false to true; protection on `main` from absent (HTTP 404) to
+`check` alone under app 15368, not strict, admins not enforced, force pushes and
+deletions off. `allow_auto_merge` stays false. Nothing else was sent. The step 10
+review (checkpoint 3) and step 11's merge are not done.
+
 ## Open points
 
 - Whether macOS should stay in every pull request's matrix once the gate is stable, or
