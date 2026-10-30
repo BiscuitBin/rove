@@ -64,7 +64,7 @@ outside `check`.
 | Recipe | Purpose |
 | --- | --- |
 | `check` | The complete gate (`bg-project-check run`): the eight recipes `pyproject.toml` lists, in order, with the worktree snapshotted between each, then `check-clean`. |
-| `check-clean baseline=""` | Compare the worktree with the snapshot taken at the start of the run; `check` calls it last. |
+| `check-clean baseline=""` | Standalone, require a clean Git worktree; given a baseline file (as `check` passes one, last), require the worktree to equal the snapshot taken at the start of the run. |
 
 The gate order is `lock-check`, `lint`, `py-lint`, `py-typecheck`, `coverage`,
 `wheel-smoke`, `check-docs`, `check-agents`. A green run ends with

@@ -316,6 +316,7 @@ rovo version extra      -> "Got unexpected extra argument(s) (extra)", exit 2
 | `just sync` | develop-locally, maintain-dependencies | 0, run with `UV_OFFLINE=1`; `uv.lock` checksum unchanged |
 | `UV_PROJECT_ENVIRONMENT=target/venv-3.13 UV_PYTHON=3.13 UV_NO_GROUP=tooling just lock-check py-lint py-typecheck coverage wheel-smoke` | develop-locally | 0 (run with `UV_OFFLINE=1` added; Python 3.13.13) |
 | `just fix` | develop-locally | 0, with every change staged first: the unstaged diff was empty afterwards, so it repaired nothing |
+| `just format` | develop-locally | 0 (checkpoint 2 fixes, on `3b282f3` plus the uncommitted fixes): `git diff` hash identical before and after, `70 files left unchanged` |
 
 The tutorial was followed start to finish on scratch copies (§11 "Scratch":
 `tests/test_cli.py` and `src/rovo/cli.py` saved to `ai_tmp/scratch/`, edited, run,
@@ -387,9 +388,43 @@ exit status 2 (T00's open point for T02).
 - The README's handbook links point at `https://github.com/BiscuitBin/rove/blob/main/...`.
   They resolve only once `bootstrap` reaches `main`; until then
   `just check-links-online` reports them. No relative link was used (PyPI).
-- `SECURITY.md` sends reports to GitHub's private vulnerability reporting. Whether it
-  is enabled was not read here (network, settings); T01 proposes turning it on (§10).
-  If it stays off, `SECURITY.md` needs another contact, a maintainer decision.
+- `SECURITY.md` sends reports to GitHub's private vulnerability reporting. T01's
+  step-2 read (`worktree-agent-ab299d2594d2110e5`, `tickets/T01-github-and-ci.md`
+  line 190) shows `.enabled` = `false`. Turning it on is T01 step 7 (separately
+  authorised, §11); until then the documented channel does not exist. If it stays off,
+  `SECURITY.md` needs another contact, a maintainer decision. Do not merge while the
+  setting reads `false` without one or the other.
+- The `Justfile` comment above `lock-upgrade` says the exact dev pins hold still, so
+  the upgrade moves only typer's tree and B's commit; the tools' own transitive
+  dependencies move too (`maintain-dependencies.md` now says so). The `Justfile` is
+  frozen (§11): for a T00 follow-up or T05.
+- `testing.md` (lines 61-62) says subprocesses are not measured. True on this branch's
+  `.coveragerc`, false on `bootstrap` `4c7191c` (T02 merged: `patch = subprocess`).
+  Not changed here, because this tree is not rebased and the page must match its own
+  `.coveragerc`. On rebase onto `bootstrap`: replace the sentence with "`patch =
+  subprocess` measures the Python subprocesses the tests start (the API probe under
+  `python -I`, the console script and `python -m rovo`), so their lines count toward
+  the total.", add `patch = subprocess` to `configuration.md`'s `.coveragerc` row, and
+  re-check `quality-gates.md` and `quality-philosophy.md`; otherwise this is a T05 item.
+
+Review record, checkpoint 2 (run by the orchestrator over `3b282f3`; verdicts in
+`ai_tmp/review/T04-2/verdicts.md`). Harness: Codex CLI 0.165.0, `-m gpt-6-astra`,
+read-only, one reviewer per lens; triage by separate subagents. Eleven raw findings,
+merged to eight; all valid, none high, so no second round:
+
+| Finding | Severity | Verdict | Outcome |
+| --- | --- | --- | --- |
+| C1+B1 | medium | valid: private vulnerability reporting reads `false` | handed back (T01 step 7, maintainer); open point |
+| C2+B2 | medium | valid once merged: `bootstrap`'s `.coveragerc` measures subprocesses | applied after the merge (Part 3) |
+| B3 | medium | valid: `lock-upgrade` also moves the tools' transitive dependencies | applied, `maintain-dependencies.md`; `Justfile` comment handed back |
+| C3 | low | valid: `check-clean` alone needs a clean worktree | applied, `commands.md` |
+| C4+B5 | low | valid: bare `rovo` prints help to stdout | applied, `cli.md` (C4's wording) |
+| C5 | low | valid: `just format` shown but not run | run, recorded above |
+| B4 | low | valid: hatchling is not in `uv.lock` | applied, `maintain-dependencies.md` |
+| B6 | low | valid: `rovo --version` prints `rovo 0.0.0`, not the bare version | applied, `api.md` |
+
+Re-run by the triage after the fixes: `just format` exit 0 (no diff), `just check-docs`
+exit 0, `just check` exit 0, ending `All checks passed and the worktree is unchanged.`
 
 **Gate and scope, on the staged tree before the commit:**
 
@@ -428,6 +463,11 @@ exit 0
 ```
 
 ## Open points
+
+- `SECURITY.md`'s reporting route: private vulnerability reporting reads `false` (T01
+  step 2). Either T01 step 7 enables it or the maintainer names a contact.
+- The rebase onto `bootstrap` (`4c7191c`) and the `testing.md` / `configuration.md`
+  subprocess-coverage edit that follows it (Hand-backs above).
 
 - The licence options to record in decision 0006, if the maintainer names any before
   this ticket runs.

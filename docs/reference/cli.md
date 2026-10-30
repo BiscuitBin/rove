@@ -48,7 +48,7 @@ distribution's metadata, so they always agree with the installed version.
 | Status | Meaning |
 | --- | --- |
 | 0 | Success: a version line or help was printed. |
-| 2 | Usage error: no command given, an unknown command (`No such command`), an unknown option (`No such option`), or an extra argument. The usage line and the error go to standard error. |
+| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), or an extra argument; for these three, the usage line and the error go to standard error. |
 
 Help is rendered by rich, in boxes sized to the terminal; the plain usage lines above
 are their text.

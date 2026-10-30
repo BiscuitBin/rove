@@ -21,7 +21,7 @@ $ uv run --frozen python -c 'import rovo; print(rovo.__all__)'
 
 | Name | Contract |
 | --- | --- |
-| `__version__: str` | The installed distribution's version, read with `importlib.metadata.version("rovo")` when `rovo` is imported. It equals `version` in `pyproject.toml` and the line `rovo --version` prints, for example `0.0.0`. |
+| `__version__: str` | The installed distribution's version, read with `importlib.metadata.version("rovo")` when `rovo` is imported. It equals `version` in `pyproject.toml`, for example `0.0.0`, and is what `rovo --version` prints after the program name (`rovo 0.0.0`). |
 
 ## What importing costs
 
