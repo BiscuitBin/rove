@@ -37,7 +37,7 @@ recipe, so it runs on every `just check`:
 | `py-lint` | `ruff check --show-files` must list `src/rovo/__init__.py`, because ruff exits 0 on no files. Then `tests/fixtures/py-lint-violation/ruff.py` must exist and ruff must reject it with exit status 1, naming `F401` and `E501`, the fixture's own violations. Exit 2 is a tool error, not a fired control. |
 | `py-typecheck` | mypy must reject `tests/fixtures/py-lint-violation/mypy.py` with exit status 1. Exit 2 is a usage or I/O error, not a fired control. |
 | `coverage` | `coverage erase` runs first, so no stale data file counts toward the floor. |
-| `wheel-smoke` | `dist/` is emptied before the build, and exactly one wheel must exist, so a stale wheel cannot be smoked. The first install has no dependencies, and a recording import finder fails the run if `import rovo` attempts any import outside `rovo` and the standard library. |
+| `wheel-smoke` | `dist/` is emptied before the build, and exactly one wheel must exist, so a stale wheel cannot be smoked. The first install has no dependencies, and a recording import finder fails the run if `import rovo` attempts any import outside `rovo` and the standard library. The installed file list and metadata must match exactly, so a wheel that ships tests, loses `py.typed` or gains a licence field fails. |
 
 `ruff.toml` and `mypy.ini` exclude the fixtures from normal discovery, so the package
 gates stay clean; both tools still check a file named explicitly, which is how the

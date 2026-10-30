@@ -40,10 +40,10 @@ one file.
 
 | File | What it sets |
 | --- | --- |
-| `ruff.toml` | `target-version = "py313"`, `line-length = 99`, `src = ["src", "tests"]`, the fixtures excluded from discovery; `select = ["ALL"]` with `COM812`, `ISC001` and `CPY001` ignored, each with its reason; Google docstrings; relative imports banned; per-file ignores for `tests/**` and `scripts/**`, each commented. |
-| `mypy.ini` | `strict = True` over `src`, `tests` and `scripts`, `python_version = 3.13`, the fixtures excluded, `warn_unused_ignores` and `warn_unused_configs`. |
+| `ruff.toml` | `target-version = "py313"`, `line-length = 99`, `src = ["src", "tests"]`, the fixtures excluded from discovery; `select = ["ALL"]` with `COM812`, `ISC001` and `CPY001` ignored, each with its reason; Google docstrings; relative imports banned; per-file ignores for `tests/**` and `scripts/**`, each commented; the formatter excludes `*.md`, so `just format` never rewrites Python quoted in Markdown. |
+| `mypy.ini` | `strict = True` over `src`, `tests` and `scripts`, `python_version = 3.13`, the fixtures excluded, `warn_unused_ignores`, `warn_unused_configs`, `warn_unreachable` and `warn_redundant_casts`. |
 | `pytest.ini` | `testpaths = tests`, strict configuration and markers, `xfail_strict`, warnings as errors. |
-| `.coveragerc` | `branch`, `source_pkgs = rovo`, `parallel`; the report's `show_missing` and excluded lines. The floor is the `Justfile`'s `coverage_floor`, never here. |
+| `.coveragerc` | `branch`, `source_pkgs = rovo`, `parallel`, and `patch = subprocess`, which measures the Python subprocesses the tests start; the report's `show_missing` and excluded lines. The floor is the `Justfile`'s `coverage_floor`, never here. |
 
 ## Hooks and text checks
 

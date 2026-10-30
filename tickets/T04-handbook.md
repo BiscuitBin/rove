@@ -398,14 +398,8 @@ exit status 2 (T00's open point for T02).
   the upgrade moves only typer's tree and B's commit; the tools' own transitive
   dependencies move too (`maintain-dependencies.md` now says so). The `Justfile` is
   frozen (§11): for a T00 follow-up or T05.
-- `testing.md` (lines 61-62) says subprocesses are not measured. True on this branch's
-  `.coveragerc`, false on `bootstrap` `4c7191c` (T02 merged: `patch = subprocess`).
-  Not changed here, because this tree is not rebased and the page must match its own
-  `.coveragerc`. On rebase onto `bootstrap`: replace the sentence with "`patch =
-  subprocess` measures the Python subprocesses the tests start (the API probe under
-  `python -I`, the console script and `python -m rovo`), so their lines count toward
-  the total.", add `patch = subprocess` to `configuration.md`'s `.coveragerc` row, and
-  re-check `quality-gates.md` and `quality-philosophy.md`; otherwise this is a T05 item.
+- `testing.md` said subprocesses are not measured, true before T02's `.coveragerc`
+  (`patch = subprocess`). Resolved in Part 3, after merging `bootstrap`.
 
 Review record, checkpoint 2 (run by the orchestrator over `3b282f3`; verdicts in
 `ai_tmp/review/T04-2/verdicts.md`). Harness: Codex CLI 0.165.0, `-m gpt-6-astra`,
@@ -462,12 +456,76 @@ $ printf '[x](docs/README.md)\n' | rg -n '\]\((?!https?://)' --pcre2   (positive
 exit 0
 ```
 
+Checkpoint 2 fixes committed as `3fb79fd`.
+
+### Part 3 evidence (merged with T02 and T03; base 6f05b67)
+
+`git merge --no-ff bootstrap` (`4c7191c`, carrying T02 and T03) merged cleanly as
+`6f05b67`; the lanes' paths are disjoint from this ticket's. The pages were then
+re-checked against the merged tree:
+
+- **Generated references.** `Justfile`, `pyproject.toml`, `uv.lock` and `src/` are
+  unchanged by the merge (`git diff --stat 69f0d14 HEAD -- src Justfile pyproject.toml
+  uv.lock` prints nothing). `just --summary` still equals `commands.md`'s 22 names
+  (`diff` exit 0); `rovo --help` still lists `--version`, `--help` and `version`;
+  `rovo.__all__` is still `['__version__']`. No change to `commands.md`, `cli.md` or
+  `api.md`.
+- **T03.** The merged `AGENTS.md` differs from `72b9efa` only in its network sentence
+  (`git diff --stat 72b9efa HEAD -- AGENTS.md`: 1 file, 4 lines); every block routes to
+  the skill `agent-contract.md`'s table names, and the six `description` lines are
+  unchanged. No change to `agent-contract.md`.
+- **T02, applied** (checkpoint 2's C2/B2 and what followed from it):
+  `testing.md` now describes the merged suite (the JSON probe and one test per
+  invariant, typer, rich and click; the 200-column `CliRunner` tests of `--help`, no
+  arguments and an unknown command; the out-of-process console-script and
+  `python -m rovo` tests; the wheel smoke's exact file-list, metadata and
+  console-script checks) and replaces the subprocess sentence with `patch =
+  subprocess`. `configuration.md` adds `patch = subprocess`, mypy's
+  `warn_unreachable` and `warn_redundant_casts`, and ruff's formatter `exclude =
+  ["*.md"]`. `quality-gates.md`'s wheel-smoke guard adds the exact files and metadata.
+  `test-and-debug.md` describes the shared probe fixture and the smoke's new failure
+  cases (`wheel_smoke: ...` on stderr). `architecture.md` and decision 0003 say "typer,
+  rich or click" where they said typer alone.
+- **Unchanged, still true:** `cli.md`'s no-argument exit 2 (T02 pins it in
+  `test_no_arguments_prints_help_and_exits_2`); `quality-philosophy.md` (ruff's three
+  ignores, `warn_unused_ignores`); `_typos.toml`'s `cpy` entry (decision 0006).
+
+```text
+$ just coverage   (merged tree)
+src/rovo/__init__.py       3      0      0      0   100%
+src/rovo/__main__.py       0      0      0      0   100%
+src/rovo/cli.py           14      0      2      0   100%
+TOTAL                     17      0      2      0   100%
+$ just check   (6f05b67 with the aligned pages staged)
+All checks passed and the worktree is unchanged.
+exit 0
+$ rg -n -i 'stub|T04 writes' docs README.md CHANGELOG.md SECURITY.md
+exit 1
+$ git diff --stat 69f0d14 HEAD -- docs/manifest.yml docs/README.md uv.lock
+(nothing)
+exit 0
+```
+
+**Acceptance criteria and their evidence.**
+
+- `just check-docs` green, and the frozen manifest and map unchanged: Part 3 above
+  (`just check` runs `check-docs`), compared against `69f0d14` (the `origin/main`
+  departure in Part 1).
+- No page describes itself as a placeholder: Part 3, with its positive control in
+  Part 2.
+- Every recipe in `commands.md` is in `just --summary`; every how-to command run with
+  its exit status, the exemptions listed as "shown, not run"; `uv.lock` unchanged:
+  Parts 2 and 3.
+- The README carries the licence sentence and no relative link: Part 2.
+- Both adversarial reviews ran, every valid finding applied or handed back: the two
+  review records.
+
 ## Open points
 
 - `SECURITY.md`'s reporting route: private vulnerability reporting reads `false` (T01
-  step 2). Either T01 step 7 enables it or the maintainer names a contact.
-- The rebase onto `bootstrap` (`4c7191c`) and the `testing.md` / `configuration.md`
-  subprocess-coverage edit that follows it (Hand-backs above).
-
-- The licence options to record in decision 0006, if the maintainer names any before
-  this ticket runs.
+  step 2). Either T01 step 7 enables it (the orchestrator puts it to the maintainer) or
+  the maintainer names a contact. `SECURITY.md` keeps pointing at it.
+- The licence options for decision 0006: none were named while this ticket ran, so the
+  record says "none listed yet"; the maintainer's licence decision supersedes it.
+- The hand-backs above (the `Justfile`'s `lock-upgrade` comment; README links that
+  resolve once `bootstrap` reaches `main`) and the T05 re-check list in Part 2.

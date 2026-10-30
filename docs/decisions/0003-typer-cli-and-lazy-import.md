@@ -26,7 +26,8 @@ imports `rovo`. The dependency runs one way: `rovo/__init__.py` never imports
 `python -m rovo` and `rovo` print the same program name.
 
 Two checks prove the boundary. `tests/test_api.py` imports `rovo` in a fresh
-`python -I` subprocess and asserts that `typer` is not in `sys.modules`.
+`python -I` subprocess and asserts that no module of typer, rich or click is in
+`sys.modules`.
 `just wheel-smoke` installs the built wheel with no dependencies into a new
 environment, then `scripts/wheel_smoke.py api` puts a recording finder at the head of
 `sys.meta_path`, imports `rovo`, and fails if any import was attempted outside `rovo`

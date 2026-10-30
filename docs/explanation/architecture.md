@@ -30,8 +30,8 @@ The command depends on the API, never the reverse. `import rovo` never imports
 `rovo.cli`, typer, or anything else outside the standard library, so a program that
 uses only the API never pays for the command line's start-up time or imports
 ([decision 0003](../decisions/0003-typer-cli-and-lazy-import.md)). Two checks hold the
-line: `tests/test_api.py` imports `rovo` in a fresh interpreter and asserts typer was
-not loaded, and the wheel smoke imports `rovo` from a wheel installed with no
+line: `tests/test_api.py` imports `rovo` in a fresh interpreter and asserts that
+no typer, rich or click module was loaded, and the wheel smoke imports `rovo` from a wheel installed with no
 dependencies while recording every import attempted outside `rovo` and the standard
 library.
 

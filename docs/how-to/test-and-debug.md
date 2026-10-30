@@ -34,8 +34,10 @@ Framework configuration and conventions are described in
    one test triggers fails it.
 2. Read the assertion's left and right. A `CliRunner` test puts the command's output in
    the assertion message, so a usage error such as `No such command` is printed there.
-3. `tests/test_api.py` runs its probe in a fresh `python -I` subprocess, so its failure
-   message is that subprocess's stderr: read the traceback there, not pytest's.
+3. `tests/test_api.py` runs its probe once, in a fresh `python -I` subprocess shared by
+   its three tests. If the probe itself fails, every test there errors in the same
+   fixture, and the message is the subprocess's stderr: read the traceback there, not
+   pytest's.
 4. Do not weaken an assertion to make it pass. Correct the code, or, when the
    expectation itself was wrong, say why in the change.
 
@@ -62,12 +64,15 @@ Never lower `coverage_floor` in the `Justfile`; lower the complexity instead.
 `just wheel-smoke` empties `dist/`, builds the sdist and the wheel, and installs the
 wheel into `target/wheel-smoke/venv` twice over. Its output says which step failed:
 
-- `wheel_smoke api: ...` failing means `import rovo`, from a wheel installed with no
-  dependencies, tried to import something outside `rovo` and the standard library, or
-  `py.typed` or the version metadata is missing. Look for an import added to
-  `src/rovo/__init__.py` or to a module it imports.
-- `wheel_smoke cli: ...` failing means `python -m rovo --version`, with the locked
-  runtime closure installed, did not print `rovo <version>`.
+- `wheel_smoke: ...` during the first step means `import rovo`, from a wheel installed
+  with no dependencies, tried to import something outside `rovo` and the standard
+  library, or the installed files or metadata differ from what the wheel should carry
+  (four package files, `py.typed` among them, the console script, the upload guard, no
+  licence field). Look for an import added to `src/rovo/__init__.py` or to a module it
+  imports, or a change to `pyproject.toml`'s build tables.
+- `wheel_smoke: ...` during the second step means `python -m rovo --version` or the
+  installed `rovo --version`, with the locked runtime closure installed, did not print
+  `rovo <version>`, or the two printed different lines.
 - `expected one wheel in dist/` means the build produced none, or more than one.
 
 The environment stays in `target/wheel-smoke/venv` after a run, so you can run
