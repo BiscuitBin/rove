@@ -765,7 +765,8 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   "0.13.6"`, its cache keyed on `uv.lock`), then just with
   `uv tool install rust-just==1.59.0` and `uv tool dir --bin` appended to
   `$GITHUB_PATH`, then `just sync`, then restores prek's hook cache keyed on the hash of
-  both prek configurations and `uv.lock`, which pins prek, then runs `just install-hooks`,
+  both prek configurations and `uv.lock`, which pins prek, and on the `python-version`
+  input (a python hook environment records its interpreter's path), then runs `just install-hooks`,
   as A's action does, with the run's `github.token` as `GITHUB_TOKEN` on that step
   alone (lychee's cargo-binstall otherwise shares the runner's anonymous API limit), and
   the recipe unsets it for the hook prepares, so no hook build sees it: on
@@ -776,7 +777,7 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   with `actions/cache/restore` and saved with `actions/cache/save` as soon as the hooks
   are warm, on a miss, so a later red step never leaves the next run cold (T05). The
   shim it writes into the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
-  `UV_PYTHON`.
+  `UV_PYTHON` and part of the prek cache key.
 - **`ci.yml` jobs.** `gate`, a matrix over `ubuntu-latest` and `macos-latest` on
   Python 3.14, runs `just check`, the full gate with B. `floor`, on `ubuntu-latest`
   with `python-version: '3.13'` and `UV_NO_GROUP: tooling` in the job's env (§1 fact 1),

@@ -42,7 +42,11 @@ runs:
     # prek's own cache directory, outside the workspace, so check-clean's
     # snapshot never sees it: the hook clones, their toolchains and the
     # ripsecrets build, which a cold run would otherwise fetch. Keyed on both
-    # hook configurations and on uv.lock, which pins prek. Restored here and
+    # hook configurations and on uv.lock, which pins prek, and on the
+    # python-version input: a python hook environment records the absolute
+    # path of the interpreter it was built with, which lives outside this
+    # cache, so the 3.13 floor and the 3.14 legs must not share an entry (an
+    # exact hit is never re-saved). Restored here and
     # saved explicitly once the hooks are proven warm (below), not by the
     # action's post step, which saves only when the whole job succeeds: a
     # later red `just check` would otherwise leave every run cold.
@@ -50,7 +54,7 @@ runs:
       id: prek-cache
       with:
         path: ~/.cache/prek
-        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-prek-py${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
     # The prepare and the lychee warm are the point; the shim it writes into
     # the runner's .git is harmless. A restored cache is not enough: on a
     # cold one, `just check` would fetch every hook environment and lychee.
@@ -80,4 +84,4 @@ runs:
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/prek
-        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-prek-py${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
