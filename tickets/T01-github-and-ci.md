@@ -463,10 +463,30 @@ $ gh api repos/BiscuitBin/rove/commits/4183defeff8f28c2f8fdbe80f6513343eb86e141/
 exit 0
 ```
 
-The `check` context exists under app 15368, as §10 expected. It is red, so under §13
-step 9's protection must not be applied until it is green. The step 9 payloads,
-commands and before-state are prepared in `ai_tmp/T01/step9-payloads.md`, with
-`ai_tmp/protection.json` and `ai_tmp/T01/repo-hygiene.json`. Nothing was sent.
+The `check` context exists under app 15368, as §10 expected. It was red at
+`4183def`, so under §13 step 9's protection could not be applied then.
+
+Re-read on 2026-10-30 at PR #2's current head `6bc5925` (a T05 commit; `check` is green
+there because of T05's fixes for H1 to H3, not T01 changes):
+
+```text
+$ gh api repos/BiscuitBin/rove/commits/6bc59254ef9d55943cc3a35ed4660cdb8ef64c7a/check-runs --jq '.check_runs[] | {name, conclusion, app_id: .app.id, app: .app.slug}'
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"copilot-pull-request-reviewer"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"check"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"gate (macos-latest)"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"gate (ubuntu-latest)"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"floor"}
+{"app":"github-actions","app_id":15368,"conclusion":"success","name":"audit"}
+exit 0
+```
+
+`check`, both `gate` legs and `floor` are green in run `41019851932`, and `audit` in run
+`41019851942`, all under app 15368. The step 9 payloads, commands and before-state are
+prepared in `ai_tmp/T01/step9-payloads.md`, with the protection payload at
+`ai_tmp/T01/protection.json` and the hygiene fields sent as `-F` flags. Nothing was sent.
+
+- Departure: step 9's `--input` path is `ai_tmp/T01/protection.json`, not
+  `ai_tmp/protection.json`, so the payload stays in T01's scratch directory.
 
 **Hand-backs for T05.**
 
@@ -488,7 +508,31 @@ commands and before-state are prepared in `ai_tmp/T01/step9-payloads.md`, with
   closed on it. Consider a retry, or the run's `GITHUB_TOKEN` on that one step for
   binstall's GitHub API calls, as A gives it, weighing the token reaching hook builds.
 
-Step 9 and later have not been done. They need authorisation and a green `check`.
+Step 9 and later have not been done. `check` is green at `6bc5925`, so they wait only
+on authorisation (re-read `check` on the head just before call 3).
+
+### Review record, checkpoint 2 (step 8, reviewed at `6bc5925`)
+
+There were two reviewers, both `codex exec -m gpt-6-astra -s read-only`, one per lens,
+over the step 9 commands, payloads and before-state in `ai_tmp/T01/step9-payloads.md`.
+Separate triage subagents judged each finding and applied the fixes. The raw files,
+which are not committed, are in `ai_tmp/review/T01-2/`, with the merged verdicts in
+`verdicts.md`. The lenses agreed; two findings were duplicates and were merged. There
+were three findings, all valid, none high, so no second round runs; nothing was handed
+back. Only `gh api --method GET` calls were made.
+
+| id | severity | verdict | reason | action |
+| --- | --- | --- | --- | --- |
+| C1/B1 | medium | valid | calls 1 and 3 named `--input` files that do not exist (`ai_tmp/T01/repo-hygiene.json`, `ai_tmp/protection.json`) | call 1 sends `-F delete_branch_on_merge=true -F allow_auto_merge=false`; call 3 reads `ai_tmp/T01/protection.json` (departure above) |
+| B2 | medium | valid | step 10's read-back did not fail closed: a failed GET leaves a 404 body that plain `jq` reads as nulls, exit 0 | each read echoes its exit status, and a `jq -e` assertion on the expected shape must print `true` |
+| C2/B3 | low | valid | the blocker quoted the superseded red head `4183def` | re-read on `6bc5925`, green, quoted above; re-read `check` before call 3 |
+
+Re-checks: every `--input` path in the payload document exists; its §10 JSON block is
+`jq -e`-equal to `ai_tmp/T01/protection.json` (`true`, exit 0); the `jq -e` assertion's
+controls gave exit 5 on a 404 body, exit 1 on `enforce_admins.enabled: true` and `true`,
+exit 0 on the expected shape. Committed as `T01: §14 checkpoint 2 fixes`. Residual: if
+the pull request's head moves before call 3, the green quote goes stale; the payload
+document says to re-read `check` first.
 
 ## Open points
 
