@@ -271,8 +271,13 @@ Claim 1 holds: the group floor locks, syncs on 3.14, refuses 3.13 naming the flo
 every `floor` recipe passes on 3.13 without B.
 
 **Step 4, tool settings and fixtures.** As §9 states, with two departures recorded
-below. The ruff fixture has exactly F401 and E501 (its long line is 116 characters);
-the mypy fixture has one `[assignment]` error.
+below. The ruff fixture is A's: it carries F401 and E501 (its long line is 116
+characters), and, under `select = ["ALL"]`, also D100 (no module docstring, inherited
+from A). `ruff check --no-cache --output-format concise` on it prints those three and
+`Found 3 errors.`, exit 1 (§14 review T00-2 C4). This departs from step 4's "exactly
+F401 and E501"; `py-lint`'s control greps for F401 and E501 by name, as its comment
+says, so the extra rule does not let it fire with either dropped. The mypy fixture has
+one `[assignment]` error.
 
 **Step 5, the gates.** `Justfile` is lines 287-442 of `CONVENTIONS.md` verbatim;
 `just --list` parses it. Each gate's tail:
@@ -945,6 +950,77 @@ T01. `ai_tmp/fresh/` was then deleted.
 2 and 3: the machine's rustup has no default toolchain, and the rust-language hooks
 build with `cargo`. The machine was not changed.
 
+### Adversarial review records
+
+The `CONVENTIONS.md` §14 record for each checkpoint. The raw briefs, logs and verdicts
+stay in `ai_tmp/review/` and are not committed.
+
+**Checkpoint 1 (T00-1), step 6.** Reviewed `pyproject.toml`, `uv.lock`,
+`.python-version` and `Justfile` at `61f2357` with uncommitted changes. Harness: Codex,
+`codex exec -m gpt-6-astra -s read-only`, for both lenses. Severities are given as
+reviewer / triage. No high finding was valid, so there was one round.
+
+| id | severity | verdict | reason | outcome |
+| --- | --- | --- | --- | --- |
+| C1 | medium / low | valid | `Justfile:47`: the leading `-` on the lychee warm-up hides a failed download | handed back (§4); note in Open points |
+| B1 | medium / low | valid | same defect as C1 | handed back with C1 |
+| C2 | medium / low | valid | `ruff.toml` `CPY001` ignore departs from §9 | handed back (§9); note in Open points; `ruff.toml` unchanged |
+| B4 | low / low | valid | same defect as C2 | handed back with C2 |
+| B2 | medium / low | valid | `scripts/initialize.sh`: the secondary-worktree branch prepared no hooks but printed "Ready" | handed back (§5, optional §4); note in Open points |
+| B3 | medium / low | valid | claim 5's `git status --porcelain` snapshot collapsed directories and recorded no content | applied: the stronger snapshots in part 1, step 6 |
+
+Re-run, at `61f2357` with uncommitted changes: the B3 block in part 1, step 6 (`curl
+exit 6`, `wheel-smoke exit 0`, both snapshot diffs exit 0, both controls exit 1).
+
+**Checkpoint 2 (T00-2), before the final commit.** Reviewed the whole T00 tree at
+`a087cfa` (`b86d3c1` and `a087cfa` on `61f2357`). Harness: Codex,
+`codex exec -m gpt-6-astra -s read-only`. The breakage lens's first run stopped after
+reading its brief and produced no findings file; it was re-run, and its one finding is
+B1 below. No high finding was valid, so there was one round.
+
+| id | severity | verdict | reason | outcome |
+| --- | --- | --- | --- | --- |
+| C1 | low | valid | three dotfile deltas from A had departure notes but no §5 hand-back | handed back (§5); note in Open points |
+| C2 | low | valid | `b86d3c1` edits `tickets/T02-python-gate.md`, outside Files touched | recorded departure (single-branch decision); T05 reconciles; Open points note reworded |
+| C3 | low | valid | the notes lacked this §14 record for checkpoint 1 | applied: this subsection |
+| C4 | low | valid | the ruff fixture reports D100, F401 and E501, not "exactly F401 and E501" | applied: step 4 note in part 1 corrected; fixture unchanged (A's) |
+| B1 | medium | valid | `scripts/wheel_smoke.py`'s recorder matched only `typer`, `click`, `rich`, so a guarded import of another runtime-closure package (`shellingham`, `pygments`, `markdown_it`, `annotated_doc`) in `rovo/__init__.py` passed `api`; `click` is not even in `uv.lock` (typer 0.27.3 vendors it as `typer._click`) | applied: the recorder now records every name whose first component is neither `rovo` nor in `sys.stdlib_module_names`; §9 wording handed back (Open points) |
+
+B1 departs from §9's text, which names exactly `typer`, `click` or `rich`: the `api`
+step installs the wheel with no dependency, so any third-party import is a violation.
+The success line is unchanged (`no CLI module imported`), so the quotes above still
+match. `tests/test_api.py` is unchanged; the wheel smoke is the proof (§9).
+
+Re-run, at `a087cfa` with the notes edits uncommitted:
+
+```text
+$ .venv/bin/ruff check --no-cache --output-format concise tests/fixtures/py-lint-violation/ruff.py
+tests/fixtures/py-lint-violation/ruff.py:1:1: D100 Missing docstring in public module
+tests/fixtures/py-lint-violation/ruff.py:2:8: F401 [*] `os` imported but unused
+tests/fixtures/py-lint-violation/ruff.py:5:100: E501 Line too long (116 > 99)
+Found 3 errors.
+exit 1
+```
+
+B1, at `a087cfa` with `scripts/wheel_smoke.py` and the notes uncommitted
+(`RUSTUP_TOOLCHAIN=stable`). Negative control: `src/rovo/__init__.py` copied to
+`ai_tmp/scratch/init-b1.orig`, `try: import shellingham  # noqa: F401` /
+`except ImportError: pass` appended, `just wheel-smoke`, then the copy restored
+(`git diff src/rovo/__init__.py` empty) and `just wheel-smoke` run again:
+
+```text
+## negative control (guarded import shellingham)
+wheel_smoke: import rovo tried to import ['shellingham']
+error: recipe `wheel-smoke` failed with exit code 1
+exit 1
+## restored
+wheel_smoke api: rovo 0.0.0, no CLI module imported, py.typed shipped
+wheel_smoke cli: rovo 0.0.0
+exit 0
+```
+
+`just py-lint` and `just py-typecheck` exit 0 after the change.
+
 ## Open points
 
 - Whether `rovo` with no arguments should print help and exit 0 or 2. Typer's
@@ -973,11 +1049,31 @@ build with `cargo`. The machine was not changed.
   `prepare-hooks` recipe that both `install-hooks` and this branch call. If C1/B1's
   lychee-binary check lands, add it to this branch too, because `|| :` hides a failed
   download here just as the recipe's `-` does.
+- Hand-back, `CONVENTIONS.md` §5 dotfiles (§14 review T00-2 C1). Three deltas from A
+  that §5 does not state, each recorded under part 2's departures; the files stay as
+  they are, and §5 should name them: (a) `.markdownlint-cli2.jsonc`: `ignores` becomes
+  `["target", ".venv", "ai_tmp"]` (markdownlint-cli2 appends `**/*.md` to prek's
+  filenames and otherwise lints `.venv`; the control in part 2 exits 1 on `MD031` and
+  `MD012`); (b) `.editorconfig`: A's `[LICENSE]` section also goes (no `LICENSE`,
+  decision 6); (c) `_typos.toml`: add `cpy = "cpy"` to `[default.extend-words]` while
+  the §9 `CPY001` ignore stands, and lift it with that ignore.
+- Hand-back, `CONVENTIONS.md` §9 `scripts/wheel_smoke.py` (§14 review T00-2 B1).
+  Applied in T00's `scripts/wheel_smoke.py` (evidence under the review records). §9's
+  bullet "records every name whose first component is `typer`, `click` or `rich`"
+  should read "records every name whose first component is neither `rovo` nor in
+  `sys.stdlib_module_names`". Also note that typer 0.27 vendors click
+  (`typer._click`), so `click` is not a separate package in `uv.lock`.
 - For the orchestrator (not T00's file): `tickets/T02-python-gate.md:112` writes a
   deliberate misspelling of "the" as its example. `typos` flags it, so `just lint` and
   `just check-docs` stay red until that line changes. §13 says ticket prose must pass
-  typos. This is the only `typos` finding left in the tree. Resolved: the orchestrator
-  reworded the line (part 3 departures), and `typos` passes on the committed tree.
+  typos. This is the only `typos` finding left in the tree. The orchestrator reworded
+  the line (part 3 departures), and `typos` passes on the committed tree, but the
+  reword ships inside T00's commit `b86d3c1`, outside T00's Files touched (§14 review
+  T00-2 C2). Recorded departure: under the maintainer's single-branch decision
+  (2026-10-29), every ticket lands on `bootstrap` and reaches `main` through one pull
+  request, so the reword stays in `b86d3c1` and does not get a pull request of its own.
+  T05 reconciles it with T02's ticket. Reverting it here would turn `typos` and
+  `just check` red.
 - `just lint` before step 11's commit: `prek run --all-files` lists files with Git, so
   it sees only tracked files (`README.md` and `tickets/`). Every hook on the untracked
   files skips with "no files to check". Part 2 therefore proves the hooks with

@@ -1,7 +1,8 @@
 """Smoke-test the installed rovo wheel from outside the worktree.
 
 `api` runs after the wheel alone is installed, with no dependency: it proves
-that `import rovo` works and never tries to import a command-line module.
+that `import rovo` works and never tries to import a module outside the
+standard library.
 `cli` runs after the locked runtime closure is installed: it proves that
 `python -m rovo --version` works.
 """
@@ -14,11 +15,9 @@ import sys
 from collections.abc import Sequence
 from types import ModuleType
 
-CLI_ONLY = frozenset({"typer", "click", "rich"})
-
 
 class _Recorder(importlib.abc.MetaPathFinder):
-    """Records every attempt to import a command-line-only module, and finds nothing."""
+    """Records every attempt to import a module outside the standard library, and finds nothing."""
 
     def __init__(self) -> None:
         self.seen: list[str] = []
@@ -30,7 +29,8 @@ class _Recorder(importlib.abc.MetaPathFinder):
         target: ModuleType | None = None,
     ) -> None:
         del path, target
-        if fullname.partition(".")[0] in CLI_ONLY:
+        top = fullname.partition(".")[0]
+        if top != "rovo" and top not in sys.stdlib_module_names:
             self.seen.append(fullname)
 
 
