@@ -267,6 +267,166 @@ $ rg -n -i 'stub|T04 writes|todo|tbd|fixme' docs/decisions/000*.md
 exit 1
 ```
 
+Committed as `f23f86d`.
+
+### Part 2 evidence (pages, README, CHANGELOG, SECURITY; base f23f86d)
+
+Steps 4 to 6, at `f23f86d` with uncommitted changes, `RUSTUP_TOOLCHAIN=stable`
+exported. Raw logs are under `ai_tmp/T04/`.
+
+**Generated references.** `reference/commands.md` was written from `just --list` and
+`just --summary` (22 recipes), each description checked against `just --show` and
+`CONVENTIONS.md` §4. Its first-column recipe names equal the summary:
+
+```text
+$ rg -o '^\| `([a-z-]+)' -r '$1' docs/reference/commands.md | sort > doc; just --summary | tr ' ' '\n' | sort > just; diff doc just
+diff exit 0   (22 names each)
+```
+
+`reference/cli.md` was written from `uv run --frozen rovo --help` and
+`uv run --frozen rovo version --help` (each exit 0). `reference/api.md` from
+`rovo.__all__` (`['__version__']`, exit 0). The exit codes it states were each run:
+
+```text
+rovo --version          -> rovo 0.0.0, exit 0
+rovo version            -> rovo 0.0.0, exit 0
+rovo --version version  -> rovo 0.0.0, exit 0
+rovo (no arguments)     -> help on stdout (12 lines), stderr empty, exit 2
+rovo nope               -> "No such command 'nope'." on stderr, exit 2
+rovo --bogus            -> "No such option: --bogus", exit 2
+rovo version extra      -> "Got unexpected extra argument(s) (extra)", exit 2
+```
+
+**Commands shown in the how-tos, tutorial and README, run with their exit status:**
+
+| Command | Page | Exit |
+| --- | --- | --- |
+| `just initialize` | develop-locally, tutorial, README | 0 (secondary-worktree path) |
+| `just check` | develop-locally, tutorial, maintain-dependencies, README | 0 (baseline; tutorial run below) |
+| `uv run --frozen rovo --version`, `rovo version`, `python -m rovo --version` | install-and-run, README | 0, 0, 0 |
+| `uv run --frozen python -c 'import rovo; print(rovo.__version__, rovo.__all__)'` | install-and-run | 0, `0.0.0 ['__version__']` |
+| `uv run --frozen python -c 'import rovo; print(rovo.__version__)'` | README | 0 (same probe, fewer names) |
+| `just py-test` / `just py-test -k version` | develop-locally, test-and-debug | 0 (`3 passed`) |
+| `uv run --frozen pytest tests/test_api.py` | test-and-debug | 0 (`1 passed`) |
+| `just coverage` | test-and-debug | 0 (TOTAL 100%) |
+| `uv run --frozen coverage html -d target/htmlcov` | test-and-debug | 0; `git status` unchanged |
+| `just wheel-smoke` | test-and-debug | 0 |
+| `target/wheel-smoke/venv/bin/rovo --help` | test-and-debug | 0 |
+| `just lock-check` | maintain-dependencies | 0 |
+| `just sync` | develop-locally, maintain-dependencies | 0, run with `UV_OFFLINE=1`; `uv.lock` checksum unchanged |
+| `UV_PROJECT_ENVIRONMENT=target/venv-3.13 UV_PYTHON=3.13 UV_NO_GROUP=tooling just lock-check py-lint py-typecheck coverage wheel-smoke` | develop-locally | 0 (run with `UV_OFFLINE=1` added; Python 3.13.13) |
+| `just fix` | develop-locally | 0, with every change staged first: the unstaged diff was empty afterwards, so it repaired nothing |
+
+The tutorial was followed start to finish on scratch copies (§11 "Scratch":
+`tests/test_cli.py` and `src/rovo/cli.py` saved to `ai_tmp/scratch/`, edited, run,
+copied back), log `ai_tmp/T04/tutorial.log`:
+
+```text
+$ just py-test -k ping            (test only)
+E       assert 2 == 0   ... No such command 'ping'.
+exit 1
+$ just py-test -k ping            (test and command)
+1 passed, 3 deselected
+exit 0
+$ uv run --frozen rovo ping
+pong
+exit 0
+$ uv run --frozen rovo --help     (lists "ping  Answer pong: a tutorial exercise, not part of the product.")
+exit 0
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short -- src tests   (after restoring)
+(nothing)
+```
+
+**Shown, not run.** Each was checked against `just --show <recipe>` and
+`CONVENTIONS.md` §4 and §5; none was run from this worktree:
+
+| Command | Page | Reason |
+| --- | --- | --- |
+| `just lock` | maintain-dependencies | writes `uv.lock` (frozen) and needs the network |
+| `just lock-upgrade` | maintain-dependencies | writes `uv.lock` (frozen) and needs the network |
+| `just install-hooks` | develop-locally (prose), commands | installs the shim into the shared `.git/hooks`; primary checkout only |
+| `just audit` | maintain-dependencies, maintenance | needs the network |
+| `just check-links-online` | maintenance, commands | needs the network |
+| `uvx rovo --version`, `uv tool install rovo`, `pip install rovo` | install-and-run | describe a release that does not exist; network; said plainly on the page |
+
+`git diff 69f0d14 -- uv.lock` is empty (below), and no run touched `.git/hooks`.
+
+**Departures from A's pages.** Every page was adapted from A's page of the same path at
+`c8e1a46`, keeping A's structure and every sentence still true, and dropping Rust, pixi,
+upstream, parity, Pages and release-matrix material. Beyond that:
+
+- `documentation-contract.md`: A names three pages that link outward; here none does.
+  `install-and-run.md` names the future PyPI page as a code span, because a link to a
+  page that 404s until the first upload would fail `just check-links-online`.
+- `quality-gates.md`: a second table of positive controls, which §6 asks for and A's
+  page folds into its gate rows; it says plainly that four gates carry none.
+- `agent-contract.md`: a table of which `AGENTS.md` block routes to which skill,
+  written from T03's `AGENTS.md` on `worktree-agent-ae9028ada011aa39c` at `72b9efa`
+  (T03's hand-back to this ticket). That file is not in this branch's tree.
+- `maintenance.md`: the weekly audit is `just audit` by hand, because the scheduled
+  `audit.yml` is T01's and is not in this tree.
+- `terminology.md`: two tables (project, workflow) instead of A's repository and
+  Allium tables; the product's terms are left to its first ticket.
+- README, CHANGELOG and SECURITY have no finished A original (A's are T00 placeholders);
+  they follow A's `tickets/T12-maintainer-docs.md` shape. CHANGELOG uses
+  `## [Unreleased]`, Keep a Changelog's heading, with no link reference.
+
+**For T05 to re-check after the merge** (written to the merged design where a parallel
+lane owns the fact): `agent-contract.md`'s routing table (T03's final `AGENTS.md`);
+`configuration.md`, `quality-gates.md`, `quality-philosophy.md` and `testing.md` where
+they quote `ruff.toml`, `mypy.ini`, `.coveragerc` or the absence of `conftest.py` and of
+subprocess coverage (T02); `repository-map.md`, `configuration.md` and
+`security-model.md` on `.github/` (T01's `audit.yml` and CI jobs); `cli.md`'s no-argument
+exit status 2 (T00's open point for T02).
+
+**Hand-backs.**
+
+- The README's handbook links point at `https://github.com/BiscuitBin/rove/blob/main/...`.
+  They resolve only once `bootstrap` reaches `main`; until then
+  `just check-links-online` reports them. No relative link was used (PyPI).
+- `SECURITY.md` sends reports to GitHub's private vulnerability reporting. Whether it
+  is enabled was not read here (network, settings); T01 proposes turning it on (§10).
+  If it stays off, `SECURITY.md` needs another contact, a maintainer decision.
+
+**Gate and scope, on the staged tree before the commit:**
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git diff --cached --stat 69f0d14 -- docs/manifest.yml docs/README.md uv.lock
+(nothing)
+exit 0
+$ git diff --cached --name-only 69f0d14 | grep -v -E '^(docs/|README.md|CHANGELOG.md|SECURITY.md|tickets/T04-handbook.md)'
+exit 1
+$ rg -n -i 'stub|T04 writes' docs README.md CHANGELOG.md SECURITY.md
+exit 1
+$ git grep -n -i 'T04 writes' 69f0d14 -- docs | head -3   (positive control)
+69f0d14:docs/decisions/0001-uv-and-hatchling.md:11:This decision record is a stub that T04 writes in full. It will state the
+69f0d14:docs/decisions/0002-src-layout-and-public-api.md:11:...
+69f0d14:docs/decisions/0003-typer-cli-and-lazy-import.md:11:...
+```
+
+**README as PyPI renders it** (step 6):
+
+```text
+$ rm -rf dist && uv build --offline
+exit 0
+$ unzip -p dist/rovo-*.whl 'rovo-*.dist-info/METADATA'
+14:Description-Content-Type: text/markdown
+16:# rovo
+65:## Licence
+exit 0
+$ rg -n '\]\((?!https?://)' --pcre2 README.md
+exit 1
+$ printf '[x](docs/README.md)\n' | rg -n '\]\((?!https?://)' --pcre2   (positive control)
+1:[x](docs/README.md)
+exit 0
+```
+
 ## Open points
 
 - The licence options to record in decision 0006, if the maintainer names any before

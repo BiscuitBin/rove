@@ -8,6 +8,88 @@ requires: []
 
 # Documentation contract
 
-This page is a stub that T04 writes in full. It will cover the rules every handbook page obeys: the manifest, the frontmatter, reachability, the word floor, and outward links only from pages that need them.
-Until then the page holds its place in the manifest and the documentation
-map, so that every link to it resolves and the handbook stays complete.
+Enforced by `bg-validate-docs`, a console script of the `biscuit-games-tooling` package,
+run by `just check-docs` and by a pre-commit hook. It reports every violation at once
+rather than stopping at the first.
+
+The contract exists so documentation cannot quietly rot: every page is registered once,
+owns its topics, repeats its metadata in frontmatter, and is reachable from the index.
+
+## The manifest
+
+`docs/manifest.yml` is the index, and it is parsed as strict JSON despite the extension:
+JSON is a subset of YAML. No trailing commas, no comments.
+
+```json
+{"path": "reference/commands.md", "title": "Commands", "kind": "reference",
+ "audience": ["contributor", "maintainer", "operator", "agent"],
+ "canonical_for": ["command_reference"], "requires": []}
+```
+
+Every entry carries exactly those six keys; extra keys fail as loudly as missing ones.
+
+## Frontmatter
+
+Every page carries exactly five keys, and each must equal the manifest entry.
+
+```markdown
+---
+title: "Commands"
+kind: "reference"
+audience: ["contributor", "maintainer", "operator", "agent"]
+canonical_for: ["command_reference"]
+requires: []
+---
+```
+
+Two things catch people out. Lists must be inline (`[a, b]`), because the parser is
+hand-rolled and does not accept block sequences. And the comparison is
+**order-sensitive**: `["maintainer", "contributor"]` against a manifest saying
+`["contributor", "maintainer"]` fails.
+
+## The rules
+
+| Field | Constraint |
+| --- | --- |
+| `kind` | One of `project`, `tutorial`, `how-to`, `explanation`, `reference`, `operations`, `decision`. |
+| `audience` | Non-empty subset of `user`, `contributor`, `maintainer`, `operator`, `agent`. |
+| `canonical_for` | At least one topic, and every topic is owned by exactly one page across the whole tree. |
+| `requires` | Feature predicates. `pyproject.toml` defines none (`predicates = {}`), so every page carries `[]`. |
+
+Beyond the fields:
+
+- The body's **first heading is level one and its text equals the `title`** exactly.
+- The body has at least **forty words**.
+- No unresolved template delimiters, no unfinished markers, no placeholder prose.
+- Every relative link resolves, with **exact case** (which is what catches mistakes on a
+  case-insensitive filesystem), and any `#fragment` matches a real heading anchor.
+- Every page is **reachable from `docs/README.md`** by following links. Adding a page
+  without linking it in fails, even when everything else is correct.
+- Nothing under `docs/` may exist unregistered, and nothing registered may be absent.
+
+Only `docs/**/*.md` is in scope.
+
+## Links that leave the repository
+
+A page links outward only when its reader needs the target, and no page does today:
+[Install and run](../how-to/install-and-run.md) names the package's future PyPI page as
+a code span, because that page does not exist until the first upload. When a page does
+link outward, the link is to a whole page, never to a heading: nothing checks fragments
+across that boundary. The validator and the offline link checker skip HTTPS targets,
+so nothing in `just check` resolves them; `just check-links-online` does, by hand. A
+repository path or a URL that is only being named is written as a code span, not a
+link.
+
+## Outside the contract
+
+`README.md`, `SECURITY.md`, `CHANGELOG.md`, `AGENTS.md` and `CLAUDE.md` at the
+repository root carry no frontmatter and are not in the manifest. They are still checked
+by markdownlint, `typos` and the link checker. `README.md` is also the package's
+description on PyPI, so its links are absolute. `AGENTS.md` has its own validator; see
+[Agent contract](agent-contract.md).
+
+## Related pages
+
+- [Agent contract](agent-contract.md)
+- [Quality gates](quality-gates.md)
+- [Documentation map](../README.md)

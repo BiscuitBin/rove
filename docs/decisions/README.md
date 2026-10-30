@@ -8,10 +8,14 @@ requires: []
 
 # Architecture decisions
 
-This index is a stub that T04 writes in full. It will say how the series is
-numbered, how a record is superseded rather than deleted, and how to write a
-new record. Each record below is itself a stub until T04 writes it; record
-0008 arrives with the Renovate ticket, which registers it here.
+A record of what was chosen, what it cost, and what would have to change for the choice
+to be revisited. Each entry is numbered and never renumbered; a decision that is
+superseded is marked rather than deleted, because the reasoning is what makes the
+successor legible.
+
+These are decisions about how this repository is built, checked and distributed. The
+product is not yet specified, so no record decides product behaviour; that arrives with
+the product's own tickets.
 
 ## The record
 
@@ -24,3 +28,29 @@ new record. Each record below is itself a stub until T04 writes it; record
 | [0005](0005-dependency-policy.md) | Dependency policy: compatible ranges for runtime, exact tools, `uv.lock` the pin |
 | [0006](0006-licence-deferred.md) | The licence is undecided, and a release waits for it |
 | [0007](0007-pypi-name-rovo.md) | The PyPI name `rovo` in the repository `rove` |
+
+Record 0008, on dependency updates through Renovate, is written by the Renovate ticket
+(T06), which registers its page and adds its row when that decision is taken.
+
+## The numbering
+
+This series is the repository's own and starts at 0001. Records 0004 and 0005 are
+adapted from alliumpy's decisions 0002 and 0004 at `c8e1a46`, and each opens by saying
+so, so that its argument can be checked against the original. The others are new.
+[Decision 0001](0001-uv-and-hatchling.md) owns how the tools are installed;
+[decision 0004](0004-hook-runner-and-checkers.md) owns which runner and checkers they
+are.
+
+## Writing a new one
+
+Copy the shape of an existing entry: Context, Decision, Consequences (including the
+ones that hurt), What would reopen this, and Related pages. Make each reopening
+condition something a reader could check. Add the file, add a manifest entry, add a row
+above. A decision nobody can find is not recorded. To supersede a record, write the new
+one and mark the old one superseded, naming its successor; never edit the old reasoning
+away.
+
+## Related pages
+
+- [Documentation map](../README.md)
+- [Architecture](../explanation/architecture.md)
