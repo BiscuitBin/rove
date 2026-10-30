@@ -29,7 +29,7 @@ outside `check`.
 | `lock` | Relock after a `pyproject.toml` edit (`uv lock`). Writes `uv.lock`; read the diff. |
 | `lock-upgrade` | Move every locked version as far as `pyproject.toml` allows (`uv lock --upgrade`). Writes `uv.lock`. |
 | `lock-check` | Fail when `uv.lock` disagrees with `pyproject.toml` (`uv lock --check --offline`). Never writes. |
-| `install-hooks` | Install the prek shim into `.git/hooks`, prepare both hook configurations, and run lychee once to download its binary. Primary checkout only. |
+| `install-hooks` | Install the prek shim into `.git/hooks`, prepare both hook configurations, and run lychee to download its binary, failing unless the version `.pre-commit-config.yaml` pins is present (three tries). Primary checkout only. |
 
 ## Format and repair
 

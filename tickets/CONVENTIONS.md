@@ -322,15 +322,35 @@ lock-upgrade:
 lock-check:
     uv lock --check --offline
 
-# The shim, then every hook environment, so that `just check` never fetches.
-# lychee downloads its binary at first run, not at prepare, so it is run once
-# here on one file; its exit status is lint's business, not this recipe's.
-install-hooks:
+# The shim, then every hook environment, then lychee's binary, so that
+# `just check` never fetches.
+install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
     uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
     uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
-    -uv run --frozen prek run lychee --files README.md
+
+# lychee downloads its binary at first run, not at prepare, so it is run on one
+# file; its exit status is lint's business, not this recipe's. What this recipe
+# checks is that the binary is present: an executable lychee-<LYCHEE_VERSION>,
+# the version .pre-commit-config.yaml pins, in prek's cache, or it fails. The
+# download can time out (it did on a macOS runner), so it is tried three times.
+# Private: install-hooks runs it, and so does initialize in a secondary worktree.
+[private]
+warm-lychee:
+    #!/bin/sh
+    set -eu
+    version=$(sed -n 's/.*LYCHEE_VERSION=\([0-9][0-9.]*\).*/\1/p' .pre-commit-config.yaml | sort -u)
+    case $version in ''|*[!0-9.]*) printf '%s\n' "warm-lychee: expected one LYCHEE_VERSION in .pre-commit-config.yaml, found: $version" >&2; exit 1 ;; esac
+    cache=$(uv run --frozen prek cache dir)
+    for attempt in 1 2 3; do
+        uv run --frozen prek run lychee --files README.md || :
+        for bin in "$cache"/repos/*/.cargo/bin/lychee-"$version"; do
+            if [ -x "$bin" ]; then printf 'lychee %s warmed: %s\n' "$version" "$bin"; exit 0; fi
+        done
+        printf 'warm-lychee: no lychee-%s binary after attempt %s\n' "$version" "$attempt" >&2
+    done
+    exit 1
 
 # ----------------------------------------------------------------- format ---
 
@@ -501,8 +521,10 @@ The dotfiles are A's at `c8e1a46`, adjusted:
 `git rev-parse`; `uv sync --locked` (refuses a lock that disagrees with
 `pyproject.toml`, so a stale lock is fixed by `just lock` and committed, never rewritten
 by a first run); `install-hooks` only in the primary checkout, by A's
-`--git-common-dir` test and with A's comment; the same two closing lines. No toolchain
-or tools lines.
+`--git-common-dir` test and with A's comment; in a secondary worktree it skips only the
+shim: it prepares both hook configurations and runs `just warm-lychee`, as
+`install-hooks` does (T00 hand-back B2, landed in T05); the same two closing lines. No
+toolchain or tools lines.
 
 ## 6. Handbook
 
@@ -705,7 +727,9 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   `$GITHUB_PATH`, then `just sync`, then restores prek's hook cache keyed on the hash of
   both prek configurations, then runs `just install-hooks`, as A's action does: on a cold
   cache it builds every hook environment and warms lychee, which downloads its binary at
-  first run (§4), so that no later step reaches the network (§11). The shim it writes into
+  first run (§4), so that no later step reaches the network (§11). `install-hooks` fails
+  unless lychee's pinned binary is present (§4 `warm-lychee`, which retries the
+  download), so the action needs no presence check of its own. The shim it writes into
   the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
   `UV_PYTHON`.
 - **`ci.yml` jobs.** `gate`, a matrix over `ubuntu-latest` and `macos-latest` on

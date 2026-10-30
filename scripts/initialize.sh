@@ -22,10 +22,10 @@ uv sync --locked
 # the git directory differ. The recipe also provisions every hook environment,
 # so this is the last line of the first-run path that reaches the network.
 # A secondary worktree skips only the shim: it still prepares both hook
-# configurations and runs lychee once, as install-hooks does, because lychee
+# configurations and warms lychee, as install-hooks does, because lychee
 # downloads its binary at first run, not at prepare. Without this, the first
-# `just lint` in a fresh worktree would reach the network. lychee's exit
-# status is lint's business, not this script's.
+# `just lint` in a fresh worktree would reach the network. warm-lychee fails
+# when the binary is missing, so a failed download never ends in "Ready".
 if [ "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" ]; then
     just install-hooks
 else
@@ -33,7 +33,7 @@ else
     printf '%s\n' 'Run just install-hooks once from the primary checkout.' >&2
     uv run --frozen prek prepare-hooks
     uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
-    uv run --frozen prek run lychee --files README.md || :
+    just warm-lychee
 fi
 
 printf '\n%s\n' 'Ready. Next: just check.'

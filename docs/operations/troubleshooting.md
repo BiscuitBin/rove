@@ -73,8 +73,8 @@ Every hook environment should already be prepared, so `lint`, and `just check` a
 it, never reaches the network. If it does, prek's cache was cleared, or the first run
 did not finish preparing it. Run `just initialize` again (in a secondary worktree it
 prepares the environments without installing the shim), or `just install-hooks` from
-the primary checkout. A failed lychee download is not reported by either, so a later
-`just lint` may still fetch it.
+the primary checkout. Both fail, after three tries, when lychee's binary did not
+download, so neither ends in `Ready` without it.
 
 ## The ripsecrets hook fails to build
 

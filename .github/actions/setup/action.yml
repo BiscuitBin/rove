@@ -50,15 +50,9 @@ runs:
     # The prepare and the lychee warm are the point; the shim it writes into
     # the runner's .git is harmless. A restored cache is not enough: on a
     # cold one, `just check` would fetch every hook environment and lychee.
-    # With the next step's check, no later step reaches the network.
+    # The recipe fails unless lychee's pinned binary is present (warm-lychee,
+    # which retries the download), so no later step reaches the network.
     - run: just install-hooks
-      shell: bash
-    # The Justfile's lychee warm-up ignores its own exit status (`-`), so
-    # check its result here: without the binary, `just check` would fetch it.
-    - run: |
-        found=$(find ~/.cache/prek/repos -path '*/.cargo/bin/lychee-*' -perm -u+x -print -quit)
-        test -n "$found" || { echo 'lychee was not warmed; the gate would reach the network' >&2; exit 1; }
-        echo "lychee warmed: $found"
       shell: bash
     # prek prints nothing when it builds a hook environment, so name the
     # ripsecrets binary it built with the runner's Rust, and that compiler.

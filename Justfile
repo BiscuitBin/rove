@@ -36,15 +36,35 @@ lock-upgrade:
 lock-check:
     uv lock --check --offline
 
-# The shim, then every hook environment, so that `just check` never fetches.
-# lychee downloads its binary at first run, not at prepare, so it is run once
-# here on one file; its exit status is lint's business, not this recipe's.
-install-hooks:
+# The shim, then every hook environment, then lychee's binary, so that
+# `just check` never fetches.
+install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
     uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
     uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
-    -uv run --frozen prek run lychee --files README.md
+
+# lychee downloads its binary at first run, not at prepare, so it is run on one
+# file; its exit status is lint's business, not this recipe's. What this recipe
+# checks is that the binary is present: an executable lychee-<LYCHEE_VERSION>,
+# the version .pre-commit-config.yaml pins, in prek's cache, or it fails. The
+# download can time out (it did on a macOS runner), so it is tried three times.
+# Private: install-hooks runs it, and so does initialize in a secondary worktree.
+[private]
+warm-lychee:
+    #!/bin/sh
+    set -eu
+    version=$(sed -n 's/.*LYCHEE_VERSION=\([0-9][0-9.]*\).*/\1/p' .pre-commit-config.yaml | sort -u)
+    case $version in ''|*[!0-9.]*) printf '%s\n' "warm-lychee: expected one LYCHEE_VERSION in .pre-commit-config.yaml, found: $version" >&2; exit 1 ;; esac
+    cache=$(uv run --frozen prek cache dir)
+    for attempt in 1 2 3; do
+        uv run --frozen prek run lychee --files README.md || :
+        for bin in "$cache"/repos/*/.cargo/bin/lychee-"$version"; do
+            if [ -x "$bin" ]; then printf 'lychee %s warmed: %s\n' "$version" "$bin"; exit 0; fi
+        done
+        printf 'warm-lychee: no lychee-%s binary after attempt %s\n' "$version" "$attempt" >&2
+    done
+    exit 1
 
 # ----------------------------------------------------------------- format ---
 

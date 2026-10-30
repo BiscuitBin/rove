@@ -44,10 +44,9 @@ replace registered pages, records and skills under a green gate.
 The cost is that the full gate is 3.14-only: on 3.13 the Python gates run, but nothing
 runs the validators or the snapshotting runner. prek's hook environments, and the
 lychee binary, reach the network the first time they are built, so a fresh worktree
-runs `just initialize` before `just check` can run offline. `just initialize` does
-not yet check that lychee's first-run download succeeded: a failed download still ends
-in `Ready`, and the next `just check` then needs the network. That check is handed back
-to T00's recipes (`CONVENTIONS.md` §4 `install-hooks`, §5 `scripts/initialize.sh`).
+runs `just initialize` before `just check` can run offline. `just initialize` checks
+that lychee's first-run download succeeded and fails without the binary (`CONVENTIONS.md`
+§4 `install-hooks`, §5 `scripts/initialize.sh`, landed in T05).
 
 ## What would reopen this
 
