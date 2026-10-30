@@ -19,12 +19,18 @@ vulnerabilities. It needs the network, so it is not part of `just check`, and a 
 there blocks nothing until someone reads it. A vulnerable package is fixed by moving it,
 not by ignoring it.
 
-**Monthly.** Move the dependency pins, one kind at a time, as
-[Maintain dependencies](../how-to/maintain-dependencies.md) describes. `just lock-upgrade`
-moves the runtime tree within `pyproject.toml`'s ranges; an exact tool pin moves by
-editing its line and running `just lock`. Then `just sync`, `just check`, and commit
-`uv.lock` with `pyproject.toml`. A hook `rev` or a GitHub Action SHA moves by hand, with
-its version comment moved beside it.
+**Weekly.** Read Renovate's dependency dashboard, the open issue it keeps in this
+repository ([decision 0008](../decisions/0008-renovate.md)). Every pending update waits
+there; tick the ones to take, one kind at a time. Each becomes a pull request: read its
+diff and the release notes, wait for `check`, then merge it yourself. Hook revisions and
+the shared checkers deserve the closest reading, because the gate cannot tell a weaker
+check from a passing one.
+
+**Monthly.** Move by hand what Renovate leaves alone, as
+[Maintain dependencies](../how-to/maintain-dependencies.md) lists: `.python-version`,
+`requires-python` and the CI `python-version` inputs when a new Python is adopted, and
+the uv and just floors in [Develop locally](../how-to/develop-locally.md) after their
+pins move.
 
 **Monthly.** Run `just check-links-online`. It is not part of the gate because it needs
 the network, so external links rot silently until someone looks.
@@ -32,10 +38,7 @@ the network, so external links rot silently until someone looks.
 **Per shared-checkers release.** Read its changelog, move the tag, and run `just check`
 before committing: the release supplies the gate runner and both validators.
 
-Nothing here moves on its own. The Renovate ticket (T06) adds automated update pull
-requests and a dependency dashboard on GitHub; once it lands, the monthly pin move
-becomes reviewing those pull requests and reading the dashboard, and this page says so.
-Until then the routine above is manual.
+Nothing here moves on its own: Renovate proposes, and a person approves and merges.
 
 ## When the gate itself fails on a clean tree
 
@@ -56,3 +59,4 @@ credential, because nothing is published.
 - [Maintain dependencies](../how-to/maintain-dependencies.md)
 - [Troubleshooting](troubleshooting.md)
 - [Security model](../explanation/security-model.md)
+- [Decision 0008: Dependency updates through Renovate](../decisions/0008-renovate.md)

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "schedule:earlyMondays",
+    ":dependencyDashboard",
+    ":dependencyDashboardApproval"
+  ],
+  "rangeStrategy": "update-lockfile",
+  "automerge": false,
+  "lockFileMaintenance": { "enabled": true, "schedule": ["* 0-3 * * 1"] },
+  "pre-commit": { "enabled": false },
+  "packageRules": [
+    {
+      "description": "decision 0001: .python-version is the tooling interpreter, moved by hand",
+      "matchManagers": ["pyenv"],
+      "enabled": false
+    },
+    {
+      "description": "decision 0001: requires-python is the package's floor, moved by hand",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["requires-python"],
+      "enabled": false
+    },
+    { "matchManagers": ["github-actions"], "groupName": "github actions" },
+    { "matchDepNames": ["biscuit-games-tooling"], "dependencyDashboardApproval": true },
+    { "matchUpdateTypes": ["lockFileMaintenance"], "dependencyDashboardApproval": true },
+    {
+      "matchFileNames": [".pre-commit-config.yaml", ".pre-commit-fix.yaml"],
+      "groupName": "hook revs",
+      "dependencyDashboardApproval": true
+    },
+    { "matchDepNames": ["lycheeverse/lychee"], "groupName": "lychee" }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "hook revs in both prek configs: a full SHA with the release tag as its comment",
+      "managerFilePatterns": ["/^\\.pre-commit-config\\.yaml$/", "/^\\.pre-commit-fix\\.yaml$/"],
+      "matchStrings": [
+        "- repo: https://github\\.com/(?<depName>[^/\\s]+/[^/\\s]+)\\n    rev: (?<currentDigest>[a-f0-9]{40}) # (?<currentValue>v\\d+(?:\\.\\d+)+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "loose",
+      "autoReplaceStringTemplate": "- repo: https://github.com/{{{depName}}}\n    rev: {{{newDigest}}} # {{{newValue}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "lychee's rev: a full SHA with its lychee-v tag as the comment; moves with LYCHEE_VERSION",
+      "managerFilePatterns": ["/^\\.pre-commit-config\\.yaml$/"],
+      "matchStrings": [
+        "- repo: https://github\\.com/lycheeverse/lychee\\n    rev: (?<currentDigest>[a-f0-9]{40}) # lychee-v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "lycheeverse/lychee",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^lychee-v(?<version>.*)$",
+      "autoReplaceStringTemplate": "- repo: https://github.com/lycheeverse/lychee\n    rev: {{{newDigest}}} # lychee-v{{{newValue}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "LYCHEE_VERSION= at the head of each lychee hook's arguments; must equal the rev's tag",
+      "managerFilePatterns": ["/^\\.pre-commit-config\\.yaml$/"],
+      "matchStrings": ["LYCHEE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "lycheeverse/lychee",
+      "datasourceTemplate": "github-tags",
+      "extractVersionTemplate": "^lychee-v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "just, installed by the setup action from PyPI as rust-just",
+      "managerFilePatterns": ["/^\\.github/actions/setup/action\\.yml$/"],
+      "matchStrings": ["uv tool install rust-just==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "rust-just",
+      "datasourceTemplate": "pypi"
+    }
+  ]
+}

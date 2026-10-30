@@ -30,6 +30,23 @@ token with read access to the repository's contents, and checks out with
 credential, because there is no release; the `Private :: Do Not Upload` classifier
 makes PyPI refuse an accidental upload ([Python packaging](packaging.md)).
 
+## The update bot
+
+The Mend Renovate GitHub App proposes dependency updates
+([decision 0008](../decisions/0008-renovate.md)). It is the one party besides
+maintainers that can write to the repository. Read from the organisation's
+installation on 2026-10-30 (`gh api orgs/BiscuitBin/installations`), it holds read
+access to administration, members, metadata, packages and vulnerability alerts, and
+write access to checks, contents, issues, pull requests, commit statuses and workflows.
+That installation covers every repository in the organisation, not this one alone.
+
+What bounds it is configuration, not permission. `renovate.json` holds every update
+for a maintainer's approval on the dependency dashboard and turns automerge off, and
+`main` requires `check`, so a bot branch reaches `main` only through a green run and a
+person's merge. With alerts readable, a security fix may open a pull request without
+waiting for approval; it still never merges itself. Its branches carry code nobody here
+wrote, so they are untrusted input until read.
+
 ## What the build defends
 
 - **The lock.** `uv.lock` pins every runtime, development and tooling package: index
@@ -59,3 +76,4 @@ privately, never in a public issue.
 - [Architecture](architecture.md)
 - [Maintain dependencies](../how-to/maintain-dependencies.md)
 - [Decision 0005: Dependency policy](../decisions/0005-dependency-policy.md)
+- [Decision 0008: Dependency updates through Renovate](../decisions/0008-renovate.md)

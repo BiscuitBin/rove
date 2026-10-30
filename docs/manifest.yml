@@ -446,6 +446,20 @@
         "decision_pypi_name"
       ],
       "requires": []
+    },
+    {
+      "path": "decisions/0008-renovate.md",
+      "title": "Decision 0008: Dependency updates through Renovate",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_dependency_updates"
+      ],
+      "requires": []
     }
   ]
 }

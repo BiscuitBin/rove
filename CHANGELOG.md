@@ -11,3 +11,5 @@ policy.
 
 - The placeholder API, `rovo.__version__`, read from the installed metadata.
 - The placeholder command, `rovo --version` and `rovo version`.
+- `renovate.json`: Renovate proposes updates to every pin, each held for approval on its
+  dependency dashboard (decision 0008).

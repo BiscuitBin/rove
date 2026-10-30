@@ -28,9 +28,7 @@ the product's own tickets.
 | [0005](0005-dependency-policy.md) | Dependency policy: compatible ranges for runtime, exact tools, `uv.lock` the pin |
 | [0006](0006-licence-deferred.md) | The licence is undecided, and a release waits for it |
 | [0007](0007-pypi-name-rovo.md) | The PyPI name `rovo` in the repository `rove` |
-
-Record 0008, on dependency updates through Renovate, is written by the Renovate ticket
-(T06), which registers its page and adds its row when that decision is taken.
+| [0008](0008-renovate.md) | Dependency updates through Renovate |
 
 ## The numbering
 
