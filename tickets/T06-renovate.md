@@ -269,6 +269,23 @@ topics.`, exit 0. `just check`, exit 0, last line `All checks passed and the wor
 unchanged.` The commit's prek hook temporarily set aside an unrelated, concurrent
 unstaged edit to `tickets/T01-github-and-ci.md` and restored it.
 
+**Checks at `93821a2`** (this notes commit, on top of the concurrent T01 commit
+`7bc4b65`). The commit was chained after `{ just check-docs; echo "exit $?"; } | tail -3
+&&`, so `&&` tested `tail`, and the commit went in after `just check-docs` had exited 1
+(failing hook not captured; concurrent unstaged edits to `tickets/README.md`,
+`tickets/T01-github-and-ci.md` and `tickets/T05-integration.md` were present). Re-run at
+`93821a2` with the same concurrent edits: `just check-docs` exit 0, `Validated 32 pages
+and 32 canonical topics.`; `just check` exit 0, last line `All checks passed and the
+worktree is unchanged.`
+
+**Open at this point.** `CONVENTIONS.md` §12 claim 12: open. Local extraction shows
+`pep621` reading `[dependency-groups]` and the `[tool.uv.sources]` tag; the relock of
+`uv.lock` is unproven until a step 6 `pep621` pull request. Nothing in the gate checks
+that lychee's `rev` and `LYCHEE_VERSION=` agree (the hook downloads the
+`LYCHEE_VERSION` binary whatever the `rev`), so the `lychee` group is the only guard;
+and a hook or B bump that weakens a check passes `just check`. Both for the adversarial
+review.
+
 ## Open points
 
 - Whether the B tag should follow B's releases automatically or stay manual: B's
