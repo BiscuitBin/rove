@@ -38,18 +38,22 @@ lock-check:
     uv lock --check --offline
 
 # The shim, then every hook environment, then lychee's binary, so that
-# `just check` never fetches.
+# `just check` never fetches. A GITHUB_TOKEN (CI passes the run's) is for
+# warm-lychee's cargo-binstall API calls; the prepares compile ripsecrets, so
+# they run without it and no hook build script sees it.
 install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
-    uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
-    uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
 
 # lychee downloads its binary at first run, not at prepare, so it is run on one
 # file; its exit status is lint's business, not this recipe's. What this recipe
 # checks is that the binary is present: an executable lychee-<LYCHEE_VERSION>,
-# the version .pre-commit-config.yaml pins, in prek's cache, or it fails. The
-# download can time out (it did on a macOS runner), so it is tried three times.
+# the version .pre-commit-config.yaml pins, in the hook's own checkout in prek's
+# cache (the repo URL and rev .pre-commit-config.yaml names, since the hook runs
+# only that checkout's binary), or it fails. The download can time out (it did
+# on a macOS runner), so it is tried three times.
 # Private: install-hooks runs it, and so does initialize in a secondary worktree.
 [private]
 warm-lychee:
@@ -57,10 +61,15 @@ warm-lychee:
     set -eu
     version=$(sed -n 's/.*LYCHEE_VERSION=\([0-9][0-9.]*\).*/\1/p' .pre-commit-config.yaml | sort -u)
     case $version in ''|*[!0-9.]*) printf '%s\n' "warm-lychee: expected one LYCHEE_VERSION in .pre-commit-config.yaml, found: $version" >&2; exit 1 ;; esac
+    rev=$(sed -n '/repo: https:\/\/github.com\/lycheeverse\/lychee$/{n;s/.*rev: *\([0-9a-f]\{40\}\).*/\1/p;}' .pre-commit-config.yaml)
+    case $rev in ''|*[!0-9a-f]*) printf '%s\n' "warm-lychee: expected the lychee repo's 40-hex rev in .pre-commit-config.yaml, found: $rev" >&2; exit 1 ;; esac
     cache=$(uv run --frozen prek cache dir)
     for attempt in 1 2 3; do
         uv run --frozen prek run lychee --files README.md || :
-        for bin in "$cache"/repos/*/.cargo/bin/lychee-"$version"; do
+        for dir in "$cache"/repos/*; do
+            meta=$dir/.prek-repo.json
+            grep -qF '"repo": "https://github.com/lycheeverse/lychee"' "$meta" 2>/dev/null && grep -qF "\"rev\": \"$rev\"" "$meta" || continue
+            bin=$dir/.cargo/bin/lychee-$version
             if [ -x "$bin" ]; then printf 'lychee %s warmed: %s\n' "$version" "$bin"; exit 0; fi
         done
         printf 'warm-lychee: no lychee-%s binary after attempt %s\n' "$version" "$attempt" >&2

@@ -60,7 +60,8 @@ runs:
     # GitHub's API for the release, and without a token it shares the
     # runner's per-IP limit of 60 requests an hour, whose exhaustion ends in
     # a failed `cargo install` fallback (exit 100) on macOS. The workflow's
-    # `contents: read` bounds what the token can do.
+    # `contents: read` bounds what the token can do. The recipe unsets it for
+    # the hook prepares, which compile, so only the lychee warm sees it.
     - run: just install-hooks
       shell: bash
       env:

@@ -299,7 +299,7 @@ The diagnosis found the earlier macOS failures were cargo-binstall's anonymous G
 API limit (60 an hour per IP), which `warm-lychee`'s back-to-back retries share, and
 that `actions/cache` saves only when the whole job succeeds. So, as the orchestrator
 directed, the setup action now passes `github.token` as `GITHUB_TOKEN` to the
-`install-hooks` step alone (this supersedes "no token reaches hook builds" above), and
+`install-hooks` step alone, and
 splits the prek cache into `actions/cache/restore` (`id: prek-cache`) and
 `actions/cache/save` after the ripsecrets step on a miss. `CONVENTIONS.md` §10 follows,
 §12 claims 4 and 5 are restated for the new command, and §1 fact 9 says the gate no
@@ -353,7 +353,8 @@ status lines        0
 ```
 
 The `floor` recipes, same clone, `UV_PYTHON=3.13 UV_NO_GROUP=tooling just py-lint
-py-typecheck coverage wheel-smoke`:
+py-typecheck coverage wheel-smoke` (without `lock-check` and the job's `UV_OFFLINE=1`;
+the full set is rerun under "Review T05-1 fixes" below):
 
 ```text
 Using CPython 3.13.13
@@ -388,6 +389,98 @@ $ gh api repos/BiscuitBin/rove/rules/branches/main --jq 'length'  → 0, exit 0
 
 The 404 names absence and the token is admin, so protection is absent, matching T01's
 notes (nothing sent). Carried as an open point.
+
+### Review T05-1 fixes (conformance and breakage lenses)
+
+Applied in the working tree on `6bc5925`, uncommitted at writing; the triage is in
+`ai_tmp/review/T05-1/verdicts.md`. `RUSTUP_TOOLCHAIN=stable` throughout.
+
+**No token reaches hook builds again** (C1). `install-hooks` runs both prepares under
+`env -u GITHUB_TOKEN -u GH_TOKEN`, so the run's token, which the setup action still
+passes to that step, reaches only `warm-lychee`'s cargo-binstall calls, as in A's
+`install-tools`. `GITHUB_TOKEN=x just install-hooks` on the warm cache: both prepares
+print with the `env -u` prefix, `lychee 0.24.2 warmed: …/909c8f3d3d713742/…`, exit 0.
+Unproven: the cold path (a ripsecrets build with the token unset) has not run, and the
+prek cache key does not include the `Justfile`, so CI's next run restores a warm cache;
+if lychee's hook falls back from cargo-binstall to `cargo install`, that compile still
+sees the token.
+
+**`warm-lychee` accepts only the hook's own checkout** (B1). It reads the lychee repo's
+`rev` from `.pre-commit-config.yaml` (fails closed unless 40 hex) and accepts a binary
+only in a cache checkout whose `.prek-repo.json` names `"repo":
+"https://github.com/lycheeverse/lychee"` and that rev; this machine also holds a
+`…/lychee.git` checkout of the same rev from another project, which the old glob
+accepted. Positive: the warm run above. Negative, a `PREK_HOME` holding only that
+`.git` checkout with its executable `lychee-0.24.2`, under the §11 denial (`curl exit
+6`): `warm-lychee: no lychee-0.24.2 binary after attempt 1` (and 2, 3), exit 1. Control:
+`6bc5925`'s recipe on the same `PREK_HOME` printed `lychee 0.24.2 warmed:
+…/9c6e4fd962800d41/…`, exit 0. `.prek-repo.json` is prek's internal format.
+
+**§12 claim 5, the repository tree measured directly** (B2, C3). In a scratch clone of
+`6bc5925` after `just build`, the smoke venv and the wheel install, a marker file, then
+`UV_PROJECT_ENVIRONMENT=target/wheel-smoke/venv uv sync --frozen --offline
+--no-default-groups --no-install-project --inexact` (installed `shellingham`, `typer`):
+`find . -newer <marker> -not -path './target/*' -not -path './.git/*'` printed nothing
+(`outside lines 0`); positive control, `find target -newer <marker>`: 62; `git status
+--porcelain`: 0 lines. The uv cache, outside the repository, was not measured.
+
+**Step 5's full `floor` set** (C2). A fresh `git clone -b bootstrap` of the worktree
+into `ai_tmp/fresh` (clone `HEAD` `6bc5925`; warm default caches), `just initialize`
+(exit 0), then `UV_PYTHON=3.13 UV_NO_GROUP=tooling UV_OFFLINE=1 just lock-check py-lint
+py-typecheck coverage wheel-smoke` (raw `ai_tmp/T05/fresh-c2-floor.log`):
+
+```text
+Using CPython 3.13.13
+Resolved 23 packages in 2ms
+All checks passed!
+Success: no issues found in 6 source files
+platform darwin -- Python 3.13.13, pytest-9.2.0, pluggy-1.7.0
+TOTAL                     17      0      2      0   100%
+wheel_smoke api: rovo 0.0.0, no CLI module imported, exactly the four package files and the expected metadata
+wheel_smoke cli: rovo 0.0.0, from python -m rovo and the console script alike
+floor exit 0
+status lines 0
+```
+
+`ai_tmp/fresh` was then deleted. The review's other edits are `CONVENTIONS.md` §10's
+setup-action bullet, the setup action's comment, and §12 rows 5 and 10 (row 10 now
+cites T00 part 3, whose quote is the passing one) (C4).
+
+### Review record, T05-1 (step 7's checkpoint, reviewed at `6bc5925`)
+
+There were two reviewers, both `codex exec -m gpt-6-astra -s read-only`, one per lens
+(conformance, breakage). Separate triage subagents judged each finding and applied the
+fixes one at a time. The raw files, which are not committed, are in
+`ai_tmp/review/T05-1/`, with the merged verdicts in `verdicts.md`. There were six
+findings, all valid, none high, so no second round runs; nothing was handed back.
+
+| id | severity | verdict | reason | action |
+| --- | --- | --- | --- | --- |
+| C1 | medium | valid | `GITHUB_TOKEN` reached both prek prepares, which compile ripsecrets; A kept the token from compiles | `env -u GITHUB_TOKEN -u GH_TOKEN` on both prepares; §10 and the action's comment follow |
+| C2 | low | valid | part B's fresh-clone `floor` quote left out `lock-check` and `UV_OFFLINE=1` | the full set rerun and quoted above |
+| C3 | low | valid | §12 claim 5's evidence was blind to ignored paths | applied as B2's form |
+| C4 | low | valid | §12 claim 10 cited T00 part 2, a failing quote | cites part 3 |
+| B1 | medium | valid | `warm-lychee` accepted a `lychee-<ver>` from any prek checkout, a foreign one included | matches the hook's repo URL and 40-hex rev in `.prek-repo.json` |
+| B2 | low | valid | the same gap as C3; a direct `find -newer` measurement shows the claim holds | §12 row 5 quotes the measurement |
+
+C3 and B2 both rewrote §12 row 5; B2's form, the direct measurement with a positive
+control, was applied. Re-run after the fixes, on `6bc5925` with them uncommitted, with
+`RUSTUP_TOOLCHAIN=stable`; they were then committed as `T05: §14 review fixes`:
+
+```text
+$ { just check 2>&1; echo "exit $?"; } | tail -2
+All checks passed and the worktree is unchanged.
+exit 0
+$ { uv run --frozen prek run actionlint --all-files 2>&1; echo "exit $?"; } | tail -2
+Lint GitHub Actions workflow files.......................................Passed
+exit 0
+```
+
+Residuals, open: C1's cold path is unproven (no cold ripsecrets build with the token
+unset has run, and the prek cache key leaves out the `Justfile`, so CI restores a warm
+cache), and a lychee `cargo install` fallback would still see the token; B1 relies on
+prek's internal `.prek-repo.json` format; `just --fmt --check` reports differences, as
+it did before the review (not a gate).
 
 ## Open points
 
