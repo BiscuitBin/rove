@@ -111,7 +111,10 @@ gives to T00 exists; and the files `CONVENTIONS.md` §11 freezes are final.
    `just py-lint`, `just py-typecheck`, `just coverage`, `just wheel-smoke`. Then prove
    the controls fire (`CONVENTIONS.md` §12 claim 7): in a scratch copy of each fixture
    (§11 "Scratch"), remove F401's import, then E501's line, then the mypy error, and
-   quote the recipe failing each time with the control's message; restore.
+   quote the recipe failing each time with the control's message; restore. Save each
+   backup under a non-Python name (`ai_tmp/scratch/ruff.py.orig`,
+   `ai_tmp/scratch/mypy.py.orig`): `.gitignore` arrives only in step 7, so until then
+   `ruff check .` lints a `.py` file under `ai_tmp/` and fails before the control runs.
 6. **The offline proof** (`CONVENTIONS.md` §12 claims 3, 4, 5). Under §11's network
    denial, with its negative control quoted: `just wheel-smoke`. Claim 5 is a
    before-and-after comparison, because nothing is committed yet and `.gitignore`
@@ -140,14 +143,17 @@ gives to T00 exists; and the files `CONVENTIONS.md` §11 freezes are final.
    prepare-hooks` for both configs and then `uv run --frozen prek run lychee --files
    README.md` instead, because lychee downloads its binary at first run, not at prepare
    (`CONVENTIONS.md` §4 `install-hooks`), so that `just lint` is offline) and quote
-   claim 6's outcome. `just lint`.
+   claim 6's outcome. Then `uv run --frozen prek run --all-files --skip validate-docs
+   --skip validate-agents`: both hooks fire on `pyproject.toml`, and B's validators fail
+   until steps 8 and 9 create the agent files and `docs/manifest.yml`. The full
+   `just lint` runs at the end of step 9.
 8. **The agent stubs** (`CONVENTIONS.md` §7). `AGENTS.md`, the six skills with final
    frontmatter, twelve bridges, the two adapters. `just check-agents` must print
    `Validated AGENTS.md, 2 adapters, and 6 skills.` (claim 10).
 9. **The handbook stubs** (`CONVENTIONS.md` §6, §8). `docs/manifest.yml` in A
    `docs/manifest.yml`'s JSON-compatible form; `docs/README.md` final; every page and
    decisions 0001 to 0007 as stubs; `docs/decisions/README.md` with seven rows.
-   `just check-docs`.
+   `just check-docs`, then `just lint`, now with every hook.
 10. **README, CHANGELOG, SECURITY stubs; the CI stub** (Files touched). The setup
     action's and `ci.yml`'s `uses:` lines are SHA-pinned with a version comment, read
     with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`.

@@ -116,7 +116,13 @@ manual; and decision 0008 records it.
    the dashboard's detected-dependencies section, and for each inventory row the
    dashboard line that covers it. If a row is not detected, add the custom manager it
    needs on a follow-up branch and repeat. **Authorisation required**:
-   approving any update on the dashboard; the first one approved proves the relock (claim 12).
+   approving any update on the dashboard. Claim 12 needs an update from the `pep621`
+   manager (a `[project]` or `[dependency-groups]` pin), not an action SHA, a hook `rev`
+   or lock-file maintenance, because those can land without touching `uv.lock` or
+   without a manifest change. Ask the maintainer to approve one such update, then quote
+   `gh pr diff <n> --repo BiscuitBin/rove --name-only` showing both `pyproject.toml` and
+   `uv.lock`, the changed `uv.lock` entry, and that PR's green `check`. Until then the
+   claim stays open.
 
    **Adversarial review** (`CONVENTIONS.md` §14): the final diff and the dashboard
    evidence, before the final commit of the hand-back notes. That commit, with
