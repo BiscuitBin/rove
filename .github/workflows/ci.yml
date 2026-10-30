@@ -14,9 +14,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the older run. On main every
+# commit keeps its own run: a cancelled run would leave `check` red there.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # `gate` runs the full gate, `just check`, on Python 3.14 on Ubuntu and on
 # macOS: macOS is the maintainer's platform, so a gate that is green only on
