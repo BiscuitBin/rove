@@ -134,8 +134,9 @@ Every remote hook in `.pre-commit-config.yaml` and `.pre-commit-fix.yaml`, and e
 remote `uses:` in `.github/`, is pinned to a full commit SHA with its release tag as a
 comment. lychee also carries `LYCHEE_VERSION` at the head of its argument lists, which
 must match the comment; Renovate groups the three while it detects all three (the
-dashboard lists three `lycheeverse/lychee` readings), no gate checks that they agree,
-and a hand move must change all three too.
+dashboard lists three `lycheeverse/lychee` readings), `just install-hooks` (and so
+every CI run's setup) fails when the comment and `LYCHEE_VERSION` disagree, and a hand
+move must change all three too.
 To move a pin by hand, resolve the release tag to its commit (an annotated tag's
 reference names the tag object, not the commit), and replace the SHA and the comment in
 every file that names it.

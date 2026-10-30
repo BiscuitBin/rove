@@ -275,6 +275,21 @@ which the §11 lifted freeze allows as `shared, own lines`).**
   setup action's `version:` input and `rust-just==` pin instead of `0.13.6` and
   `1.59.0`, so a Renovate bump leaves no stale literal; the matching sentences in the
   how-to and `docs/operations/maintenance.md` that called those floors manual go.
+- (b) The review's C1/B1 hand-back. `Justfile` `warm-lychee` now reads the version in
+  the lychee `rev`'s `# lychee-vX.Y.Z` comment (whitespace around `#` tolerated, as
+  Renovate's regex does) and fails, offline and before any download, when it differs
+  from `LYCHEE_VERSION`. It runs in `install-hooks`, so in every CI setup and in
+  `just initialize`, not in `just check`. `tickets/CONVENTIONS.md` §4's `warm-lychee`
+  block now equals the `Justfile`'s (it had also lagged the earlier rev check);
+  `docs/reference/commands.md` (`install-hooks`) and the how-to's hook-pins paragraph
+  say so. Controls, each `just warm-lychee` under the §11 network denial (negative
+  control `curl` exit 6), `.pre-commit-config.yaml` saved to `ai_tmp/scratch/`, edited,
+  and copied back (checksum identical, `git status` clean after): real tree, exit 0,
+  `lychee 0.24.2 warmed: …/lychee-0.24.2`; comment `lychee-v0.24.3`, exit 1,
+  `warm-lychee: the lychee rev's comment names lychee-v0.24.3 but LYCHEE_VERSION is
+  0.24.2; they must match`; both `LYCHEE_VERSION=0.24.3`, exit 1, the same message the
+  other way round; comment removed, exit 1 (`names lychee-v but …`); two spaces before
+  `#` and none after, exit 0.
 
 **Checks at `2c37124`.** `just check-docs`: `Validated 32 pages and 32 canonical
 topics.`, exit 0. `just check`, exit 0, last line `All checks passed and the worktree is
@@ -323,9 +338,8 @@ only.
 - Whether the B tag should follow B's releases automatically or stay manual: B's
   checkers decide what the gate accepts, so a bump can redden `main`. The maintainer
   decides; the default here is "held for dashboard approval", as every update is.
-- Hand-back to the `Justfile` owner (`CONVENTIONS.md` §11, outside T06 Files touched):
-  a gate check that lychee's `rev` comment `# lychee-vX.Y.Z` equals `LYCHEE_VERSION`
-  (for example in `warm-lychee`), so the pairing is enforced rather than only grouped.
+- Closed: the `Justfile` hand-back (lychee's `rev` comment against `LYCHEE_VERSION`)
+  landed in T06 as hand-back (b) below the review record.
 - Whether security fixes should also wait for approval
   (`"vulnerabilityAlerts": { "dependencyDashboardApproval": true }`): the maintainer
   decides; the configuration keeps Renovate's default, and the docs say so.

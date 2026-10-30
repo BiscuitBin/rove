@@ -53,7 +53,10 @@ install-hooks: && warm-lychee
 # the version .pre-commit-config.yaml pins, in the hook's own checkout in prek's
 # cache (the repo URL and rev .pre-commit-config.yaml names, since the hook runs
 # only that checkout's binary), or it fails. The download can time out (it did
-# on a macOS runner), so it is tried three times.
+# on a macOS runner), so it is tried three times. Before any of that, offline,
+# the rev's `# lychee-vX.Y.Z` comment must equal LYCHEE_VERSION: the hook
+# fetches the LYCHEE_VERSION binary whatever the rev says, so nothing else
+# would catch the two drifting apart (decision 0008 groups them in Renovate).
 # Private: install-hooks runs it, and so does initialize in a secondary worktree.
 [private]
 warm-lychee:
@@ -63,6 +66,8 @@ warm-lychee:
     case $version in ''|*[!0-9.]*) printf '%s\n' "warm-lychee: expected one LYCHEE_VERSION in .pre-commit-config.yaml, found: $version" >&2; exit 1 ;; esac
     rev=$(sed -n '/repo: https:\/\/github.com\/lycheeverse\/lychee$/{n;s/.*rev: *\([0-9a-f]\{40\}\).*/\1/p;}' .pre-commit-config.yaml)
     case $rev in ''|*[!0-9a-f]*) printf '%s\n' "warm-lychee: expected the lychee repo's 40-hex rev in .pre-commit-config.yaml, found: $rev" >&2; exit 1 ;; esac
+    tag=$(sed -n '/repo: https:\/\/github.com\/lycheeverse\/lychee$/{n;s/.*rev: *[0-9a-f]\{40\}[[:blank:]]*#[[:blank:]]*lychee-v\([0-9][0-9.]*\).*/\1/p;}' .pre-commit-config.yaml)
+    if [ "$tag" != "$version" ]; then printf '%s\n' "warm-lychee: the lychee rev's comment names lychee-v$tag but LYCHEE_VERSION is $version; they must match" >&2; exit 1; fi
     cache=$(uv run --frozen prek cache dir)
     for attempt in 1 2 3; do
         uv run --frozen prek run lychee --files README.md || :
