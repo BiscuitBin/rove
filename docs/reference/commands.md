@@ -46,7 +46,7 @@ outside `check`.
 | `py-lint` | ruff lint and format check; require the package in ruff's file list; require the positive control to fail with exit 1 naming `F401` and `E501`. |
 | `py-typecheck` | mypy over the files `mypy.ini` names; require the positive control to fail with exit 1. |
 | `py-test *args` | Run pytest, passing any arguments through. Quick and uncovered; not a gate. |
-| `coverage` | Run the suite under coverage, combine, enforce the floor (`coverage_floor`, 90), and write `target/coverage.xml`. |
+| `coverage` | Run the suite under coverage, combine, enforce the floor (`coverage_floor`, 95), and write `target/coverage.xml`. |
 | `build` | Empty `dist/`, then build the sdist and the wheel offline. |
 | `wheel-smoke` | After `build`: require exactly one wheel, install it alone into a fresh `target/wheel-smoke/venv` and run the `api` smoke, then install the locked runtime closure from the cache and run the `cli` smoke and `rovo --version`. Offline. |
 | `audit` | Check the locked versions for known vulnerabilities (`uv audit --frozen`). Needs the network; outside `check`. |

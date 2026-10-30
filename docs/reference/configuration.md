@@ -62,7 +62,7 @@ Owned by T02.
 
 | File | Owner | What it sets |
 | --- | --- | --- |
-| `Justfile` | T00, frozen in wave 1 | Every recipe, and `coverage_floor := "90"`. |
+| `Justfile` | T00, frozen in wave 1 | Every recipe, and `coverage_floor := "95"`. |
 | `.gitignore` | T00, frozen | Scratch, build output, the environment and every generated file, so the gate's snapshot never sees them. |
 | `.gitattributes` | T00, frozen | `* text=auto eol=lf`: LF line endings for every text file. |
 | `.github/` | T01 | The CI workflow and the setup action that installs uv, just, the environment and the hook environments. |

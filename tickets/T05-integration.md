@@ -169,7 +169,7 @@ below was still open.
 | install-hooks proven only in a fresh clone | T00 open (inventory) | unchanged: a secondary worktree must not run it. `install-hooks` with `warm-lychee` ran in a cold local clone (below) |
 | macOS in every pull request's matrix | T01 open point | carried, maintainer: run 4 timings are floor 21s, ubuntu 28s, macOS 2m25s (cold prek cache) |
 | T01 steps 9 to 11 (protection, settings) | T01 | carried: `check` is now green, which step 9 waited for. Nothing applied |
-| Coverage floor at 100% | T02 open point | maintainer decision |
+| Coverage floor at 100% | T02 open point | resolved, maintainer decision 2026-10-30: 95% (from 90%), below |
 | `SECURITY.md` contact while private vulnerability reporting reads `false` | T04 open point, T01 step 9 | maintainer decision |
 | Decision 0006's licence options | T04 open point | maintainer decision |
 | Renovate installed org-wide with `repository_selection: all` | common brief | reported, for T06 and the maintainer |
@@ -316,7 +316,8 @@ lychee runs "once".
 **Claim outcomes.** In `CONVENTIONS.md` §12's new column (`fc01d5c`). Claim 4 failed
 cold and its step was replaced; claim 5's command left the recipe; claim 12 is T06's.
 
-**Maintainer decisions collected, not resolved.** The coverage floor at 100% (T02);
+**Maintainer decisions collected, not resolved.** The coverage floor at 100% (T02, since
+resolved: 95%, below);
 `SECURITY.md`'s contact while private vulnerability reporting reads `false` (T04, T01
 step 9); decision 0006's licence options (T04); whether macOS stays in every pull
 request's matrix (T01; timings above); T01 steps 9 to 11 (protection now has a green
@@ -481,6 +482,46 @@ unset has run, and the prek cache key leaves out the `Justfile`, so CI restores 
 cache), and a lychee `cargo install` fallback would still see the token; B1 relies on
 prek's internal `.prek-repo.json` format; `just --fmt --check` reports differences, as
 it did before the review (not a gate).
+
+### Maintainer decision: coverage floor 95% (2026-10-30)
+
+The maintainer set the coverage floor to 95%. The brief phrased it as lowering the floor
+from 100%; the floor was in fact `coverage_floor := "90"`, and 100% is the measured
+total (T02's open point asked whether to raise it to 100%). So the floor rises from 90
+to 95, and the total stays 100%. Changed, every place the number lives (`rg -n
+'\b90\b'` over the tree outside `tickets/T0*` and `ai_tmp/` then printed nothing, exit
+1): `Justfile` `coverage_floor`, `tickets/CONVENTIONS.md` §4's `Justfile` and §7 invariant
+5, `AGENTS.md` invariant 5, `docs/reference/configuration.md`, `testing.md`,
+`commands.md`, `quality-gates.md` and `docs/explanation/quality-philosophy.md`.
+`.coveragerc` names no number (the floor is the `Justfile`'s, never also there), and
+the skills say only "the floor". T02's open point is answered in its notes.
+
+The floor bites, on `4f6ebbf` with the change uncommitted. A scratch copy of
+`src/rovo/cli.py` was saved to `ai_tmp/scratch/`, an uncalled function appended, `just
+coverage` run, and the copy restored, each time:
+
+```text
+## a two-statement uncalled function: between 90 and 95
+TOTAL                     20      2      2      0    91%
+Coverage failure: total of 91 is less than fail-under=95
+error: recipe `coverage` failed on line 129 with exit code 2
+exit 2
+## same data, `coverage report --fail-under 90` (the old floor)
+TOTAL                     20      2      2      0    91%
+at 90: exit 0
+## a five-statement function with a branch
+TOTAL                     23      5      4      0    74%
+Coverage failure: total of 74 is less than fail-under=95
+exit 2
+## restored
+cmp exit 0
+git diff --quiet exit 0
+TOTAL                     17      0      2      0   100%
+exit 0
+```
+
+One untested statement alone does not breach it: coverage rounds the total to its
+precision (0) before comparing, and 20 of 21 units rounds to 95.
 
 ## Open points
 

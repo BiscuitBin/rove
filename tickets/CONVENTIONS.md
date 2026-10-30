@@ -299,7 +299,7 @@ set shell := ["sh", "-eu", "-c"]
 # Coverage floor over src/rovo/**: coverage's total, lines and branches
 # combined (fail-under), not a separate floor for each. Lower the complexity,
 # not the number.
-coverage_floor := "90"
+coverage_floor := "95"
 
 default:
     @just --list
@@ -619,7 +619,7 @@ The six invariants:
    `rovo --version` read it through `importlib.metadata`.
 4. ruff with `select = ["ALL"]` and mypy strict; a suppression names its rule and a
    reason (`# noqa: XXX123  reason`), and a per-file ignore carries a comment.
-5. Coverage of `src/rovo/**` does not fall below the `Justfile`'s floor (90% of lines and
+5. Coverage of `src/rovo/**` does not fall below the `Justfile`'s floor (95% of lines and
    branches combined, coverage's total); lower the complexity, not the number.
 6. `uv.lock` is the pin; runtime dependencies are compatible ranges with a tested lower
    bound, tools are exact; no dependency is added without the note decision 0005 asks for.

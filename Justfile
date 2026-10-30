@@ -9,7 +9,7 @@ set shell := ["sh", "-eu", "-c"]
 # Coverage floor over src/rovo/**: coverage's total, lines and branches
 # combined (fail-under), not a separate floor for each. Lower the complexity,
 # not the number.
-coverage_floor := "90"
+coverage_floor := "95"
 
 default:
     @just --list

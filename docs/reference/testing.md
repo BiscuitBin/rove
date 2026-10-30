@@ -64,7 +64,7 @@ A build on every gate is the cost of testing the artefact that will ship.
 
 `just coverage` runs the suite under coverage and fails when the total over the `rovo`
 package (`source_pkgs = rovo`), lines and branches combined (`branch = True`), falls
-below 90 per cent. The floor lives in the `Justfile` as `coverage_floor`, never also in
+below 95 per cent. The floor lives in the `Justfile` as `coverage_floor`, never also in
 `.coveragerc`. `parallel = True` gives each process its own data file, and the recipe
 combines them. `.coveragerc` excludes the usual unreachable lines, including the
 `if __name__ == "__main__":` block, which is why `src/rovo/__main__.py` reports no

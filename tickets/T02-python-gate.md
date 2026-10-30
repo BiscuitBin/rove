@@ -462,8 +462,9 @@ Acceptance criteria and their evidence:
 
 ## Open points
 
-- For the maintainer: whether the floor should rise to 100% while the package is this
-  small. The `Justfile` holds the number, so a change is a `main` pull request.
+- Answered (maintainer decision, 2026-10-30): the coverage floor is 95%, up from 90%;
+  it does not rise to 100%. Landed in T05 (`T05: coverage floor 95% (maintainer
+  decision)`), whose hand-back notes quote the proof that 95 bites.
 - For T05: `_typos.toml`'s `mis` and `als` entries are A's words. They are needed only
   because `tickets/T00-foundation.md:583` quotes them, so they can go when that line
   changes.

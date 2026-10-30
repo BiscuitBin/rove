@@ -19,7 +19,7 @@ an ignored path such as `target/` or `dist/` is outside the snapshot.
 | 2 | `lint` | Every hook in `.pre-commit-config.yaml` passes over all tracked files: file hygiene, EditorConfig, markdownlint, typos, offline links, shellcheck, actionlint, ripsecrets, and the Python and contract hooks. |
 | 3 | `py-lint` | ruff sees the package, its lint (`select = ["ALL"]`) and format checks pass, and the positive control fires. |
 | 4 | `py-typecheck` | mypy, strict, passes over `src`, `tests` and `scripts`, and the positive control fires. |
-| 5 | `coverage` | The suite passes under coverage, and coverage of `src/rovo/**`, lines and branches combined, is at least 90 per cent. |
+| 5 | `coverage` | The suite passes under coverage, and coverage of `src/rovo/**`, lines and branches combined, is at least 95 per cent. |
 | 6 | `wheel-smoke` | A freshly built wheel installs and works offline in a new environment: first alone, with no dependencies, then with the locked runtime closure. |
 | 7 | `check-docs` | Markdown, spelling and local links pass, then the documentation contract. |
 | 8 | `check-agents` | `AGENTS.md`, the adapters, the skills and their bridges satisfy the agent contract. |

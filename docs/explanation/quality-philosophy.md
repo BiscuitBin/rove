@@ -43,7 +43,7 @@ Coverage distinguishes two things that look alike. A branch no input can reach i
 gap in the tests; it is code that should not exist, such as a defensive default no
 caller can trigger. Delete it rather than cover it with a contrived test.
 
-The corollary: do not chase the last few percent. The floor is 90 per cent of
+The corollary: do not chase the last few percent. The floor is 95 per cent of
 `src/rovo/**`, lines and branches combined, as coverage's total. While the package is
 small so is the denominator, so one untested branch can breach the floor on its own.
 Lower the complexity, not the number.
