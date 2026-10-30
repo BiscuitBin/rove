@@ -42,14 +42,21 @@ runs:
     # prek's own cache directory, outside the workspace, so check-clean's
     # snapshot never sees it: the hook clones, their toolchains and the
     # ripsecrets build, which a cold run would otherwise fetch. Keyed on both
-    # hook configurations; saved on any branch.
+    # hook configurations and on uv.lock, which pins prek; saved on any branch.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/prek
-        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml', 'uv.lock') }}
     # The prepare and the lychee warm are the point; the shim it writes into
     # the runner's .git is harmless. A restored cache is not enough: on a
     # cold one, `just check` would fetch every hook environment and lychee.
-    # After this step no step reaches the network.
+    # With the next step's check, no later step reaches the network.
     - run: just install-hooks
+      shell: bash
+    # The Justfile's lychee warm-up ignores its own exit status (`-`), so
+    # check its result here: without the binary, `just check` would fetch it.
+    - run: |
+        found=$(find ~/.cache/prek/repos -path '*/.cargo/bin/lychee-*' -perm -u+x -print -quit)
+        test -n "$found" || { echo 'lychee was not warmed; the gate would reach the network' >&2; exit 1; }
+        echo "lychee warmed: $found"
       shell: bash

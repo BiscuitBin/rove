@@ -293,16 +293,60 @@ nothing.
   20, `check` 5 and `audit` 10 (A's).
 - `floor` has a non-recipe step, `uv run --frozen python --version`, so that step 7 has
   the `Python 3.13` line to quote. Without it no recipe prints the version.
-- The prek cache key hashes both hook configurations only, as §10 and this ticket say.
-  A's key also hashed `pixi.lock`, which pins prek. Here `uv.lock` pins prek and is not
-  in the key, so a prek bump still hits the old key's cache. If the new prek needs new hook
-  environments, `just install-hooks` rebuilds them on every run, and nothing saves
-  them, because a cache hit writes nothing back. This
-  is left for the review to weigh.
+- The prek cache key hashes both hook configurations and `uv.lock`, as A's hashed
+  `pixi.lock`: `uv.lock` pins prek, and an exact cache hit is never re-saved
+  (`actions/cache` `src/saveImpl.ts:50-55` at `55cc834`), so without it a prek bump
+  would rebuild hook environments on every run. This departs from §10's literal "keyed
+  on the hash of both prek configurations" and from step 3. Trade-off: any relock, not
+  only a prek bump, gives one cold prek cache (and one ripsecrets rebuild). Checkpoint 1
+  review, C1 and B2; B2's alternative (key on `prek --version` from an extra step) was
+  not taken, to keep A's shape.
+- The setup action has a step after `just install-hooks` that fails if no executable
+  `lychee-*` binary is under `~/.cache/prek/repos`. The `Justfile`'s warm-up ignores its
+  own exit status (`-uv run --frozen prek run lychee ...`), so without the check a failed
+  download would be retried, over the network, by `just check`. §10 does not state this
+  step. Checkpoint 1 review, B1.
 - Work began from a worktree branch created before T00, fast-forwarded to `69f0d14`
   (above), not from `origin/main` (single-branch decision, 2026-10-29).
 - `RUSTUP_TOOLCHAIN=stable` was exported for every local run (no rustup default on
   this machine). The machine was not changed.
+
+**Hand-backs from checkpoint 1 review.**
+
+- `Justfile:47` (frozen, §11): the leading `-` on the lychee warm-up drops its exit
+  status. Still open; already handed back by T00 (C1). T01's setup action now fails
+  closed instead (above).
+- `CONVENTIONS.md` §10 (not T01's to edit), for T05: the prek cache key wording should
+  read "keyed on the hash of both prek configurations and `uv.lock`, which pins prek",
+  and may mention the lychee check after `just install-hooks`.
+
+### Review record, checkpoint 1 (step 6, reviewed at `33e5cbe`)
+
+The orchestrator ran it, as `CONVENTIONS.md` §14 lays out. There were two reviewers,
+both `codex exec -m gpt-6-astra -s read-only`, one per lens. Separate triage subagents
+judged each finding and applied the fixes. The raw files, which are not committed, are
+in `ai_tmp/review/T01-1/`, with the merged verdicts in `verdicts.md`. There were three
+findings, all valid, none high, so no second round runs:
+
+| id | severity | verdict | reason | action |
+| --- | --- | --- | --- | --- |
+| C1 | low | valid | the prek cache key leaves out `uv.lock`, which pins prek, and an exact hit is never re-saved | `uv.lock` added to `hashFiles` |
+| B2 | low | valid | same defect as C1; it proposed keying on `prek --version` | applied as C1's fix (A's key shape, no extra step) |
+| B1 | medium | valid | `Justfile:47`'s `-` hides a failed lychee warm-up, so `just check` could reach the network | a fail-closed lychee check step in the setup action; the root cause is handed back (above) |
+
+Re-run after the fixes, on `33e5cbe` with them uncommitted, with
+`RUSTUP_TOOLCHAIN=stable`. They were then committed as `T01: §14 checkpoint 1 fixes`.
+
+- `uv run --frozen prek run actionlint --all-files`: `Passed`, exit 0. Control: with
+  `needs: [gate, floor, nope]` edited into a copy-saved `ci.yml`, the hook failed with
+  `[job-needs]`, exit 1. After the copy back, `git diff --quiet` exited 0.
+- `rg -n 'uses: [^.]' .github` listed the same five lines as in step 6 (exit 0), and the
+  unpinned filter printed nothing (exit 1).
+- The new lychee step's command, run against the real cache, found
+  `~/.cache/prek/repos/909c8f3d3d713742/.cargo/bin/lychee-0.24.2`, exit 0. Its control,
+  against an empty `ai_tmp/T01/empty-prek/repos`, gave `test -n` exit 1.
+- Residual: the step accepts any cached `lychee-*` version, not only the pinned one, and
+  the composite action has not yet run on a real runner (step 7).
 
 Steps 7 and later have not been done. Each one needs authorisation, and the work
 stops at step 6's **Adversarial review**.
