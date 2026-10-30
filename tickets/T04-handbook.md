@@ -1,7 +1,7 @@
 ---
 id: T04
 title: "Handbook and maintainer docs: every page, decisions 0001 to 0007, README"
-status: open
+status: done
 depends_on: [T00]
 parallel_with: [T01, T02, T03]
 branch: ticket/t04-handbook
@@ -505,6 +505,10 @@ $ git diff --stat 69f0d14 HEAD -- docs/manifest.yml docs/README.md uv.lock
 (nothing)
 exit 0
 ```
+
+After that commit (`35b2e01`): `just check` ended
+`All checks passed and the worktree is unchanged.` (exit 0) and `git status --short`
+printed nothing (exit 0). Status set to `done` in the next commit.
 
 **Acceptance criteria and their evidence.**
 
