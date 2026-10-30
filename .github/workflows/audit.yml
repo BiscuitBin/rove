@@ -1,0 +1,33 @@
+name: Audit
+
+# Separate from CI because `uv audit` asks the OSV vulnerability service
+# about every locked package over the network, and a request can fail for
+# reasons that have nothing to do with the diff. So this is never a required check, and it also runs on a
+# schedule: an advisory published against an unchanged uv.lock is found by
+# the week's run, not by the next pull request.
+
+on:
+  pull_request:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: just audit

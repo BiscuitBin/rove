@@ -1,9 +1,9 @@
 name: Set up the rovo toolchain
 description: >-
   uv at its pin, just from uv's tool directory, the environment uv.lock pins
-  (Python, every tool and the tooling group's checkers), and prek's hook
-  environments with lychee warmed. Runs after the checkout. A T00 stub that
-  T01 replaces.
+  (Python, every tool and, unless the job sets UV_NO_GROUP, the tooling
+  group's checkers), and prek's hook environments with lychee warmed. Runs
+  after the checkout.
 
 inputs:
   python-version:
@@ -16,13 +16,15 @@ inputs:
 runs:
   using: composite
   steps:
-    # The cache is keyed on uv.lock, so a relock is a new key.
+    # The one uv pin in YAML: nothing else can install uv. The cache is keyed
+    # on uv.lock, so a relock is a new key.
     - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       with:
         version: '0.13.6'
         enable-cache: true
         cache-dependency-glob: uv.lock
-    # Through the environment, not `${{ }}` inside the shell line.
+    # Through the environment, not `${{ }}` inside the shell line. UV_PYTHON
+    # outranks .python-version, so the 3.13 job really runs 3.13.
     - run: echo "UV_PYTHON=$PYTHON_VERSION" >> "$GITHUB_ENV"
       shell: bash
       env:
@@ -33,17 +35,21 @@ runs:
         uv tool install rust-just==1.59.0
         uv tool dir --bin >> "$GITHUB_PATH"
       shell: bash
-    # Exactly what uv.lock says; the lock is never rewritten.
+    # Exactly what uv.lock says; the lock is never rewritten. A job's env
+    # reaches this step, so UV_NO_GROUP=tooling leaves B out here.
     - run: just sync
       shell: bash
-    # The hook clones, their toolchains and the ripsecrets build, which a cold
-    # run would otherwise fetch. Saved on any branch.
+    # prek's own cache directory, outside the workspace, so check-clean's
+    # snapshot never sees it: the hook clones, their toolchains and the
+    # ripsecrets build, which a cold run would otherwise fetch. Keyed on both
+    # hook configurations; saved on any branch.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/prek
         key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml') }}
     # The prepare and the lychee warm are the point; the shim it writes into
-    # the runner's .git is harmless. After this step no step reaches the
-    # network.
+    # the runner's .git is harmless. A restored cache is not enough: on a
+    # cold one, `just check` would fetch every hook environment and lychee.
+    # After this step no step reaches the network.
     - run: just install-hooks
       shell: bash

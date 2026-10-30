@@ -18,16 +18,82 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# A T00 stub: one job running the full gate on Python 3.14. T01 replaces it
-# with the gate matrix, the 3.13 floor job and the aggregate `check`.
+# `gate` runs the full gate, `just check`, on Python 3.14 on Ubuntu and on
+# macOS: macOS is the maintainer's platform, so a gate that is green only on
+# Linux would not be the gate they run. `floor` proves the package's floor,
+# Python 3.13, but it is not the full gate: B's checkers require 3.14
+# (CONVENTIONS.md §1 fact 1), so on 3.13 the tooling group is left out and
+# only the Python gates and the wheel smoke run. `check`, last, is the one
+# required check; the gate jobs are its `needs`, so no name carries a slash
+# or a space.
 jobs:
-  check:
-    name: check
-    runs-on: ubuntu-latest
+  gate:
+    name: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
+        with:
+          python-version: '3.14'
       - run: just check
+
+  floor:
+    name: floor
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # On the job, so that the setup action's `just sync` leaves B out too:
+    # the tooling group's own floor is 3.14, and syncing it on 3.13 fails.
+    env:
+      UV_NO_GROUP: tooling
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          python-version: '3.13'
+      # The interpreter the recipes below run on, printed so the log shows
+      # it is 3.13 and not .python-version's 3.14.
+      - run: uv run --frozen python --version
+      # One recipe per step, in the gate's order, so a failure names itself
+      # in the step list.
+      - run: just lock-check
+      - run: just py-lint
+      - run: just py-typecheck
+      - run: just coverage
+      - run: just wheel-smoke
+      # Last: `just check` snapshots the worktree between recipes, and this
+      # job does not, so without it a recipe that rewrote a tracked file, or
+      # left an untracked one, would pass here and fail locally. Plain git,
+      # not `just check-clean`: that recipe is B's bg-project-check, which
+      # this job cannot install on 3.13.
+      - run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            printf '%s\n' 'floor: the recipes changed the worktree:' "$status" >&2
+            exit 1
+          fi
+
+  # The one required check (CONVENTIONS.md §10). It needs every gate job and
+  # fails if any of them failed, was cancelled or was skipped, so protection
+  # names `check` alone and never changes when a job is added, renamed or
+  # moved into a reusable workflow: a new gate job joins `needs` here.
+  # `if: always()` is what makes it report on a failure instead of being
+  # skipped, which is why the step reads `needs.*.result` itself. No checkout,
+  # no setup action, and no `${{ }}` inside a shell line.
+  check:
+    name: check
+    needs: [gate, floor]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        run: exit 1
