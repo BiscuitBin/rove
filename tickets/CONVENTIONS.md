@@ -620,7 +620,7 @@ frozen.
 - **`## Invariants`**, the six below verbatim, then A's authority paragraph adapted:
   anything leaving the worktree needs explicit authorization for each action; the
   network recipes of §4 by name; scratch in `ai_tmp/`; one ticket per worktree; hooks
-  never installed from a secondary worktree (the recipe itself refuses there); `just check` is the proof, green as §11
+  never installed from a secondary worktree; `just check` is the proof, green as §11
   defines it.
 - **Six `<important if="...">` blocks**: changing Python under `src/` or `tests/`;
   changing the command line; adding or moving a dependency; changing a page under
