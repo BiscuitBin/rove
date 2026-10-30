@@ -383,6 +383,43 @@ branches are measured, and control 3 shows that the floor bites.
 with one process (T00), and subprocess coverage needs `patch = subprocess`
 (before/after above).
 
+**Step 8, Verification** at `2c68c1e` (raw `ai_tmp/T02/verify-final.log`; the 3.13 run
+in `ai_tmp/T02/verify-313.log`, then `just sync` back to 3.14):
+
+```text
+2c68c1e
+py-lint exit 0
+py-typecheck exit 0
+src/rovo/__init__.py       3      0      0      0   100%
+src/rovo/__main__.py       0      0      0      0   100%
+src/rovo/cli.py           14      0      2      0   100%
+TOTAL                     17      0      2      0   100%
+exit 0
+wheel_smoke cli: rovo 0.0.0, from python -m rovo and the console script alike
+rovo 0.0.0
+exit 0
+check-docs exit 0
+3.13 exit 0
+sync exit 0
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+exit 0
+```
+
+After that run, the two `S603` comments in `ruff.toml` were reworded, because the
+tests and the smoke now also run the console script. `just py-lint` then gave exit 0,
+and `just check` was run again before this commit (below). Every ignore carries a
+comment, from `rg -n -B1 '^\s*"[A-Z]+[0-9]*",' ruff.toml`: `COM812`, `ISC001`,
+`CPY001`, `tests/**` `S101`, `INP001`, `S603`, and `scripts/**` `INP001`, `T201`,
+`S603`, each with a trailing `#` comment.
+
+**Hand-backs from T02:** none new. The `CPY001` amendment to §9 is T00's, already
+recorded. No recipe change was needed: every gate fired through the frozen `Justfile`.
+
+**Status:** left `open` until checkpoint 2 (§14, whole diff) has run.
+
 ## Open points
 
 - Whether the floor should rise to 100% while the package is this small. The maintainer

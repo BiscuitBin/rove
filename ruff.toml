@@ -27,12 +27,12 @@ ban-relative-imports = "all"
 "tests/**" = [
   "S101",   # Assertions are how pytest states the contract.
   "INP001", # Tests are discovered without an importable test package.
-  "S603",   # The API test runs sys.executable with fixed arguments, without a shell.
+  "S603",   # The tests run sys.executable and the rovo script, fixed arguments, no shell.
 ]
 "scripts/**" = [
   "INP001", # Repository scripts are standalone, not an importable package.
   "T201",   # The wheel smoke prints its verdict.
-  "S603",   # The wheel smoke runs sys.executable with fixed arguments, without a shell.
+  "S603",   # The smoke runs sys.executable and the rovo script, fixed arguments, no shell.
 ]
 
 # Formatter settings retain their defaults, except its file set. ruff 0.17 also
