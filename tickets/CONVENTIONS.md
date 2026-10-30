@@ -461,9 +461,11 @@ check-clean baseline="":
     uv run --frozen bg-project-check clean "$1"
 
 # The complete gate: the recipes pyproject.toml lists, in order, with the
-# worktree snapshotted between each, then check-clean.
+# worktree snapshotted between each, then check-clean. UV_OFFLINE reaches every
+# recipe and hook under it, so a `uv run` that finds the environment out of
+# date with uv.lock syncs from the cache or fails; it never fetches.
 check:
-    uv run --frozen bg-project-check run
+    UV_OFFLINE=1 uv run --frozen bg-project-check run
 ```
 
 **Gate order** (the `recipes` list of §2), then `check-clean`: 1 `lock-check`, 2 `lint`,
@@ -735,8 +737,10 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
 - **`ci.yml` jobs.** `gate`, a matrix over `ubuntu-latest` and `macos-latest` on
   Python 3.14, runs `just check`, the full gate with B. `floor`, on `ubuntu-latest`
   with `python-version: '3.13'` and `UV_NO_GROUP: tooling` in the job's env (§1 fact 1),
-  runs `just lock-check`, `just py-lint`, `just py-typecheck`, `just coverage` and
-  `just wheel-smoke`, then `git status --porcelain` and fails if it prints anything (it
+  sets `UV_OFFLINE=1` for the rest of the job after printing its interpreter (what
+  `just check` sets for its recipes, §4), runs `just lock-check`, `just py-lint`,
+  `just py-typecheck`, `just coverage` and `just wheel-smoke`, then
+  `git status --porcelain` and fails if it prints anything (it
   cannot use `check-clean`, which is B's). `check`, A's aggregate job, verbatim in
   shape, `needs: [gate, floor]`.
 - `permissions: contents: read`, `persist-credentials: false`, A's `concurrency` block

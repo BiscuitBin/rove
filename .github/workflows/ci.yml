@@ -62,6 +62,9 @@ jobs:
       # The interpreter the recipes below run on, printed so the log shows
       # it is 3.13 and not .python-version's 3.14.
       - run: uv run --frozen python --version
+      # What `just check` sets for its recipes, set here for the rest of the
+      # job: a `uv run` may sync from the cache but never fetch.
+      - run: echo 'UV_OFFLINE=1' >> "$GITHUB_ENV"
       # One recipe per step, in the gate's order, so a failure names itself
       # in the step list.
       - run: just lock-check

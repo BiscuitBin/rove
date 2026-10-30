@@ -175,6 +175,8 @@ check-clean baseline="":
     uv run --frozen bg-project-check clean "$1"
 
 # The complete gate: the recipes pyproject.toml lists, in order, with the
-# worktree snapshotted between each, then check-clean.
+# worktree snapshotted between each, then check-clean. UV_OFFLINE reaches every
+# recipe and hook under it, so a `uv run` that finds the environment out of
+# date with uv.lock syncs from the cache or fails; it never fetches.
 check:
-    uv run --frozen bg-project-check run
+    UV_OFFLINE=1 uv run --frozen bg-project-check run
