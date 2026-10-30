@@ -543,8 +543,10 @@ The dotfiles are A's at `c8e1a46`, adjusted:
   first `just check`.
 - `.markdownlint-cli2.jsonc`: A's, keeping `MD033` `allowed_elements` of
   `["br", "important"]` for the `<important if>` blocks (§7), with `ignores` of
-  `["target", ".venv", "ai_tmp"]`: markdownlint-cli2 appends `**/*.md` to the files prek
-  passes, so without `.venv` it would lint the environment's packages.
+  `["target", ".venv", "ai_tmp"]` kept as a guard, and with A's `globs` removed:
+  markdownlint-cli2 appends `globs` to the files prek passes, so `**/*.md` would lint,
+  and under `just fix` rewrite, every `.md` on disk, untracked and ignored paths such as
+  `.pytest_cache/` and `.claude/` worktrees included (final review F2).
 - `_typos.toml`: A's, minus exclusions for paths this repository lacks, plus `uv.lock`,
   plus `cpy = "cpy"` in `[default.extend-words]` for ruff's `CPY001` (§9). The entry
   stays after that ignore lifts, because decision 0006 and the tickets name the code

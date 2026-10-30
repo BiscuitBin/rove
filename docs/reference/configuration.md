@@ -54,7 +54,7 @@ Owned by T02.
 | `.pre-commit-config.yaml` | The read-only hook gate `just lint` runs and the installed hook uses: file hygiene, EditorConfig, markdownlint, typos, lychee (offline, and `lychee-online` on the manual stage), shellcheck, actionlint, ripsecrets, `py-lint`, `py-typecheck` and both contract validators. Remote hooks are pinned to commit SHAs. |
 | `.pre-commit-fix.yaml` | The mutating hooks `just fix` runs, including ruff's formatter and fixer; it skips the positive-control fixtures. |
 | `.editorconfig` | UTF-8, LF line endings, final newlines, and indentation: two spaces, four for Python and the `Justfile`. |
-| `.markdownlint-cli2.jsonc` | markdownlint's rules: no line-length limit, `<important>` and `<br>` allowed for `AGENTS.md`, and `target`, `.venv` and `ai_tmp` ignored. |
+| `.markdownlint-cli2.jsonc` | markdownlint's rules: no line-length limit, `<important>` and `<br>` allowed for `AGENTS.md`, and `target`, `.venv` and `ai_tmp` ignored. It checks only the files the hook runner passes, never untracked or ignored files on disk. |
 | `_typos.toml` | The only typos configuration: the excluded paths (`uv.lock` among them) and the accepted words, each commented. |
 | `lychee.toml` | The link checker's cache, retries, timeout, accepted status codes and excluded paths. |
 

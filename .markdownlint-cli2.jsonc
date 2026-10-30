@@ -13,6 +13,8 @@
     // The documentation contract owns the first heading, not markdownlint.
     "MD041": false
   },
-  "globs": ["**/*.md"],
+  // No "globs": markdownlint-cli2 would append them to the files prek passes,
+  // and lint (and, under `just fix`, rewrite) every .md on disk, untracked and
+  // ignored ones included. Only the files prek passes are linted.
   "ignores": ["target", ".venv", "ai_tmp"]
 }
