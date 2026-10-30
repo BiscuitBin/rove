@@ -158,6 +158,117 @@ when, the installation read-back, the per-row dashboard evidence, the first relo
 review record for each checkpoint, and where this ticket departed from L's draft and
 A's T17 (at least: lychee is now enabled and has its own regex managers).
 
+### Steps 1 to 4, at `2c37124` (local part)
+
+Run on 2026-10-30 in the `bootstrap` worktree, not a `ticket/t06-renovate` worktree off
+`main`: `main` holds only the tickets until PR #2 (`bootstrap`, carrying T00 to T05)
+merges, so the inventory is taken on `bootstrap` (recorded departure, as for every
+ticket in this round). `RUSTUP_TOOLCHAIN=stable` exported for the hook builds. Nothing
+was pushed and no GitHub state was changed.
+
+**State reads (read-only `gh`, 2026-10-30T21:48Z, each exit 0).** The Mend Renovate app
+is already installed on the organisation: `gh api orgs/BiscuitBin/installations`
+returns installation `174933380`, `app_slug: renovate`, `repository_selection: all`,
+created 2026-10-24, permissions `administration: read, checks: write, contents: write,
+issues: write, members: read, metadata: read, packages: read, pull_requests: write,
+statuses: write, vulnerability_alerts: read, workflows: write`. The ticket's "rove only"
+is therefore not the current state; reported, not changed. `gh pr list --repo
+BiscuitBin/rove --author app/renovate --state all` prints `[]`, a title search for
+`Renovate` in issues prints `[]`, and the branches are `bootstrap`,
+`bootstrap-tickets`, `main`: no onboarding pull request, dashboard or Renovate branch
+after six days of access (cause unknown; the Mend portal's settings are not readable
+from here). Consequence for step 5: the app already reads this repository, so the merge
+that puts `renovate.json` on `main` is the moment Renovate starts on it. `main`
+protection: `checks: [{context: check, app_id: 15368}]`, `required_pull_request_reviews:
+null`, `enforce_admins: false`.
+
+**Inventory (step 2).** Extraction column from a local Renovate run (below).
+
+| File | Pin | Coverage | Extracted as |
+| --- | --- | --- | --- |
+| `pyproject.toml` | `[build-system] requires = ["hatchling==1.33.0"]` | native `pep621` | `hatchling`, `build-system.requires`, pypi; a bump edits `pyproject.toml` only |
+| `pyproject.toml` | `typer>=0.27.3,<0.28` | native `pep621`, `update-lockfile` | `typer`, `project.dependencies` |
+| `pyproject.toml` | `coverage`, `mypy`, `prek`, `pytest`, `ruff` `==` pins | native `pep621` | five `dependency-groups` deps, pypi |
+| `pyproject.toml` | `requires-python = ">=3.13"` | manual, decision 0001; rule disables it | `python`, `requires-python`; lookup `skipReason: disabled` |
+| `pyproject.toml` | B tag `v0.3.0` in `[tool.uv.sources]` | native `pep621` (no custom manager needed) | `biscuit-games-tooling`, `tool.uv.sources`, github-tags `steven-cutting/biscuit_games_tooling` |
+| `uv.lock` | the transitive closure | native `pep621` relock, plus weekly lock-file maintenance | (lock file of the `pep621` package file) |
+| `.python-version` | `3.14` | manual, decision 0001; rule disables `pyenv` | `pyenv`, `python` 3.14; lookup `skipReason: disabled` |
+| `.pre-commit-config.yaml` | six `rev`s with `# v…` comments (editorconfig-checker, markdownlint-cli2, typos, shellcheck-py, actionlint, ripsecrets) | regex manager (hook revs) | six github-tags deps with digests |
+| `.pre-commit-config.yaml` | lychee `rev` `2bba271…` `# lychee-v0.24.2` | regex manager (lychee rev) | `lycheeverse/lychee` 0.24.2 with digest |
+| `.pre-commit-config.yaml` | `LYCHEE_VERSION=0.24.2`, twice (lines 110, 123) | regex manager (`LYCHEE_VERSION`) | two `lycheeverse/lychee` 0.24.2 |
+| `.pre-commit-fix.yaml` | markdownlint-cli2 `rev` | regex manager (hook revs) | one github-tags dep with digest |
+| `.github/workflows/ci.yml`, `audit.yml` | `actions/checkout` SHA `# v7.0.1` (three uses) | native `github-actions` | three `action` deps |
+| `.github/actions/setup/action.yml` | `astral-sh/setup-uv` SHA `# v10.3.3`; `actions/cache/restore`, `actions/cache/save` SHA `# v6.1.0` | native `github-actions` | three `action` deps |
+| `.github/actions/setup/action.yml` | setup-uv `version: '0.13.6'` | native `github-actions` (known-actions table) | `astral-sh/uv`, `uses-with`, github-releases |
+| `.github/actions/setup/action.yml` | `uv tool install rust-just==1.59.0` | regex manager (just) | `rust-just` 1.59.0, pypi |
+| `.github/workflows/ci.yml` | `python-version: '3.14'`, `'3.13'` (inputs of the local action) | manual, decision 0001 | not extracted |
+| not pins | `uses: ./.github/actions/setup`, `runs-on: ubuntu-latest`/`macos-latest` | none | `ubuntu` runner `skipReason: invalid-version` |
+| `docs/how-to/develop-locally.md` lines 15-16 | prose floors `0.13.6 or newer`, `rust-just==1.59.0` | manual (stated floors, no manager) | not extracted |
+
+Count by manager (local extraction): `github-actions` 10 deps in 3 files (7 pins, 3
+runner labels skipped), `pep621` 9 in 1, `pyenv` 1 in 1 (disabled), regex 11 in 5
+matches over 3 files (hook revs 7, lychee rev 1, `LYCHEE_VERSION` 2, just 1); total 31.
+
+**Proof that each pattern matches (step 3).** Renovate 44.181.1 from the npx cache
+(`~/.npm/_npx/feb637db22af21da`, no install), on a copy of the tracked tree plus
+`renovate.json` in `ai_tmp/T06/copy`, under
+`sandbox-exec -p '(version 1)(allow default)(deny network*)'`:
+
+- `node …/dist/config-validator.js --strict` in the copy: `Validating renovate.json`,
+  `Config validated successfully against 1 file(s)`, exit 0.
+- `node …/dist/renovate.js --platform=local --dry-run=extract --onboarding=false`:
+  `Dependency extraction complete`, stats `{"github-actions": {"fileCount": 3,
+  "depCount": 10}, "pep621": {"fileCount": 1, "depCount": 9}, "pyenv": {"fileCount": 1,
+  "depCount": 1}, "regex": {"fileCount": 5, "depCount": 11}}, total 31`. Exit 1, whose
+  only level-50 log line is `Unsupported node environment detected` (node 26.5.1
+  against Renovate's `^24.11.0`), not an extraction error.
+- `--dry-run=lookup` under the same denial: `requires-python` and `.python-version`
+  carry `skipReason: disabled` and no other dependency does, so the two rules hit only
+  their targets. Every github-tags dependency shows `github-token-required` (no token
+  offline); no update lookup ran, so no update or grouping was proven locally.
+- Negative control inside the same denial: `curl -fsS --max-time 10
+  https://pypi.org/simple/` exits 6 (`Could not resolve host`).
+- A Python `re` pass of each custom manager's `matchStrings` over its files: hook revs,
+  6 matches in `.pre-commit-config.yaml` (lines 73, 82, 88, 127, 132, 138; lychee's
+  line 96 not among them) and 1 in `.pre-commit-fix.yaml` (line 35); lychee rev, 1
+  (line 96, digest `2bba271688c1`, value `0.24.2`); `LYCHEE_VERSION`, 2 (lines 110,
+  123); just, 1 (`action.yml` line 35, `1.59.0`).
+- `python3 -I -c 'import json, sys; json.load(open(sys.argv[1]))' renovate.json`:
+  exit 0.
+
+**Departures from the ticket, L's draft and A's T17.**
+
+- lychee is enabled: the draft's `enabled: false` rule is gone; two regex managers read
+  its `rev` and both `LYCHEE_VERSION=`, and a `lychee` group rule after the hook-revs
+  rule joins them.
+- No custom manager for the setup-uv `version:` input, against step 3's text: Renovate's
+  `github-actions` manager reads it natively (`astral-sh/setup-uv` is in its
+  known-actions table; extracted as `astral-sh/uv`, `uses-with`), and a regex manager on
+  the same line would read it twice. It falls in the `github actions` group.
+- No custom manager for the B tag: `pep621` extracted it locally. The dashboard in step
+  6 is still the proof on the hosted app's version.
+- Two `enabled: false` rules the draft does not have: `pyenv` (it reads
+  `.python-version`) and `pep621` `requires-python`, so the two rows marked manual cannot
+  be proposed.
+- Dropped from the draft as not applicable here: cargo, rust toolchain, pixi, the pixi
+  bootstrap pair, `tools.txt`, cargo-hack. The draft's B-tag regex manager is dropped
+  (native).
+- Docs are in held-mode wording (every update waits for a dashboard approval).
+- `docs/explanation/security-model.md` records the permissions from the organisation
+  installation's API read, not from an installation screen, since the app is already
+  installed.
+
+**Hand-backs (outside Files touched).** `docs/decisions/0005-dependency-policy.md` line
+49 says nothing updates any pin until T06 lands; it goes stale when this lands (a
+decision record, to be amended or superseded by its owner).
+`docs/how-to/develop-locally.md` lines 15-16 state uv and just versions that no manager
+reads; after a Renovate bump they are floors that still hold, but read stale.
+
+**Checks at `2c37124`.** `just check-docs`: `Validated 32 pages and 32 canonical
+topics.`, exit 0. `just check`, exit 0, last line `All checks passed and the worktree is
+unchanged.` The commit's prek hook temporarily set aside an unrelated, concurrent
+unstaged edit to `tickets/T01-github-and-ci.md` and restored it.
+
 ## Open points
 
 - Whether the B tag should follow B's releases automatically or stay manual: B's
