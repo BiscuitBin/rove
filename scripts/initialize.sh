@@ -22,7 +22,8 @@ uv sync --locked
 # the git directory differ. The recipe also provisions every hook environment,
 # so this is the last line of the first-run path that reaches the network.
 # A secondary worktree skips only the shim: it still prepares both hook
-# configurations and warms lychee, as install-hooks does, because lychee
+# configurations, with any GitHub token unset because the prepares compile
+# ripsecrets, and warms lychee, as install-hooks does, because lychee
 # downloads its binary at first run, not at prepare. Without this, the first
 # `just lint` in a fresh worktree would reach the network. warm-lychee fails
 # when the binary is missing, so a failed download never ends in "Ready".
@@ -31,8 +32,8 @@ if [ "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" ]; then
 else
     printf '%s\n' 'Secondary worktree: skipping install-hooks.' >&2
     printf '%s\n' 'Run just install-hooks once from the primary checkout.' >&2
-    uv run --frozen prek prepare-hooks
-    uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
     just warm-lychee
 fi
 

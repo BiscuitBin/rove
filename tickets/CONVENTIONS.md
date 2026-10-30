@@ -328,15 +328,17 @@ lock-check:
     uv lock --check --offline
 
 # The shim, then every hook environment, then lychee's binary, so that
-# `just check` never fetches.
+# `just check` never fetches. A GITHUB_TOKEN (CI passes the run's) is for
+# warm-lychee's cargo-binstall API calls; the prepares compile ripsecrets, so
+# they run without it and no hook build script sees it.
 # Primary checkout only, by initialize's --git-common-dir test: the shim names
 # this worktree's .venv, and every worktree shares .git/hooks.
 install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
     test "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" || { printf '%s\n' 'install-hooks: this is a secondary worktree, and every worktree shares .git/hooks; run it once from the primary checkout' >&2; exit 2; }
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
-    uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
-    uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
 
 # lychee downloads its binary at first run, not at prepare, so it is run on one
 # file; its exit status is lint's business, not this recipe's. What this recipe
@@ -554,8 +556,8 @@ The dotfiles are A's at `c8e1a46`, adjusted:
 `pyproject.toml`, so a stale lock is fixed by `just lock` and committed, never rewritten
 by a first run); `install-hooks` only in the primary checkout, by A's
 `--git-common-dir` test and with A's comment; in a secondary worktree it skips only the
-shim: it prepares both hook configurations and runs `just warm-lychee`, as
-`install-hooks` does (T00 hand-back B2, landed in T05); the same two closing lines. No
+shim: it prepares both hook configurations with `GITHUB_TOKEN` and `GH_TOKEN` unset
+and runs `just warm-lychee`, as `install-hooks` does (T00 hand-back B2, landed in T05); the same two closing lines. No
 toolchain or tools lines.
 
 ## 6. Handbook
