@@ -60,3 +60,11 @@ runs:
         test -n "$found" || { echo 'lychee was not warmed; the gate would reach the network' >&2; exit 1; }
         echo "lychee warmed: $found"
       shell: bash
+    # prek prints nothing when it builds a hook environment, so name the
+    # ripsecrets binary it built with the runner's Rust, and that compiler.
+    - run: |
+        found=$(find ~/.cache/prek/hooks -path '*/bin/ripsecrets' -perm -u+x -print -quit)
+        test -n "$found" || { echo 'the ripsecrets hook environment was not built' >&2; exit 1; }
+        echo "ripsecrets built: $found"
+        grep -o -E '"(language_version|toolchain)": *"[^"]*"' "${found%/bin/ripsecrets}/.prek-hook.json"
+      shell: bash
