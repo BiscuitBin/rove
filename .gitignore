@@ -1,0 +1,43 @@
+.DS_Store
+.cache/
+.env
+.env.*
+!.env.example
+
+# lychee's link cache: `cache = true` in lychee.toml, so the offline hook
+# writes it beside the config and reads it on the next run.
+.lycheecache
+
+# Scratch for agents and maintainers alike: anything that is not a
+# deliverable goes here, never in a commit.
+ai_tmp/
+
+# Claude Code writes runtime state into .claude/ mid-session
+# (settings.local.json, scheduled-task locks, checkpoints, nested worktrees).
+# bg-validate-agents lists files with `git ls-files --cached --others
+# --exclude-from=.gitignore` and reports any other file under .claude/ as an
+# unexpected managed file, so everything there is ignored except the tracked
+# skills. Codex writes its local settings on first use.
+.claude/*
+!.claude/skills/
+.codex/settings.local.json
+
+# The coverage report and the wheel smoke's virtual environment, both written
+# under target/ by their recipes. `just check` snapshots the worktree between
+# recipes, so a build product Git can see would abort the run before any
+# recipe's exit code is read.
+target/
+
+# The sdist and the wheel `just build` writes.
+dist/
+
+# Python bytecode, tool caches, the uv environment and coverage's data files.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.coverage
+.coverage.*
+coverage.xml

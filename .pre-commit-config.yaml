@@ -1,0 +1,142 @@
+# uv.lock is TOML and large, so without this line the builtin check-toml would
+# parse the whole lockfile on every commit.
+exclude: >-
+  (?x)^(
+    \.git/|
+    \.venv/|
+    ai_tmp/|
+    target/|
+    dist/|
+    uv\.lock$
+  )
+repos:
+  - repo: local
+    hooks:
+      # Python hooks run through `just`: a git hook does not inherit the
+      # Justfile's environment, so routing through the recipe is what lets a
+      # hook find ruff and mypy through `uv run --frozen`, and it keeps each
+      # tool's arguments and positive control in exactly one place.
+      - id: py-lint
+        name: py-lint
+        entry: just py-lint
+        language: system
+        pass_filenames: false
+        files: ^(.*\.pyi?|ruff\.toml)$
+
+      - id: py-typecheck
+        name: py-typecheck
+        entry: just py-typecheck
+        language: system
+        pass_filenames: false
+        files: ^(.*\.pyi?|mypy\.ini)$
+
+      - id: validate-docs
+        name: Documentation contract
+        entry: uv run --frozen bg-validate-docs
+        language: system
+        pass_filenames: false
+        files: ^(README\.md|SECURITY\.md|docs/|pyproject\.toml$)
+
+      - id: validate-agents
+        name: Agent instruction contract
+        entry: uv run --frozen bg-validate-agents
+        language: system
+        pass_filenames: false
+        files: ^(AGENTS\.md|CLAUDE\.md|\.agents/|\.claude/|\.codex/|\.github/copilot-instructions\.md|pyproject\.toml$)
+
+  - repo: builtin
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=768]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      # end-of-file-fixer and trailing-whitespace live in .pre-commit-fix.yaml.
+      # This config is the read-only gate, so it may report but never repair;
+      # editorconfig-checker and markdownlint report the same defects here.
+
+  # The checker's own repository, not the npm wrapper that shares its name. That
+  # wrapper ships no binary: it fetches the newest release on first run, which is
+  # an unpinned dependency sitting inside the gate, and a race as well. `prek`
+  # gives a hook's files to several processes at once, and the wrapper decides
+  # whether to download by stat-ing a directory that it then creates — so on a
+  # cold cache one process downloads while its siblings walk into the half-made
+  # directory and find no binary in it. CI failed exactly that way: two `ENOENT`
+  # on `bin/latest/bin`, then `ETXTBSY` on the file being extracted under them.
+  # A `rev` pins the checker the way every other third-party hook here is pinned,
+  # and the build happens once, before any file is read.
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker
+    rev: 675b1261a4d9668c357fcd67deb87aed8b881b94 # v3.11.1
+    hooks:
+      # Upstream declares no `types`, which would widen this to every file in the
+      # repository. Text is what this gate has always read.
+      - id: editorconfig-checker
+        name: EditorConfig
+        types: [text]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: b82a6c8896e491b9cb377a99ff3412131920681b # v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+        name: markdownlint
+
+  - repo: https://github.com/crate-ci/typos
+    rev: 512fc24f32f44ab01972217aaaf3dc86ec234d53 # v1.50.2
+    hooks:
+      - id: typos
+        # Upstream's hook passes --write-changes, so a misspelling found here would
+        # be rewritten in place. This config is the read-only gate: report only.
+        args: [--force-exclude]
+
+  - repo: https://github.com/lycheeverse/lychee
+    rev: 2bba271688c1abb1503097a064e6c3bc1d1b6a9b # lychee-v0.24.2
+    hooks:
+      # LYCHEE_VERSION must lead the arguments, and must match the rev comment
+      # above. Left to itself the hook derives the version by running
+      # `git describe` inside its own cached checkout — but Git exports GIT_DIR
+      # to every hook it runs, so during a real commit that describe resolves
+      # against this repository instead, finds no `lychee-v*` tag, and exits
+      # 100. It only reproduces on the commit path, which is why `just lint`
+      # and `just check-docs` never saw it. Passing the version is the escape
+      # hatch the hook script itself offers, and it keeps the rev a SHA.
+      - id: lychee
+        args:
+          [
+            LYCHEE_VERSION=0.24.2,
+            --offline,
+            --cache,
+            --config,
+            lychee.toml,
+            --no-progress,
+            --root-dir,
+            .
+          ]
+        types: [markdown]
+      - id: lychee
+        alias: lychee-online
+        name: Lychee online (manual)
+        args: [LYCHEE_VERSION=0.24.2, --cache, --config, lychee.toml, --no-progress, --root-dir, .]
+        types: [markdown]
+        stages: [manual]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+    hooks:
+      - id: actionlint
+        files: ^\.github/workflows/.*\.ya?ml$
+
+  - repo: https://github.com/sirwart/ripsecrets
+    rev: 7d94620933e79b8acaa0cd9e60e9864b07673d86 # v0.1.11
+    hooks:
+      - id: ripsecrets
+        entry: .venv/bin/bg-ripsecrets

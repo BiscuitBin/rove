@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rovo"
+# Static: hatchling writes it into the metadata, and rovo.__version__ reads it back
+# through importlib.metadata, so this line is the only copy (decision 0002).
+version = "0.0.0"
+description = "rovo: a Python API and the rovo command."
+readme = "README.md"
+requires-python = ">=3.13"
+# No license and no license-files: the licence is undecided (decision 0006).
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+  # PyPI refuses any upload carrying this classifier. It stays until the release
+  # ticket, which needs the licence decision first (decision 0006).
+  "Private :: Do Not Upload",
+]
+dependencies = [
+  # The command-line framework. Imported by rovo.cli alone, never by `import rovo`
+  # (decision 0003). A compatible range: uv.lock is the pin (decision 0005).
+  "typer>=0.27.3,<0.28",
+]
+
+[project.scripts]
+rovo = "rovo.cli:app"
+
+[project.urls]
+Repository = "https://github.com/BiscuitBin/rove"
+
+[dependency-groups]
+# Exact pins: the gate's verdict depends on each tool's version (decision 0005).
+dev = [
+  "coverage==7.17.0",
+  "mypy==2.4.1",
+  "prek==0.5.7",
+  "pytest==9.2.0",
+  "ruff==0.17.3",
+]
+# B's checkers. B requires Python 3.14, so this group carries its own floor and
+# the 3.13 CI leg runs without it (CONVENTIONS.md §1 fact 1).
+tooling = ["biscuit-games-tooling"]
+
+[tool.uv]
+default-groups = ["dev", "tooling"]
+
+[tool.uv.dependency-groups]
+tooling = { requires-python = ">=3.14" }
+
+[tool.uv.sources]
+biscuit-games-tooling = { git = "https://github.com/steven-cutting/biscuit_games_tooling", tag = "v0.3.0" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rovo"]
+
+[tool.hatch.build.targets.sdist]
+# Without this, hatchling packs every file Git does not ignore: tickets, docs, CI.
+only-include = ["src/rovo", "tests", "README.md", "CHANGELOG.md"]
+
+# typos is configured in _typos.toml, ruff in ruff.toml, mypy in mypy.ini, pytest in
+# pytest.ini and coverage in .coveragerc: T02 owns those, and this file is frozen.
+
+[tool.biscuit-games-tooling]
+# What `just check` runs, in order, before check-clean (CONVENTIONS.md §4).
+recipes = [
+  "lock-check",
+  "lint",
+  "py-lint",
+  "py-typecheck",
+  "coverage",
+  "wheel-smoke",
+  "check-docs",
+  "check-agents",
+]
+predicates = {}

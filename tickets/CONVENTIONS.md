@@ -117,8 +117,12 @@ Facts, each verified on 2026-10-29, that shape the mechanism:
 8. **`uv audit` exists** in uv 0.13.4 (`uv audit --help`: "Audit the project's
    dependencies", with `--frozen`, `--locked`, `--no-dev`, `--only-group`).
 9. **`uv export --frozen --no-default-groups --no-emit-project`** lists exactly the
-   runtime closure (typer and its five dependencies, colorama under its Windows marker)
-   and leaves out both groups; `--no-dev` alone would keep the `tooling` group. `uv build
+   runtime closure (typer and seven other packages: four of typer's own requirements,
+   colorama among them under its Windows marker, and three that rich pulls in; T04's
+   hand-back corrected "five dependencies", T05) and leaves out both groups; `--no-dev`
+   alone would keep the `tooling` group. The gate no longer uses it: since T05,
+   `wheel-smoke` installs the closure with `uv sync` (§4), because an install from the
+   exported list needs index pages that no cache holds on a fresh clone. `uv build
    --offline --wheel` built `rovo-0.0.0-py3-none-any.whl` from a warm cache.
 
 ## 2. Toolchain and pins
@@ -295,7 +299,7 @@ set shell := ["sh", "-eu", "-c"]
 # Coverage floor over src/rovo/**: coverage's total, lines and branches
 # combined (fail-under), not a separate floor for each. Lower the complexity,
 # not the number.
-coverage_floor := "90"
+coverage_floor := "95"
 
 default:
     @just --list
@@ -313,8 +317,9 @@ sync:
 lock:
     uv lock
 
-# Moves every locked version within pyproject.toml's constraints; the exact
-# dev pins hold still, so this moves typer's tree and B's commit at its tag.
+# Moves every locked version within pyproject.toml's constraints: typer's
+# tree, B's commit at its tag, and the transitive dependencies of the exact dev
+# pins, which themselves hold still.
 lock-upgrade:
     uv lock --upgrade
 
@@ -322,15 +327,52 @@ lock-upgrade:
 lock-check:
     uv lock --check --offline
 
-# The shim, then every hook environment, so that `just check` never fetches.
-# lychee downloads its binary at first run, not at prepare, so it is run once
-# here on one file; its exit status is lint's business, not this recipe's.
-install-hooks:
+# The shim, then every hook environment, then lychee's binary, so that
+# `just check` never fetches. A GITHUB_TOKEN (CI passes the run's) is for
+# warm-lychee's cargo-binstall API calls; the prepares compile ripsecrets, so
+# they run without it and no hook build script sees it.
+# Primary checkout only, by initialize's --git-common-dir test: the shim names
+# this worktree's .venv, and every worktree shares .git/hooks.
+install-hooks: && warm-lychee
     git rev-parse --is-inside-work-tree >/dev/null
+    test "$(git rev-parse --git-common-dir)" = "$(git rev-parse --git-dir)" || { printf '%s\n' 'install-hooks: this is a secondary worktree, and every worktree shares .git/hooks; run it once from the primary checkout' >&2; exit 2; }
     test -x .venv/bin/prek || { printf '%s\n' 'the environment is not installed; run just initialize first' >&2; exit 2; }
-    uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
-    uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
-    -uv run --frozen prek run lychee --files README.md
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
+    env -u GITHUB_TOKEN -u GH_TOKEN uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
+
+# lychee downloads its binary at first run, not at prepare, so it is run on one
+# file; its exit status is lint's business, not this recipe's. What this recipe
+# checks is that the binary is present: an executable lychee-<LYCHEE_VERSION>,
+# the version .pre-commit-config.yaml pins, in the hook's own checkout in prek's
+# cache (the repo URL and rev .pre-commit-config.yaml names, since the hook runs
+# only that checkout's binary), or it fails. The download can time out (it did
+# on a macOS runner), so it is tried three times. Before any of that, offline,
+# the rev's `# lychee-vX.Y.Z` comment must equal LYCHEE_VERSION: the hook
+# fetches the LYCHEE_VERSION binary whatever the rev says, so nothing else
+# would catch the two drifting apart (decision 0008 groups them in Renovate).
+# Private: install-hooks runs it, and so does initialize in a secondary worktree.
+[private]
+warm-lychee:
+    #!/bin/sh
+    set -eu
+    version=$(sed -n 's/.*LYCHEE_VERSION=\([0-9][0-9.]*\).*/\1/p' .pre-commit-config.yaml | sort -u)
+    case $version in ''|*[!0-9.]*) printf '%s\n' "warm-lychee: expected one LYCHEE_VERSION in .pre-commit-config.yaml, found: $version" >&2; exit 1 ;; esac
+    rev=$(sed -n '/repo: https:\/\/github.com\/lycheeverse\/lychee$/{n;s/.*rev: *\([0-9a-f]\{40\}\).*/\1/p;}' .pre-commit-config.yaml)
+    case $rev in ''|*[!0-9a-f]*) printf '%s\n' "warm-lychee: expected the lychee repo's 40-hex rev in .pre-commit-config.yaml, found: $rev" >&2; exit 1 ;; esac
+    tag=$(sed -n '/repo: https:\/\/github.com\/lycheeverse\/lychee$/{n;s/.*rev: *[0-9a-f]\{40\}[[:blank:]]*#[[:blank:]]*lychee-v\([0-9][0-9.]*\).*/\1/p;}' .pre-commit-config.yaml)
+    if [ "$tag" != "$version" ]; then printf '%s\n' "warm-lychee: the lychee rev's comment names lychee-v$tag but LYCHEE_VERSION is $version; they must match" >&2; exit 1; fi
+    cache=$(uv run --frozen prek cache dir)
+    for attempt in 1 2 3; do
+        uv run --frozen prek run lychee --files README.md || :
+        for dir in "$cache"/repos/*; do
+            meta=$dir/.prek-repo.json
+            grep -qF '"repo": "https://github.com/lycheeverse/lychee"' "$meta" 2>/dev/null && grep -qF "\"rev\": \"$rev\"" "$meta" || continue
+            bin=$dir/.cargo/bin/lychee-$version
+            if [ -x "$bin" ]; then printf 'lychee %s warmed: %s\n' "$version" "$bin"; exit 0; fi
+        done
+        printf 'warm-lychee: no lychee-%s binary after attempt %s\n' "$version" "$attempt" >&2
+    done
+    exit 1
 
 # ----------------------------------------------------------------- format ---
 
@@ -395,7 +437,12 @@ build:
 # Gate: the wheel installs and works in a fresh virtual environment, offline,
 # in two steps. First the wheel alone, with no dependency: importing rovo must
 # work without typer and must not even try to import typer, click or rich.
-# Then the runtime closure uv.lock pins, from the cache, and the command.
+# Then the runtime closure uv.lock pins, from the cache, and the command. The
+# closure goes in with `uv sync` aimed at the smoke venv, not `uv pip install
+# -r`: sync fetches each file by the lock's URL and checks the lock's hash, and
+# `just sync` cached those files, while pip install resolves against index
+# pages that nothing caches on a fresh clone. --inexact keeps the wheel the
+# first step installed.
 # Exactly one wheel, which must exist (an unmatched glob is one literal
 # argument). Python runs with -I so nothing in the worktree shadows the
 # installed package.
@@ -409,8 +456,7 @@ wheel-smoke: build
     uv venv --offline --no-python-downloads --quiet target/wheel-smoke/venv
     uv pip install --python target/wheel-smoke/venv --offline --no-index --no-deps "$1"
     target/wheel-smoke/venv/bin/python -I scripts/wheel_smoke.py api
-    uv export --frozen --no-default-groups --no-emit-project --quiet -o target/wheel-smoke/requirements.txt
-    uv pip install --python target/wheel-smoke/venv --offline --require-hashes -r target/wheel-smoke/requirements.txt
+    UV_PROJECT_ENVIRONMENT=target/wheel-smoke/venv uv sync --frozen --offline --no-default-groups --no-install-project --inexact
     target/wheel-smoke/venv/bin/python -I scripts/wheel_smoke.py cli
     target/wheel-smoke/venv/bin/rovo --version
 
@@ -437,9 +483,11 @@ check-clean baseline="":
     uv run --frozen bg-project-check clean "$1"
 
 # The complete gate: the recipes pyproject.toml lists, in order, with the
-# worktree snapshotted between each, then check-clean.
+# worktree snapshotted between each, then check-clean. UV_OFFLINE reaches every
+# recipe and hook under it, so a `uv run` that finds the environment out of
+# date with uv.lock syncs from the cache or fails; it never fetches.
 check:
-    uv run --frozen bg-project-check run
+    UV_OFFLINE=1 uv run --frozen bg-project-check run
 ```
 
 **Gate order** (the `recipes` list of §2), then `check-clean`: 1 `lock-check`, 2 `lint`,
@@ -449,6 +497,11 @@ check:
 
 The recipes this document's §11 and `AGENTS.md` call **network recipes**: `initialize`,
 `sync`, `lock`, `lock-upgrade`, `install-hooks`, `audit`, `check-links-online`.
+
+`install-hooks` departs from A `Justfile`, which has no such test, in refusing to run
+in a secondary worktree: it exits 2 before touching anything when `git rev-parse
+--git-common-dir` and `--git-dir` differ, so the rule §5's `initialize.sh` applies
+holds for a direct `just install-hooks` too (final review F1).
 
 ## 5. Hooks and dotfiles
 
@@ -480,7 +533,7 @@ frozen `Justfile`; T02 may tune any hook but never renames those four.
 The dotfiles are A's at `c8e1a46`, adjusted:
 
 - `.editorconfig`: A's, `[*.{py,pyi}]` with `indent_size = 4`; any Rust or Allium
-  section goes.
+  section goes, and so does `[LICENSE]` (there is no `LICENSE`, decision 0006).
 - `.gitattributes`: A's, minus every line naming a path this repository lacks.
 - `.gitignore`: A's lines for `.DS_Store`, `.cache/`, `.env*`, `.lycheecache`, `ai_tmp/`,
   the `.claude/*` block with `!.claude/skills/`, `.codex/settings.local.json`, `target/`,
@@ -489,16 +542,25 @@ The dotfiles are A's at `c8e1a46`, adjusted:
   can see aborts `bg-project-check`'s snapshot, so this list is complete before the
   first `just check`.
 - `.markdownlint-cli2.jsonc`: A's, keeping `MD033` `allowed_elements` of
-  `["br", "important"]` for the `<important if>` blocks (§7).
-- `_typos.toml`: A's, minus exclusions for paths this repository lacks, plus `uv.lock`.
+  `["br", "important"]` for the `<important if>` blocks (§7), with `ignores` of
+  `["target", ".venv", "ai_tmp"]` kept as a guard, and with A's `globs` removed:
+  markdownlint-cli2 appends `globs` to the files prek passes, so `**/*.md` would lint,
+  and under `just fix` rewrite, every `.md` on disk, untracked and ignored paths such as
+  `.pytest_cache/` and `.claude/` worktrees included (final review F2).
+- `_typos.toml`: A's, minus exclusions for paths this repository lacks, plus `uv.lock`,
+  plus `cpy = "cpy"` in `[default.extend-words]` for ruff's `CPY001` (§9). The entry
+  stays after that ignore lifts, because decision 0006 and the tickets name the code
+  (0006 supersedes T00's note to lift it with the ignore; reconciled in T05).
 - `lychee.toml`: A's, minus any exclusion naming a path this repository lacks.
 
 `scripts/initialize.sh` is A `scripts/initialize.sh`'s structure with uv in pixi's place:
 `git rev-parse`; `uv sync --locked` (refuses a lock that disagrees with
 `pyproject.toml`, so a stale lock is fixed by `just lock` and committed, never rewritten
 by a first run); `install-hooks` only in the primary checkout, by A's
-`--git-common-dir` test and with A's comment; the same two closing lines. No toolchain
-or tools lines.
+`--git-common-dir` test and with A's comment; in a secondary worktree it skips only the
+shim: it prepares both hook configurations with `GITHUB_TOKEN` and `GH_TOKEN` unset
+and runs `just warm-lychee`, as `install-hooks` does (T00 hand-back B2, landed in T05); the same two closing lines. No
+toolchain or tools lines.
 
 ## 6. Handbook
 
@@ -581,7 +643,7 @@ The six invariants:
    `rovo --version` read it through `importlib.metadata`.
 4. ruff with `select = ["ALL"]` and mypy strict; a suppression names its rule and a
    reason (`# noqa: XXX123  reason`), and a per-file ignore carries a comment.
-5. Coverage of `src/rovo/**` does not fall below the `Justfile`'s floor (90% of lines and
+5. Coverage of `src/rovo/**` does not fall below the `Justfile`'s floor (95% of lines and
    branches combined, coverage's total); lower the complexity, not the number.
 6. `uv.lock` is the pin; runtime dependencies are compatible ranges with a tested lower
    bound, tools are exact; no dependency is added without the note decision 0005 asks for.
@@ -649,7 +711,9 @@ none of those, and the repository name differs from it only as a repository name
   `version`, each exit 0 with `rovo <version>`.
 - `scripts/wheel_smoke.py`: one argument. `api` first puts at the head of
   `sys.meta_path` a finder whose `find_spec` returns `None` and records every name whose
-  first component is `typer`, `click` or `rich`; then it imports `rovo`. It asserts that
+  first component is neither `rovo` nor in `sys.stdlib_module_names` (typer 0.27
+  vendors click as `typer._click`, so `click` is not a separate package in `uv.lock`);
+  then it imports `rovo`. It asserts that
   the record is empty, so even a guarded `try: import typer` fails here. It asserts that
   `typer` is not importable (the first install step had no dependencies), that the
   version equals `importlib.metadata.version("rovo")`, and that `py.typed` is among
@@ -664,8 +728,10 @@ own files (§2):
 
 - `ruff.toml`: `target-version = "py313"`, `line-length = 99`, `src = ["src",
   "tests"]`, `extend-exclude = ["tests/fixtures/py-lint-violation"]` with A's
-  `force-exclude` comment; `[lint] select = ["ALL"]`, `ignore = ["COM812", "ISC001"]`
-  with A's comments; `[lint.pydocstyle] convention = "google"`;
+  `force-exclude` comment; `[lint] select = ["ALL"]`, `ignore = ["COM812", "ISC001", "CPY001"]`
+  with A's comments for the first two; `CPY001`, a delta from A, is commented "no
+  copyright notice while the licence is undecided (decision 0006)", and the release
+  ticket that adds the licence lifts it; `[lint.pydocstyle] convention = "google"`;
   `[lint.flake8-tidy-imports] ban-relative-imports = "all"`; per-file ignores for
   `tests/**` and `scripts/**`, each line commented.
 - `mypy.ini`: A's, with `files = src, tests, scripts`, `python_version = 3.13`,
@@ -699,16 +765,26 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   "0.13.6"`, its cache keyed on `uv.lock`), then just with
   `uv tool install rust-just==1.59.0` and `uv tool dir --bin` appended to
   `$GITHUB_PATH`, then `just sync`, then restores prek's hook cache keyed on the hash of
-  both prek configurations, then runs `just install-hooks`, as A's action does: on a cold
-  cache it builds every hook environment and warms lychee, which downloads its binary at
-  first run (§4), so that no later step reaches the network (§11). The shim it writes into
-  the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
-  `UV_PYTHON`.
+  both prek configurations and `uv.lock`, which pins prek, and on the `python-version`
+  input (a python hook environment records its interpreter's path), then runs `just install-hooks`,
+  as A's action does, with the run's `github.token` as `GITHUB_TOKEN` on that step
+  alone (lychee's cargo-binstall otherwise shares the runner's anonymous API limit), and
+  the recipe unsets it for the hook prepares, so no hook build sees it: on
+  a cold cache it builds every hook environment and warms lychee, which downloads its binary at
+  first run (§4), so that no later step reaches the network (§11). `install-hooks` fails
+  unless lychee's pinned binary is present (§4 `warm-lychee`, which retries the
+  download), so the action needs no presence check of its own. The cache is restored
+  with `actions/cache/restore` and saved with `actions/cache/save` as soon as the hooks
+  are warm, on a miss, so a later red step never leaves the next run cold (T05). The
+  shim it writes into the runner's `.git` is harmless. Inputs: `python-version` (default `3.14`), exported as
+  `UV_PYTHON` and part of the prek cache key.
 - **`ci.yml` jobs.** `gate`, a matrix over `ubuntu-latest` and `macos-latest` on
   Python 3.14, runs `just check`, the full gate with B. `floor`, on `ubuntu-latest`
   with `python-version: '3.13'` and `UV_NO_GROUP: tooling` in the job's env (§1 fact 1),
-  runs `just lock-check`, `just py-lint`, `just py-typecheck`, `just coverage` and
-  `just wheel-smoke`, then `git status --porcelain` and fails if it prints anything (it
+  sets `UV_OFFLINE=1` for the rest of the job after printing its interpreter (what
+  `just check` sets for its recipes, §4), runs `just lock-check`, `just py-lint`,
+  `just py-typecheck`, `just coverage` and `just wheel-smoke`, then
+  `git status --porcelain` and fails if it prints anything (it
   cannot use `check-clean`, which is B's). `check`, A's aggregate job, verbatim in
   shape, `needs: [gate, floor]`.
 - `permissions: contents: read`, `persist-credentials: false`, A's `concurrency` block
@@ -755,8 +831,11 @@ reporting on. The maintainer may change any of it at the stop.
 - **No dependency is added in wave 1** beyond T00's. A lane that needs one hands it back.
 - **No path appears in two wave-1 lanes' Files touched.** An agent that needs another
   lane's file hands the change back instead.
-- **After T05 the frozen list lifts.** T06 may edit its own lines in any file and lists
-  each as `shared, own lines`.
+- **The freeze is lifted (T05).** The frozen list above bound wave 1 only. After T05,
+  any ticket, T06 included, may edit its own lines in a formerly frozen file and lists
+  each such file in its Files touched as `shared, own lines`. Tickets that share a file
+  merge one at a time, each rebased on the last; `uv.lock` is regenerated after a
+  rebase (`just lock`), never merged by hand.
 - **Self-contained.** A ticket embeds exact content or cites this document by section,
   and names the A, W, L or B material to read. It never cites a chat transcript, a
   scratch directory or a tool result.
@@ -813,22 +892,23 @@ reporting on. The maintainer may change any of it at the stop.
 
 Each claim was reasoned from source or documentation but not executed here. The named
 ticket runs the check and records the outcome; a claim that fails is a design change
-that comes back through this document. T05 carries every claim still open after wave 1.
+that comes back through this document. T05 carries every claim still open after wave 1;
+the last column is its outcome and the ticket whose hand-back notes hold the evidence.
 
-| # | Claim | Check | Owner |
-| --- | --- | --- | --- |
-| 1 | The `tooling` group's own floor locks, syncs and runs on the real `pyproject.toml` as on the scratch project of §1 fact 1, and `UV_NO_GROUP=tooling` with `UV_PYTHON=3.13` runs every `floor` recipe | `uv lock`, `just sync`, then the `floor` recipes under those variables | T00, T01 |
-| 2 | `uv lock --check --offline` passes on a warm cache with B as a git source, and fails on a stale lock | `just lock-check`, then with a pin edited in a scratch copy | T00 |
-| 3 | `uv build --offline` finds `hatchling==1.33.0` in the cache after `just sync` on a fresh clone | `just build` under §11's network denial | T00 |
-| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv pip install --offline --require-hashes -r` (from the cache) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 |
-| 5 | `uv export` writes no file outside `-o` and does not touch `uv.lock` | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 |
-| 6 | prek builds the ripsecrets hook with the machine's cargo, and the macOS and Ubuntu runners have one | `just install-hooks`, then T01's first `gate` run on each OS | T00, T01 |
-| 7 | `ruff check` and `mypy` lint an explicitly named file that their config excludes, so the positive controls fire | each recipe, then with the fixture's violation removed in a scratch copy (for ruff, `F401` and `E501` in turn) | T00 first, T02 |
-| 8 | `rovo.cli:app` as a console-script target runs the Typer app, and `--version` as an eager callback option exits 0 before `no_args_is_help` | `just wheel-smoke`'s last line; `rovo` alone prints help and exits as Typer documents | T00 |
-| 9 | `coverage combine` succeeds when the only data comes from one process, and subprocess coverage (for the installed-script test) needs `[run] patch = subprocess` in `.coveragerc` (INI syntax; the bracketed list form is TOML-only and `.coveragerc` rejects it as `Unknown patch`) | `just coverage`, then T02's subprocess test | T00, T02 |
-| 10 | `bg-validate-agents` accepts six skills and B's adapter strings with no `.claude/settings.json` | `just check-agents` | T00 |
-| 11 | B's git dependency installs in `BiscuitBin` CI with no credential | T00's stub run, then T01's full run | T01 |
-| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 |
+| # | Claim | Check | Owner | Outcome (T05) |
+| --- | --- | --- | --- | --- |
+| 1 | The `tooling` group's own floor locks, syncs and runs on the real `pyproject.toml` as on the scratch project of §1 fact 1, and `UV_NO_GROUP=tooling` with `UV_PYTHON=3.13` runs every `floor` recipe | `uv lock`, `just sync`, then the `floor` recipes under those variables | T00, T01 | Holds. Local: T00 part 1, T01 step 6. CI: T05, `floor` green at `0d75e51` (run 41018370415), all five recipes on 3.13.18 |
+| 2 | `uv lock --check --offline` passes on a warm cache with B as a git source, and fails on a stale lock | `just lock-check`, then with a pin edited in a scratch copy | T00 | Holds: T00 part 1 |
+| 3 | `uv build --offline` finds `hatchling==1.33.0` in the cache after `just sync` on a fresh clone | `just build` under §11's network denial | T00 | Holds. Warm: T00 part 1 step 6. Cold: T05, an empty `UV_CACHE_DIR` under the denial, and the macOS `gate` leg on a missed uv cache |
+| 4 | `uv venv --offline`, `uv pip install --offline --no-index --no-deps` and `uv sync --frozen --offline --no-default-groups --no-install-project --inexact` into the smoke venv (from the cache; until T05, `uv pip install --offline --require-hashes -r`, falsified on a cold cache in CI runs 41016347749 and 41017013414) run under the denial | `just wheel-smoke` under the denial, with the negative control | T00 | Failed on a cold cache: the `-r` install needs index pages `just sync` never caches (T01 run 2, H2). T05 `9af0452` replaced that step with `uv sync` into the smoke venv, which holds cold under the denial on 3.14 and 3.13 (T05) |
+| 5 | The smoke's `uv sync` writes nothing outside `target/` and does not touch `uv.lock` (until T05: `uv export` writes no file outside `-o`) | `git status --porcelain` and the `uv.lock` checksum compared before and after `just wheel-smoke` | T00 | Held (T00 part 1). `wheel-smoke` no longer runs `uv export` (T05 `9af0452`); `git status` and the `uv.lock` checksum are unchanged around T05's cold run; the repository tree, ignored paths included, is shown directly by `find . -newer <marker> -not -path './target/*' -not -path './.git/*'` printing nothing around the smoke's `uv sync` (positive control: 62 files under `target/`; T05 review fixes). Writes to the uv cache, outside the repository, are not measured |
+| 6 | prek builds the ripsecrets hook with the machine's cargo, and the macOS and Ubuntu runners have one | `just install-hooks`, then T01's first `gate` run on each OS | T00, T01 | Holds. Recipe: T00 part 4 (fresh clone). Runners: Ubuntu, T01 runs 1 and 2 (rustc 1.99.1, the runner's rustup); macOS, T05 run 41018370415 on a cold prek cache (1.99.1, `/opt/homebrew/opt/rustup/bin/rustc`) |
+| 7 | `ruff check` and `mypy` lint an explicitly named file that their config excludes, so the positive controls fire | each recipe, then with the fixture's violation removed in a scratch copy (for ruff, `F401` and `E501` in turn) | T00 first, T02 | Holds: T00 part 1, T02 step 2 |
+| 8 | `rovo.cli:app` as a console-script target runs the Typer app, and `--version` as an eager callback option exits 0 before `no_args_is_help` | `just wheel-smoke`'s last line; `rovo` alone prints help and exits as Typer documents | T00 | Holds: T00 part 1; T02 pins bare `rovo` at exit 2 |
+| 9 | `coverage combine` succeeds when the only data comes from one process, and subprocess coverage (for the installed-script test) needs `[run] patch = subprocess` in `.coveragerc` (INI syntax; the bracketed list form is TOML-only and `.coveragerc` rejects it as `Unknown patch`) | `just coverage`, then T02's subprocess test | T00, T02 | Holds: T00 part 1 (one process), T02 (`patch = subprocess`) |
+| 10 | `bg-validate-agents` accepts six skills and B's adapter strings with no `.claude/settings.json` | `just check-agents` | T00 | Holds: T00 part 3 |
+| 11 | B's git dependency installs in `BiscuitBin` CI with no credential | T00's stub run, then T01's full run | T01 | Holds: T01 run 2 installed B from git with no credential on both 3.14 legs; T05 run 41018370415 ran B's checkers green on both |
+| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 | Not owned by T00 to T04: open, for T06 |
 
 ## 13. Risks every ticket states where it applies
 

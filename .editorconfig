@@ -1,0 +1,20 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[Justfile]
+indent_size = 4
+
+# List continuations and fenced blocks legitimately indent by other amounts.
+[*.md]
+indent_size = unset
+trim_trailing_whitespace = false
+
+[*.{py,pyi}]
+indent_size = 4

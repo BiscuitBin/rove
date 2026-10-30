@@ -1,0 +1,21 @@
+# The only typos configuration. pyproject.toml carries no [tool.typos]: typos
+# stops at the first configuration file it finds, and finds this one.
+
+[files]
+# The lockfile carries hashes and names that look like typos; target/ holds
+# build output and ai_tmp/ scratch.
+extend-exclude = [
+  "target/",
+  "ai_tmp/",
+  "uv.lock",
+]
+
+[default.extend-words]
+# A's two words, which no rovo file uses except where tickets/T00-foundation.md
+# names them as A's; the checker's dictionary rewrites them to "miss"/"mist" and
+# "also". "mis-" is also a hyphenated prefix (mis-wired) that reads as "mis".
+mis = "mis"
+als = "als"
+# ruff's rule code CPY001 (flake8-copyright), which ruff.toml ignores while the
+# licence is undecided; the checker's dictionary rewrites "CPY" to "COPY".
+cpy = "cpy"

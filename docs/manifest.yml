@@ -1,0 +1,465 @@
+{
+  "schema_version": 1,
+  "pages": [
+    {
+      "path": "README.md",
+      "title": "Documentation map",
+      "kind": "project",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "documentation_navigation"
+      ],
+      "requires": []
+    },
+    {
+      "path": "project/purpose-and-scope.md",
+      "title": "Purpose and scope",
+      "kind": "project",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "project_purpose"
+      ],
+      "requires": []
+    },
+    {
+      "path": "project/repository-map.md",
+      "title": "Repository map",
+      "kind": "project",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "repository_map"
+      ],
+      "requires": []
+    },
+    {
+      "path": "project/terminology.md",
+      "title": "Terminology",
+      "kind": "project",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "terminology"
+      ],
+      "requires": []
+    },
+    {
+      "path": "tutorials/first-change.md",
+      "title": "Make your first change",
+      "kind": "tutorial",
+      "audience": [
+        "contributor",
+        "agent"
+      ],
+      "canonical_for": [
+        "first_change_tutorial"
+      ],
+      "requires": []
+    },
+    {
+      "path": "how-to/install-and-run.md",
+      "title": "Install and run",
+      "kind": "how-to",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "install_and_run"
+      ],
+      "requires": []
+    },
+    {
+      "path": "how-to/develop-locally.md",
+      "title": "Develop locally",
+      "kind": "how-to",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "local_development"
+      ],
+      "requires": []
+    },
+    {
+      "path": "how-to/test-and-debug.md",
+      "title": "Test and debug",
+      "kind": "how-to",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "test_and_debug"
+      ],
+      "requires": []
+    },
+    {
+      "path": "how-to/maintain-dependencies.md",
+      "title": "Maintain dependencies",
+      "kind": "how-to",
+      "audience": [
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "dependency_maintenance"
+      ],
+      "requires": []
+    },
+    {
+      "path": "explanation/architecture.md",
+      "title": "Architecture",
+      "kind": "explanation",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "architecture"
+      ],
+      "requires": []
+    },
+    {
+      "path": "explanation/packaging.md",
+      "title": "Python packaging",
+      "kind": "explanation",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "python_packaging"
+      ],
+      "requires": []
+    },
+    {
+      "path": "explanation/quality-philosophy.md",
+      "title": "Quality philosophy",
+      "kind": "explanation",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "quality_philosophy"
+      ],
+      "requires": []
+    },
+    {
+      "path": "explanation/security-model.md",
+      "title": "Security model",
+      "kind": "explanation",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "security_model"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/commands.md",
+      "title": "Commands",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "command_reference"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/cli.md",
+      "title": "Command-line reference",
+      "kind": "reference",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "cli_reference"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/api.md",
+      "title": "API reference",
+      "kind": "reference",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "api_reference"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/configuration.md",
+      "title": "Configuration",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "configuration_reference"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/testing.md",
+      "title": "Testing",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "testing_reference"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/quality-gates.md",
+      "title": "Quality gates",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "quality_gates"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/documentation-contract.md",
+      "title": "Documentation contract",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "documentation_contract"
+      ],
+      "requires": []
+    },
+    {
+      "path": "reference/agent-contract.md",
+      "title": "Agent contract",
+      "kind": "reference",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "agent_contract"
+      ],
+      "requires": []
+    },
+    {
+      "path": "operations/maintenance.md",
+      "title": "Maintenance",
+      "kind": "operations",
+      "audience": [
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "maintenance_routine"
+      ],
+      "requires": []
+    },
+    {
+      "path": "operations/troubleshooting.md",
+      "title": "Troubleshooting",
+      "kind": "operations",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "operator",
+        "agent"
+      ],
+      "canonical_for": [
+        "troubleshooting"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/README.md",
+      "title": "Architecture decisions",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_index"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0001-uv-and-hatchling.md",
+      "title": "Decision 0001: uv and hatchling, with Python 3.13 as the floor and 3.14 for the tools",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_toolchain"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0002-src-layout-and-public-api.md",
+      "title": "Decision 0002: The src layout, the public API boundary and the single version",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_package_layout"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0003-typer-cli-and-lazy-import.md",
+      "title": "Decision 0003: A Typer command line that `import rovo` never loads",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_cli"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0004-hook-runner-and-checkers.md",
+      "title": "Decision 0004: Hook runner and checkers",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_hooks_and_checkers"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0005-dependency-policy.md",
+      "title": "Decision 0005: Dependency policy: compatible ranges for runtime, exact tools, `uv.lock` the pin",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_dependency_policy"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0006-licence-deferred.md",
+      "title": "Decision 0006: The licence is undecided, and a release waits for it",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_license"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0007-pypi-name-rovo.md",
+      "title": "Decision 0007: The PyPI name `rovo` in the repository `rove`",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_pypi_name"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0008-renovate.md",
+      "title": "Decision 0008: Dependency updates through Renovate",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_dependency_updates"
+      ],
+      "requires": []
+    }
+  ]
+}

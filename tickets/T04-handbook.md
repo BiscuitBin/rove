@@ -1,7 +1,7 @@
 ---
 id: T04
 title: "Handbook and maintainer docs: every page, decisions 0001 to 0007, README"
-status: open
+status: done
 depends_on: [T00]
 parallel_with: [T01, T02, T03]
 branch: ticket/t04-handbook
@@ -143,7 +143,393 @@ To be written by the executing agent: the commands run while writing and their e
 statuses, where a page departs from A's and why, anything handed back (a title or slug
 change, a fact `CONVENTIONS.md` got wrong), and the review record for each checkpoint.
 
+### Part 1 evidence (records 0001 to 0007, base 69f0d14)
+
+**Setup.** The lane worktree was created from `main` (`61f2357`), not from
+`bootstrap`, so T00's commits were missing. `69f0d14` (T00's tip) descends from
+`61f2357`, so the branch was fast-forwarded to it (`git merge --ff-only 69f0d14`) before
+any work; nothing was discarded. `RUSTUP_TOOLCHAIN=stable` was exported for every run
+(departure, as in T00). `just initialize` took the secondary-worktree path (exit 0,
+`Secondary worktree: skipping install-hooks.`). Baseline at `69f0d14`:
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+(nothing)
+```
+
+**Departure: `origin/main`.** Under the single-branch decision, `origin/main` is still
+`61f2357` and holds none of T00's files, so every `origin/main` comparison in the
+acceptance criteria and the Verification block is run against `69f0d14`, T00's tip,
+instead.
+
+**Facts the records rest on, read while writing** (all at `69f0d14`):
+
+```text
+$ git -C <B> show 6c5c07f:pyproject.toml | grep -n requires-python
+5:requires-python = ">=3.14"
+$ grep -n -A1 'group-requires-python' uv.lock
+469:[package.group-requires-python]
+470-tooling = ">=3.14"
+$ grep -n 'biscuit_games_tooling?tag' uv.lock | head -1
+86:source = { git = "https://github.com/steven-cutting/biscuit_games_tooling?tag=v0.3.0#6c5c07f6bec86e86b3930dfa41392e4b440e8c85" }
+$ uv run --frozen python -c 'import sys,keyword;print("rovo" in sys.stdlib_module_names, keyword.iskeyword("rovo"), keyword.issoftkeyword("rovo"))'
+False False False
+exit 0
+$ uv run --frozen python -I -c 'import importlib.metadata as m; print(m.packages_distributions().get("rovo"))'
+None
+$ uv export --frozen --no-default-groups --no-emit-project --quiet | grep -E '^[a-z]'
+annotated-doc==0.0.5 \
+colorama==0.4.6 ; sys_platform == 'win32' \
+markdown-it-py==4.2.0 \
+mdurl==0.1.2 \
+pygments==2.21.0 \
+rich==15.0.0 \
+shellingham==1.5.4 \
+typer==0.27.3 \
+$ ls .venv/lib/python3.14/site-packages/typer | grep _click; grep -c 'name = "click"' uv.lock
+_click
+0
+$ uv run --frozen python -c 'import rovo; print(rovo.__all__)'
+['__version__']
+```
+
+Decision 0002's "a version change is also a relock" was checked in a scratch copy
+(`ai_tmp/T04/verproj`: `pyproject.toml`, `uv.lock`, `README.md`, `CHANGELOG.md`, `src/`):
+`uv lock --check --offline` exit 0 as copied, exit 1 ("The lockfile at `uv.lock` needs
+to be updated") after `version = "0.0.1"`. The worktree's files were not touched.
+
+**Hand-back, `CONVENTIONS.md` §1 fact 9.** "typer and its five dependencies" is
+inexact: the export above lists seven packages besides typer (four of them typer's own
+requirements, three pulled in by rich), colorama under its Windows marker. Decision
+0003 names the list as locked.
+
+**Records.** 0004 opens with the carried-from line (§8), and since checkpoint 1 so does
+0005 (A's 0004, whose sentences it reuses); 0004 is A's 0002 with the
+twenty-two recipes become eight, A's pixi record (0006) become this repository's 0001,
+and the cost paragraph rewritten for the 3.14-only checkers. 0006 lists no licence
+options: none were named before this ticket ran. No record links 0008, which T06
+creates. Frontmatter is the T00 stub's, byte for byte.
+
+```text
+$ just check-docs
+markdownlint.............................................................Passed
+typos....................................................................Passed
+lychee...................................................................Passed
+uv run --frozen bg-validate-docs
+Validated 31 pages and 31 canonical topics.
+exit 0
+$ rg -n -i 'stub|T04 writes|todo|tbd|fixme' docs/decisions/000*.md
+exit 1
+```
+
+Stopped at step 3's **Adversarial review**; the orchestrator runs §14 checkpoint 1.
+
+**Checkpoint 1, conformance and breakage lenses** (verdicts in
+`ai_tmp/review/T04-1/verdicts.md`). Applied to the records: 0005 scopes `uv.lock` to
+the runtime dependencies and both groups (the build backend's requirements are not
+locked) and carries the carried-from line; 0006 keeps `_typos.toml`'s `cpy` entry after
+the `CPY001` ignore lifts; 0004's second reopen condition is tied to the 3.13 floor, a
+departure from A's "cheaper than an interpreter", and its cost paragraph says a failed
+lychee download still ends in `Ready`; 0007 no longer says a soft keyword breaks an
+import. Hand-backs, not new: the lychee binary check is T00's (§4 `install-hooks`, §5
+`scripts/initialize.sh`, already in T00's hand-back notes); T00's ticket still says to
+lift the `cpy` entry with the ignore, which 0006 now contradicts, for T00's owner or the
+release ticket to reconcile.
+
+Review record, checkpoint 1 (run by the orchestrator over `7aeb572`). Harness: Codex
+CLI 0.165.0, `-m gpt-6-astra`, read-only sandbox, one reviewer per lens; triage by
+separate subagents. Nine raw findings, merged to six (C1=B2, C3=B3, C5=B4); six valid,
+none invalid, none high, so no second round:
+
+| Finding | Severity | Verdict | Reason | Outcome |
+| --- | --- | --- | --- | --- |
+| C1+B2 | medium | valid | `uv.lock` does not lock hatchling or its requirements | applied, 0005 |
+| C2 | medium | valid | lifting `cpy` would turn `typos` red on 0006 and T00's ticket | applied, 0006; T00 note handed back |
+| C3+B3 | low | valid | 0004's "cheaper than the pin" was untestable | applied, C3's wording |
+| C4 | low | valid | 0005 reused A 0004's sentences without the carried-from line | applied |
+| C5+B4 | low | valid | a soft keyword imports fine | applied, 0007 |
+| B1 | low | valid in part | a failed lychee download still ends in `Ready` | doc caveat applied, 0004; code fix handed back (T00) |
+
+Re-run after the fixes, at `7aeb572` with uncommitted changes:
+
+```text
+$ just check-docs
+markdownlint.............................................................Passed
+typos....................................................................Passed
+lychee...................................................................Passed
+uv run --frozen bg-validate-docs
+Validated 31 pages and 31 canonical topics.
+exit 0
+$ rg -n -i 'stub|T04 writes|todo|tbd|fixme' docs/decisions/000*.md
+exit 1
+```
+
+Committed as `f23f86d`.
+
+### Part 2 evidence (pages, README, CHANGELOG, SECURITY; base f23f86d)
+
+Steps 4 to 6, at `f23f86d` with uncommitted changes, `RUSTUP_TOOLCHAIN=stable`
+exported. Raw logs are under `ai_tmp/T04/`.
+
+**Generated references.** `reference/commands.md` was written from `just --list` and
+`just --summary` (22 recipes), each description checked against `just --show` and
+`CONVENTIONS.md` §4. Its first-column recipe names equal the summary:
+
+```text
+$ rg -o '^\| `([a-z-]+)' -r '$1' docs/reference/commands.md | sort > doc; just --summary | tr ' ' '\n' | sort > just; diff doc just
+diff exit 0   (22 names each)
+```
+
+`reference/cli.md` was written from `uv run --frozen rovo --help` and
+`uv run --frozen rovo version --help` (each exit 0). `reference/api.md` from
+`rovo.__all__` (`['__version__']`, exit 0). The exit codes it states were each run:
+
+```text
+rovo --version          -> rovo 0.0.0, exit 0
+rovo version            -> rovo 0.0.0, exit 0
+rovo --version version  -> rovo 0.0.0, exit 0
+rovo (no arguments)     -> help on stdout (12 lines), stderr empty, exit 2
+rovo nope               -> "No such command 'nope'." on stderr, exit 2
+rovo --bogus            -> "No such option: --bogus", exit 2
+rovo version extra      -> "Got unexpected extra argument(s) (extra)", exit 2
+```
+
+**Commands shown in the how-tos, tutorial and README, run with their exit status:**
+
+| Command | Page | Exit |
+| --- | --- | --- |
+| `just initialize` | develop-locally, tutorial, README | 0 (secondary-worktree path) |
+| `just check` | develop-locally, tutorial, maintain-dependencies, README | 0 (baseline; tutorial run below) |
+| `uv run --frozen rovo --version`, `rovo version`, `python -m rovo --version` | install-and-run, README | 0, 0, 0 |
+| `uv run --frozen python -c 'import rovo; print(rovo.__version__, rovo.__all__)'` | install-and-run | 0, `0.0.0 ['__version__']` |
+| `uv run --frozen python -c 'import rovo; print(rovo.__version__)'` | README | 0 (same probe, fewer names) |
+| `just py-test` / `just py-test -k version` | develop-locally, test-and-debug | 0 (`3 passed`) |
+| `uv run --frozen pytest tests/test_api.py` | test-and-debug | 0 (`1 passed`) |
+| `just coverage` | test-and-debug | 0 (TOTAL 100%) |
+| `uv run --frozen coverage html -d target/htmlcov` | test-and-debug | 0; `git status` unchanged |
+| `just wheel-smoke` | test-and-debug | 0 |
+| `target/wheel-smoke/venv/bin/rovo --help` | test-and-debug | 0 |
+| `just lock-check` | maintain-dependencies | 0 |
+| `just sync` | develop-locally, maintain-dependencies | 0, run with `UV_OFFLINE=1`; `uv.lock` checksum unchanged |
+| `UV_PROJECT_ENVIRONMENT=target/venv-3.13 UV_PYTHON=3.13 UV_NO_GROUP=tooling just lock-check py-lint py-typecheck coverage wheel-smoke` | develop-locally | 0 (run with `UV_OFFLINE=1` added; Python 3.13.13) |
+| `just fix` | develop-locally | 0, with every change staged first: the unstaged diff was empty afterwards, so it repaired nothing |
+| `just format` | develop-locally | 0 (checkpoint 2 fixes, on `3b282f3` plus the uncommitted fixes): `git diff` hash identical before and after, `70 files left unchanged` |
+
+The tutorial was followed start to finish on scratch copies (§11 "Scratch":
+`tests/test_cli.py` and `src/rovo/cli.py` saved to `ai_tmp/scratch/`, edited, run,
+copied back), log `ai_tmp/T04/tutorial.log`:
+
+```text
+$ just py-test -k ping            (test only)
+E       assert 2 == 0   ... No such command 'ping'.
+exit 1
+$ just py-test -k ping            (test and command)
+1 passed, 3 deselected
+exit 0
+$ uv run --frozen rovo ping
+pong
+exit 0
+$ uv run --frozen rovo --help     (lists "ping  Answer pong: a tutorial exercise, not part of the product.")
+exit 0
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short -- src tests   (after restoring)
+(nothing)
+```
+
+**Shown, not run.** Each was checked against `just --show <recipe>` and
+`CONVENTIONS.md` §4 and §5; none was run from this worktree:
+
+| Command | Page | Reason |
+| --- | --- | --- |
+| `just lock` | maintain-dependencies | writes `uv.lock` (frozen) and needs the network |
+| `just lock-upgrade` | maintain-dependencies | writes `uv.lock` (frozen) and needs the network |
+| `just install-hooks` | develop-locally (prose), commands | installs the shim into the shared `.git/hooks`; primary checkout only |
+| `just audit` | maintain-dependencies, maintenance | needs the network |
+| `just check-links-online` | maintenance, commands | needs the network |
+| `uvx rovo --version`, `uv tool install rovo`, `pip install rovo` | install-and-run | describe a release that does not exist; network; said plainly on the page |
+
+`git diff 69f0d14 -- uv.lock` is empty (below), and no run touched `.git/hooks`.
+
+**Departures from A's pages.** Every page was adapted from A's page of the same path at
+`c8e1a46`, keeping A's structure and every sentence still true, and dropping Rust, pixi,
+upstream, parity, Pages and release-matrix material. Beyond that:
+
+- `documentation-contract.md`: A names three pages that link outward; here none does.
+  `install-and-run.md` names the future PyPI page as a code span, because a link to a
+  page that 404s until the first upload would fail `just check-links-online`.
+- `quality-gates.md`: a second table of positive controls, which §6 asks for and A's
+  page folds into its gate rows; it says plainly that four gates carry none.
+- `agent-contract.md`: a table of which `AGENTS.md` block routes to which skill,
+  written from T03's `AGENTS.md` on `worktree-agent-ae9028ada011aa39c` at `72b9efa`
+  (T03's hand-back to this ticket). That file is not in this branch's tree.
+- `maintenance.md`: the weekly audit is `just audit` by hand, because the scheduled
+  `audit.yml` is T01's and is not in this tree.
+- `terminology.md`: two tables (project, workflow) instead of A's repository and
+  Allium tables; the product's terms are left to its first ticket.
+- README, CHANGELOG and SECURITY have no finished A original (A's are T00 placeholders);
+  they follow A's `tickets/T12-maintainer-docs.md` shape. CHANGELOG uses
+  `## [Unreleased]`, Keep a Changelog's heading, with no link reference.
+
+**For T05 to re-check after the merge** (written to the merged design where a parallel
+lane owns the fact): `agent-contract.md`'s routing table (T03's final `AGENTS.md`);
+`configuration.md`, `quality-gates.md`, `quality-philosophy.md` and `testing.md` where
+they quote `ruff.toml`, `mypy.ini`, `.coveragerc` or the absence of `conftest.py` and of
+subprocess coverage (T02); `repository-map.md`, `configuration.md` and
+`security-model.md` on `.github/` (T01's `audit.yml` and CI jobs); `cli.md`'s no-argument
+exit status 2 (T00's open point for T02).
+
+**Hand-backs.**
+
+- The README's handbook links point at `https://github.com/BiscuitBin/rove/blob/main/...`.
+  They resolve only once `bootstrap` reaches `main`; until then
+  `just check-links-online` reports them. No relative link was used (PyPI).
+- `SECURITY.md` sends reports to GitHub's private vulnerability reporting. T01's
+  step-2 read (`worktree-agent-ab299d2594d2110e5`, `tickets/T01-github-and-ci.md`
+  line 190) shows `.enabled` = `false`. Turning it on is T01 step 7 (separately
+  authorised, §11); until then the documented channel does not exist. If it stays off,
+  `SECURITY.md` needs another contact, a maintainer decision. Do not merge while the
+  setting reads `false` without one or the other.
+- The `Justfile` comment above `lock-upgrade` says the exact dev pins hold still, so
+  the upgrade moves only typer's tree and B's commit; the tools' own transitive
+  dependencies move too (`maintain-dependencies.md` now says so). The `Justfile` is
+  frozen (§11): for a T00 follow-up or T05.
+- `testing.md` said subprocesses are not measured, true before T02's `.coveragerc`
+  (`patch = subprocess`). Resolved in Part 3, after merging `bootstrap`.
+
+Review record, checkpoint 2 (run by the orchestrator over `3b282f3`; verdicts in
+`ai_tmp/review/T04-2/verdicts.md`). Harness: Codex CLI 0.165.0, `-m gpt-6-astra`,
+read-only, one reviewer per lens; triage by separate subagents. Eleven raw findings,
+merged to eight; all valid, none high, so no second round:
+
+| Finding | Severity | Verdict | Outcome |
+| --- | --- | --- | --- |
+| C1+B1 | medium | valid: private vulnerability reporting reads `false` | handed back (T01 step 7, maintainer); open point |
+| C2+B2 | medium | valid once merged: `bootstrap`'s `.coveragerc` measures subprocesses | applied after the merge (Part 3) |
+| B3 | medium | valid: `lock-upgrade` also moves the tools' transitive dependencies | applied, `maintain-dependencies.md`; `Justfile` comment handed back |
+| C3 | low | valid: `check-clean` alone needs a clean worktree | applied, `commands.md` |
+| C4+B5 | low | valid: bare `rovo` prints help to stdout | applied, `cli.md` (C4's wording) |
+| C5 | low | valid: `just format` shown but not run | run, recorded above |
+| B4 | low | valid: hatchling is not in `uv.lock` | applied, `maintain-dependencies.md` |
+| B6 | low | valid: `rovo --version` prints `rovo 0.0.0`, not the bare version | applied, `api.md` |
+
+Re-run by the triage after the fixes: `just format` exit 0 (no diff), `just check-docs`
+exit 0, `just check` exit 0, ending `All checks passed and the worktree is unchanged.`
+
+**Gate and scope, on the staged tree before the commit:**
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git diff --cached --stat 69f0d14 -- docs/manifest.yml docs/README.md uv.lock
+(nothing)
+exit 0
+$ git diff --cached --name-only 69f0d14 | grep -v -E '^(docs/|README.md|CHANGELOG.md|SECURITY.md|tickets/T04-handbook.md)'
+exit 1
+$ rg -n -i 'stub|T04 writes' docs README.md CHANGELOG.md SECURITY.md
+exit 1
+$ git grep -n -i 'T04 writes' 69f0d14 -- docs | head -3   (positive control)
+69f0d14:docs/decisions/0001-uv-and-hatchling.md:11:This decision record is a stub that T04 writes in full. It will state the
+69f0d14:docs/decisions/0002-src-layout-and-public-api.md:11:...
+69f0d14:docs/decisions/0003-typer-cli-and-lazy-import.md:11:...
+```
+
+**README as PyPI renders it** (step 6):
+
+```text
+$ rm -rf dist && uv build --offline
+exit 0
+$ unzip -p dist/rovo-*.whl 'rovo-*.dist-info/METADATA'
+14:Description-Content-Type: text/markdown
+16:# rovo
+65:## Licence
+exit 0
+$ rg -n '\]\((?!https?://)' --pcre2 README.md
+exit 1
+$ printf '[x](docs/README.md)\n' | rg -n '\]\((?!https?://)' --pcre2   (positive control)
+1:[x](docs/README.md)
+exit 0
+```
+
+Checkpoint 2 fixes committed as `3fb79fd`.
+
+### Part 3 evidence (merged with T02 and T03; base 6f05b67)
+
+`git merge --no-ff bootstrap` (`4c7191c`, carrying T02 and T03) merged cleanly as
+`6f05b67`; the lanes' paths are disjoint from this ticket's. The pages were then
+re-checked against the merged tree:
+
+- **Generated references.** `Justfile`, `pyproject.toml`, `uv.lock` and `src/` are
+  unchanged by the merge (`git diff --stat 69f0d14 HEAD -- src Justfile pyproject.toml
+  uv.lock` prints nothing). `just --summary` still equals `commands.md`'s 22 names
+  (`diff` exit 0); `rovo --help` still lists `--version`, `--help` and `version`;
+  `rovo.__all__` is still `['__version__']`. No change to `commands.md`, `cli.md` or
+  `api.md`.
+- **T03.** The merged `AGENTS.md` differs from `72b9efa` only in its network sentence
+  (`git diff --stat 72b9efa HEAD -- AGENTS.md`: 1 file, 4 lines); every block routes to
+  the skill `agent-contract.md`'s table names, and the six `description` lines are
+  unchanged. No change to `agent-contract.md`.
+- **T02, applied** (checkpoint 2's C2/B2 and what followed from it):
+  `testing.md` now describes the merged suite (the JSON probe and one test per
+  invariant, typer, rich and click; the 200-column `CliRunner` tests of `--help`, no
+  arguments and an unknown command; the out-of-process console-script and
+  `python -m rovo` tests; the wheel smoke's exact file-list, metadata and
+  console-script checks) and replaces the subprocess sentence with `patch =
+  subprocess`. `configuration.md` adds `patch = subprocess`, mypy's
+  `warn_unreachable` and `warn_redundant_casts`, and ruff's formatter `exclude =
+  ["*.md"]`. `quality-gates.md`'s wheel-smoke guard adds the exact files and metadata.
+  `test-and-debug.md` describes the shared probe fixture and the smoke's new failure
+  cases (`wheel_smoke: ...` on stderr). `architecture.md` and decision 0003 say "typer,
+  rich or click" where they said typer alone.
+- **Unchanged, still true:** `cli.md`'s no-argument exit 2 (T02 pins it in
+  `test_no_arguments_prints_help_and_exits_2`); `quality-philosophy.md` (ruff's three
+  ignores, `warn_unused_ignores`); `_typos.toml`'s `cpy` entry (decision 0006).
+
+```text
+$ just coverage   (merged tree)
+src/rovo/__init__.py       3      0      0      0   100%
+src/rovo/__main__.py       0      0      0      0   100%
+src/rovo/cli.py           14      0      2      0   100%
+TOTAL                     17      0      2      0   100%
+$ just check   (6f05b67 with the aligned pages staged)
+All checks passed and the worktree is unchanged.
+exit 0
+$ rg -n -i 'stub|T04 writes' docs README.md CHANGELOG.md SECURITY.md
+exit 1
+$ git diff --stat 69f0d14 HEAD -- docs/manifest.yml docs/README.md uv.lock
+(nothing)
+exit 0
+```
+
+After that commit (`35b2e01`): `just check` ended
+`All checks passed and the worktree is unchanged.` (exit 0) and `git status --short`
+printed nothing (exit 0). Status set to `done` in the next commit.
+
+**Acceptance criteria and their evidence.**
+
+- `just check-docs` green, and the frozen manifest and map unchanged: Part 3 above
+  (`just check` runs `check-docs`), compared against `69f0d14` (the `origin/main`
+  departure in Part 1).
+- No page describes itself as a placeholder: Part 3, with its positive control in
+  Part 2.
+- Every recipe in `commands.md` is in `just --summary`; every how-to command run with
+  its exit status, the exemptions listed as "shown, not run"; `uv.lock` unchanged:
+  Parts 2 and 3.
+- The README carries the licence sentence and no relative link: Part 2.
+- Both adversarial reviews ran, every valid finding applied or handed back: the two
+  review records.
+
 ## Open points
 
-- The licence options to record in decision 0006, if the maintainer names any before
-  this ticket runs.
+- `SECURITY.md`'s reporting route: private vulnerability reporting reads `false` (T01
+  step 2). Either T01 step 7 enables it (the orchestrator puts it to the maintainer) or
+  the maintainer names a contact. `SECURITY.md` keeps pointing at it.
+- The licence options for decision 0006: none were named while this ticket ran, so the
+  record says "none listed yet"; the maintainer's licence decision supersedes it.
+- The hand-backs above (the `Justfile`'s `lock-upgrade` comment; README links that
+  resolve once `bootstrap` reaches `main`) and the T05 re-check list in Part 2.
