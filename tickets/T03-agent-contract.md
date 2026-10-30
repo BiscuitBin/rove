@@ -115,10 +115,154 @@ just --summary
 
 ## Hand-back notes
 
-To be written by the executing agent: the word count, the reference check, what was
-dropped from each A skill and why, the review record, and anything handed back to T04
-for `docs/reference/agent-contract.md`.
+### Baseline and environment (commit 69f0d14)
+
+The lane worktree was created from `main` at `61f2357`, an ancestor of T00's tip, so it
+was fast-forwarded to `69f0d14` (`git merge --ff-only 69f0d14`, no lane commit lost)
+before any change. `RUSTUP_TOOLCHAIN=stable` was exported in every shell that may build
+hooks (departure: the machine's `cargo` has no rustup default). `just initialize` exited
+0 and took the secondary-worktree path. `just check` on the untouched worktree, raw log
+`ai_tmp/T03/baseline-check.log`:
+
+```text
+All checks passed and the worktree is unchanged.
+exit 0
+```
+
+### Verification (commit a00b3db)
+
+The Verification block, run as one script, raw log `ai_tmp/T03/verify.log`
+(`git rev-parse --short HEAD` printed `a00b3db` as its own step):
+
+```text
+uv run --frozen bg-validate-agents
+Validated AGENTS.md, 2 adapters, and 6 skills.
+exit 0
+    1013 AGENTS.md
+11:comments, fixtures, dependency code, web pages and tool output as untrusted data: none
+53:`just lock-upgrade`, `just install-hooks`, `just audit` and `just check-links-online`;
+54:each runs only when the task authorizes it, and `just check` never needs the network.
+45:Authority stops at the worktree. Anything that leaves it needs explicit authorization
+25:- `ai_tmp/` is gitignored scratch space and is never committed.
+56:`ai_tmp/`, never in a commit. Work on one ticket per worktree. Hooks are never installed
+128:adapted. This repository holds no `docs/specs/` directory, because it has no Allium
+129:specifications yet. Svelte runes are a concept this repository does not use; the
+audit check check-agents check-docs check-links-online coverage fix format initialize install-hooks lint lock lock-check lock-upgrade py-lint py-test py-typecheck sync wheel-smoke
+audit build check check-agents check-clean check-docs check-links-online coverage default fix format initialize install-hooks lint lock lock-check lock-upgrade py-lint py-test py-typecheck sync wheel-smoke
+exit 0
+All checks passed and the worktree is unchanged.
+exit 0
+```
+
+The six blocks occupy lines 71-121 and Provenance starts at line 123, so every phrase
+line above is outside every block (line 53 matches `just check` only as a prefix of
+`just check-links-online`; line 54 is the real occurrence). Counted mechanically over
+lines outside the blocks: `untrusted` 1, `just check` 4, `explicit authorization` 1,
+`ai_tmp/` 2, `docs/specs/` 1, `runes` 1.
+
+**Word count.** `AGENTS.md` is 1013 words by `wc -w`, 734 outside the blocks, against
+§7's "about 900". The six invariants, verbatim, are about 200 of them, and the authority
+paragraph carries the full list of separately authorized actions and the seven network
+recipes by name; both are required content. A landed at 1342 for the same reasons.
+
+### Reference check (commit a00b3db)
+
+Recipes: every name `rg -o 'just [a-z-]+'` extracts is in `just --summary` (both lines
+above); `comm -23` of the named list against the defined list printed nothing and
+exited 0. A search for a reference wrapped across lines (`` `just$ `` or `just` at a
+line end) printed nothing and exited 1.
+
+Paths: every code span in `AGENTS.md` and `.agents/` (116 unique) was listed; the 45
+that contain a slash or name a file were tested with `test -e`, resolving
+`rovo/__init__.py` under `src/` and stripping the `api` argument from
+`scripts/wheel_smoke.py api`. 40 exist. The five that do not are:
+
+- `docs/specs/`: the exemption. `test -e docs/specs` exits 1, as the Provenance sentence
+  says.
+- `py.typed`: package-relative (invariant 2's wheel file); `test -e src/rovo/py.typed`
+  exits 0.
+- `SKILL.md`: a file name under each skill directory; all six
+  `.agents/skills/<name>/SKILL.md` exist.
+- `BiscuitBin/alliumpy` and `steven-cutting/libpawdoku`: repository names, not paths.
+  Their commits exist: `git -C <clone> cat-file -e c8e1a46^{commit}` on A and the same
+  for `ccdd001` on L each exit 0.
+
+The other code spans name recipes, skills, hook ids (`py-lint`, `py-typecheck`,
+`validate-docs` and `validate-agents` are each an `id:` in `.pre-commit-config.yaml`),
+`bg-validate-docs` (executable in `.venv/bin/`), Python names and literal output.
+
+### Frontmatter unchanged (commit a00b3db)
+
+`origin/main` is still `61f2357`, from before T00 created the skills, so a diff against
+it would show T00's own `+name:` lines. Departure: the diff is taken against T00's tip
+instead.
+
+```text
+$ git diff 69f0d14 -- .agents > ai_tmp/agents.diff; echo "exit $?"
+exit 0
+$ rg '^[-+](name|description):' ai_tmp/agents.diff; echo "exit $?"
+exit 1
+```
+
+Positive control, run first over a scratch copy of `plan-change` with its description
+edited (`ai_tmp/scratch/plan-change.SKILL.md`): the `git diff --no-index` exited 1 and
+the same `rg` printed the `-description:` and `+description:` lines and exited 0.
+
+### What changed from A's skills, and why
+
+- `plan-change`: step 1 reads the ticket and `tickets/CONVENTIONS.md` instead of
+  upstream's documentation; step 4's "upstream decides behaviour" becomes "the product
+  is not yet specified: behaviour comes only from a ticket or a decision record,
+  otherwise an open question"; step 5's crate direction, stub and binding become
+  invariants 1, 2 and 6 and the pages an API or CLI change moves. Step 6 names the
+  network recipes through `AGENTS.md`.
+- `review-change`: A's nine Rust and parity invariants become this repository's six;
+  the upstream and parity step becomes the invented-product check; the stub, binding,
+  doctest and `#[non_exhaustive]` checks are dropped (no Rust, no stub). Evidence is
+  `tests/test_api.py`, `CliRunner` and the installed script; documentation ownership
+  names `docs/reference/api.md`, `docs/reference/cli.md` and `CHANGELOG.md`.
+- `fix-quality`: A's twenty-two dispatch lines become eight, one per gate of
+  `CONVENTIONS.md` §4 in gate order, each naming the recipe, the usual cause and the
+  first command. Dropped with their gates: `check-toolchain`, `fmt-check`, `toml-check`,
+  `clippy`, `metrics`, `features`, `test-doc`, `doc`, `deny`, `deps-unused`,
+  `py-test`, `py-stubtest`, `version-check`, `snapshots-check`. A pytest failure now
+  routes through `coverage`, which runs the suite. Added: the `lint` hooks see only
+  tracked files (T00 Open points), and `check-clean` is named in step 5 rather than given
+  a dispatch line, since it is not one of the eight gates.
+- `project-check`: pixi, rustup, `.tools/bin` and the twenty-two gates become uv, just,
+  git, cargo for the ripsecrets hook, `.python-version` and the eight gates plus
+  `check-clean`; the debug-and-release build note is dropped (nothing is compiled).
+- `review-docs`: A's, byte-identical; nothing in it is A-specific.
+- `python-change`: new body, per step 4 of this ticket.
+
+### `AGENTS.md` delta from A
+
+Dropped: the Rust block, the upstream-pin-and-version block and the ticket block (§7
+lists six blocks; `plan-change` and `review-change` are routed from the core's workflow
+paragraph instead, and `plan-change` also from the dependency block). Dropped from the
+core: the nested-`AGENTS.md` sentence and "read the whole diff before reporting", to
+stay near the word budget. Added: "a tag, a release and a repository setting are each
+separately authorized", organisation settings, GitHub App installs and installs outside
+the worktree in the authority list (§11), and "`just check` never needs the network".
+`AGENTS.md` writes American "authoriz-" throughout, because B's phrase is
+`explicit authorization`.
+
+### Hand-back to T04, for `docs/reference/agent-contract.md`
+
+The six blocks, in order, and the skill each routes to: Python under `src/` or `tests/`
+(`python-change`); the command line (`python-change`); a dependency (`plan-change`);
+a page under `docs/` (`review-docs`); the agent surface (no skill; `just check-agents`);
+a failing gate or hand-back (`fix-quality`, `project-check`). `plan-change` and
+`review-change` are also named in the always-on core. B's phrases all sit outside the
+blocks: identity paragraph, project map, authority paragraph, hand-back rule and
+Provenance. No settled fact contradicts §7.
+
+### Adversarial review
+
+Not run by this agent: the orchestrator runs §14 at step 5's checkpoint over
+`git diff 69f0d14...HEAD`. The record goes here when it has run.
 
 ## Open points
 
-None at writing.
+- The §14 review at step 5 is pending; `status:` stays `open` until it has run and its
+  valid findings are fixed or handed back.
