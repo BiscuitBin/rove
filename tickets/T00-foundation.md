@@ -1,7 +1,7 @@
 ---
 id: T00
 title: "Foundation: a tracer bullet that is green on its first commit"
-status: open
+status: done
 depends_on: []
 parallel_with: []
 branch: ticket/t00-foundation
@@ -1020,6 +1020,65 @@ exit 0
 ```
 
 `just py-lint` and `just py-typecheck` exit 0 after the change.
+
+### Close-out evidence (commit aa42a698adc1bea2b8ef23161417529a1f995cb1)
+
+Step 13: the review fixes are committed as `aa42a69`, and steps 11 and 12 were re-run
+on that commit with `RUSTUP_TOOLCHAIN=stable`. This is the Verification block, raw log
+`ai_tmp/T00/closeout-verify.log`:
+
+```text
+aa42a69
+The worktree matches the check baseline.
+
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+exit 0
+0.0.0 False
+rovo 0.0.0
+rovo 0.0.0
+6:Classifier: Private :: Do Not Upload
+uv run --frozen bg-validate-agents
+Validated AGENTS.md, 2 adapters, and 6 skills.
+3.13 exit 0
+$ ls LICENSE*
+(eval):11: no matches found: LICENSE*
+$ rg -n -i 'licen[cs]e' pyproject.toml
+13:# No license and no license-files: the licence is undecided (decision 0006).
+21:  # ticket, which needs the licence decision first (decision 0006).
+```
+
+The `METADATA` read has no `License` line, and both `rg` matches are comments. The
+fresh clone, raw logs `ai_tmp/T00/closeout-fresh*.log`, was deleted afterwards:
+
+```text
+clone exit 0
+fresh HEAD aa42a698adc1bea2b8ef23161417529a1f995cb1
+worktree HEAD aa42a698adc1bea2b8ef23161417529a1f995cb1
+initialize exit 0
+Ready. Next: just check.
+Nothing has been formatted, staged, committed, tagged, or pushed.
+All checks passed and the worktree is unchanged.
+check exit 0
+$ git status --short
+status exit 0
+```
+
+Acceptance criteria and their evidence:
+
+- `just check` in the worktree and in a fresh clone: the two blocks above.
+- `wheel-smoke` offline, with its negative control and a first install step that has
+  no typer: part 1, step 6, and the B1 control under the review records.
+- Every positive control fired: part 1, step 5.
+- `check-agents`: above.
+- §12 claims 1 to 8 and 10, and claim 9's first half: parts 1 and 2. The `install-hooks`
+  half of claim 6 is in part 4.
+- No `LICENSE`, and the licence `rg` matches only comments: above.
+- Both adversarial reviews: the review records. Every valid finding is applied or
+  handed back under Open points.
+
+Status is `done`. The push in step 13 needs authorisation and was not done.
 
 ## Open points
 
