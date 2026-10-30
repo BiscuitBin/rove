@@ -151,6 +151,113 @@ To be written by the executing agent: each setting changed and why, each negativ
 control with its output, the coverage report, the outcome of T00's open point, any
 recipe change handed back, and the review record for each checkpoint.
 
+### Steps 1 to 5 (commit 048f7d1)
+
+**Setup.** The lane's worktree branch was created from `main` (`61f2357`), not from
+`bootstrap`; it was fast-forwarded to T00's tip `69f0d14` (`git merge --ff-only`)
+before any work. `RUSTUP_TOOLCHAIN=stable` was exported (common-brief departure);
+`just initialize` took the secondary-worktree path. Baseline `just check` at `69f0d14`,
+exit 0, raw log `ai_tmp/T02/baseline.log`:
+
+```text
+All checks passed and the worktree is unchanged.
+```
+
+**Settings changed, and why.**
+
+- `ruff.toml`: unchanged rules (they already met §9, with T00's `CPY001` hand-back);
+  `[format] exclude = ["*.md"]`. T00 handed this decision over: ruff 0.17.3 formats
+  Python blocks inside Markdown (`ruff format --check -v .` listed 70 files, 62 of
+  them `.md`). Decision: exclude. Code blocks under `tickets/` and `docs/` are
+  quotations (tickets embed verbatim content, some deliberately unformatted), docs
+  pages belong to T04 and markdownlint, and `just format` must not rewrite prose or a
+  frozen page. `ruff check` never read Markdown (`--show-files` lists none), so lint is
+  unchanged. After: `6 files already formatted` (the six checked `.py` files).
+- `mypy.ini`: `warn_unreachable = True` and `warn_redundant_casts = True` (W), each
+  commented. Strict already implies the second; it is stated as W does.
+- `pytest.ini`: §9's options unchanged; a comment on each.
+- `.coveragerc`: `[run] patch = subprocess`, INI syntax, commented (claim 9 below).
+
+**T00's open point, no arguments.** Pinned by
+`test_no_arguments_prints_help_and_exits_2`: bare `rovo` prints the help on stdout,
+nothing on stderr, and exits **2** (typer 0.27.3's `no_args_is_help`). The real
+console script agrees: `.venv/bin/rovo` alone exited 2 with an empty stderr.
+
+**Tests.** `tests/test_api.py`: one `python -I` subprocess probe (module fixture)
+reports `sys.modules`, `__all__` and both versions as JSON; three tests named for
+invariants 1, 2 and 3. `tests/test_cli.py`: `CliRunner` for `--version` and `version`
+(stdout exactly `rovo <version>\n`, stderr empty), `--help`, no arguments, an unknown
+command (exit 2, `No such command 'no-such-command'.` on stderr, stdout empty); out of
+process, the console script found by `shutil.which("rovo", path=<dir of
+sys.executable>)` (asserted non-`None`) and `python -I -m rovo`, each `--version`. The
+runner pins `COLUMNS` and `TERMINAL_WIDTH` to 200: with either set to 30 in the caller's
+environment, three tests failed on wrapped rich output before the pin and pass after.
+No `tests/conftest.py` was needed. Each test was seen to fail on a deliberate defect,
+then the file was restored: `import typer` in `__init__.py` failed invariant 1 (`assert
+['typer', 'ty...matting', ...] == []`); an extra `__all__` name failed invariant 2;
+`no_args_is_help=False` failed only the no-arguments test; a changed version line failed
+all four version tests.
+
+**Claim 9.** `coverage combine` with one process's data: T00 (part 1). Subprocess
+coverage, measured over only the subprocess tests
+(`coverage run -m pytest -k 'console_script or python_m or invariant'`), before and
+after `patch = subprocess` (raw `ai_tmp/T02/claim9-*.txt`):
+
+```text
+before: src/rovo/cli.py   14  5  2  0   56%   14-16, 33, 39
+        TOTAL             17  5  2  0   63%
+after:  Combined 4 files
+        src/rovo/cli.py   14  2  2  1   81%   14->exit, 33, 39
+        TOTAL             17  2  2  1   84%
+```
+
+The three subprocesses (the API probe under `-I`, the console script, `python -I -m
+rovo`) are measured only with the patch, so the claim holds; `-I` does not stop it,
+because coverage's `.pth` reads `COVERAGE_PROCESS_CONFIG`, which is not a `PYTHON*`
+variable. The TOML list form `patch = ["subprocess"]` exits 1 with
+`Unknown patch '["subprocess"]'`, as the claim says. `__main__.py` reports 0
+statements because W's `if __name__ == .__main__.:` exclusion removes its whole body;
+it is kept, because without it the never-taken false branch is a permanent partial.
+
+**Claim 7** (raw `ai_tmp/T02/claim7.log`), each restored before the next:
+
+```text
+## ruff.py without F401 (import os removed); just py-lint
+py-lint: the positive control did not fire (exit 1 naming F401 and E501)
+exit 1
+## ruff.py without E501 (long line shortened); just py-lint
+py-lint: the positive control did not fire (exit 1 naming F401 and E501)
+exit 1
+## mypy.py without the error; just py-typecheck
+py-typecheck: the positive control did not fire
+exit 1
+## restored
+cmp identical
+(just py-lint) exit 0
+(just py-typecheck) exit 0
+```
+
+**Wheel smoke.** `api` now also asserts: the recorded files minus
+`rovo-<version>.dist-info/` and `../../../bin/rovo` are exactly `rovo/__init__.py`,
+`rovo/__main__.py`, `rovo/cli.py`, `rovo/py.typed`; `Requires-Python` is `>=3.13`; the
+`Private :: Do Not Upload` classifier; no `License`, `License-Expression` or
+`License-File`; the distribution's entry points are exactly
+`console_scripts rovo = rovo.cli:app`. `cli` also runs the `rovo` beside
+`sys.executable` and requires its output to equal `python -I -m rovo`'s. A control, with
+`pyproject.toml`'s wheel `packages` widened to `["src/rovo", "tests"]` in a scratch copy
+and restored (`git status` clean after):
+
+```text
+wheel_smoke: the installed files differ: unexpected ['tests/fixtures/py-lint-violation/mypy.py', 'tests/fixtures/py-lint-violation/ruff.py', 'tests/test_api.py', 'tests/test_cli.py'], missing []
+exit 1
+```
+
+**3.13** (raw `ai_tmp/T02/py313.log`): `UV_PYTHON=3.13 UV_NO_GROUP=tooling just py-lint
+py-typecheck coverage wheel-smoke` exit 0, pytest on `Python 3.13.13`, `10 passed`,
+`TOTAL 17 0 2 0 100%`, both `wheel_smoke` lines. `just sync` restored the 3.14
+environment afterwards; `just check` then exit 0, `All checks passed and the worktree is
+unchanged.`
+
 ## Open points
 
 - Whether the floor should rise to 100% while the package is this small. The maintainer
