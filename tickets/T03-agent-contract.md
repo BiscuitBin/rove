@@ -232,7 +232,11 @@ the same `rg` printed the `-description:` and `+description:` lines and exited 0
 - `project-check`: pixi, rustup, `.tools/bin` and the twenty-two gates become uv, just,
   git, cargo for the ripsecrets hook, `.python-version` and the eight gates plus
   `check-clean`; the debug-and-release build note is dropped (nothing is compiled).
-- `review-docs`: A's, byte-identical; nothing in it is A-specific.
+- `review-docs`: A's, byte-identical (`cmp` against
+  `git -C <A> show c8e1a46:.agents/skills/review-docs/SKILL.md`, saved to
+  `ai_tmp/T03/A-review-docs.md`, exits 0); nothing in it is A-specific.
+- `review-change`, after `c4c00d9`: the version bullet is scoped to `src/`, `tests/`
+  and `scripts/`, because `uv.lock` legitimately carries the version too.
 - `python-change`: new body, per step 4 of this ticket.
 
 ### `AGENTS.md` delta from A

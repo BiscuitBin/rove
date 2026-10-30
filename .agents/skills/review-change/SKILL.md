@@ -14,8 +14,8 @@ description: Review a change in this repository against its invariants, specific
    - The public API is exactly `__all__` in `src/rovo/__init__.py`; a new public name
      without an `__all__` entry, or an `__all__` entry starting with `_`, is a finding,
      and `src/rovo/py.typed` still ships.
-   - The version is written once, in `pyproject.toml`; a literal version anywhere else
-     is a finding.
+   - The version is written once, in `pyproject.toml`; a literal version under `src/`,
+     `tests/` or `scripts/` is a finding.
    - ruff `select = ["ALL"]` and mypy strict stand; every `# noqa` and
      `# type: ignore` names its rule and a reason, and every per-file ignore in
      `ruff.toml` carries a comment.
