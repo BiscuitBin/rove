@@ -439,14 +439,17 @@ audit                 pass  16s     (runs/41016347788)
     which is the runner's own rustup.
   - macOS: run 1 started cold (`Cache not found ... macOS-ARM64-prek-...`), built the
     hooks, and lint printed `ripsecrets....Passed`. Run 2's ripsecrets step did not run,
-    because the lychee step failed before it. So macOS has no compiler line yet.
+    because the lychee step failed before it. So macOS has no compiler line yet
+    (superseded by "Step 7, green run" below).
 - **Claim 11.** `just sync` installed B from git with no credential on both 3.14 legs
   (`+ biscuit-games-tooling==0.3.0 (from git+https://github.com/steven-cutting/biscuit_games_tooling@6c5c07f6...)`).
   `bg-project-check` ran `just check` there, and B's other checkers never ran, because
-  the gate failed at wheel-smoke first.
+  the gate failed at wheel-smoke first (superseded by "Step 7, green run" below).
 - **Claim 1, CI half.** `UV_NO_GROUP=tooling` with 3.13 synced and ran `lock-check`,
-  `py-lint`, `py-typecheck` and `coverage` green. `wheel-smoke` was red, from H2.
-- `All checks passed and the worktree is unchanged.` cannot be quoted from any leg yet.
+  `py-lint`, `py-typecheck` and `coverage` green. `wheel-smoke` was red, from H2
+  (superseded by "Step 7, green run" below).
+- `All checks passed and the worktree is unchanged.` cannot be quoted from any leg yet
+  (superseded by "Step 7, green run" below).
 - Timings, for the macOS open point. In run 1 every leg failed at about the same
   recipe: floor 1m24s, ubuntu 1m28s, macOS 1m48s, all on cold caches. In run 2 macOS
   took 3m11s, failing in setup.
@@ -487,6 +490,38 @@ prepared in `ai_tmp/T01/step9-payloads.md`, with the protection payload at
 
 - Departure: step 9's `--input` path is `ai_tmp/T01/protection.json`, not
   `ai_tmp/protection.json`, so the payload stays in T01's scratch directory.
+
+**Step 7, green run** (added at checkpoint 3). Quotes from CI run
+`41127006943` (`https://github.com/BiscuitBin/rove/actions/runs/41127006943`) on PR #2's
+head `490f48b`, the head protected in step 9, fetched read-only on 2026-10-30:
+
+```text
+$ gh run view 41127006943 --repo BiscuitBin/rove --json headSha,conclusion,jobs --jq '{headSha,conclusion,jobs:[.jobs[]|{name,conclusion}]}'; echo "exit $?"
+{"conclusion":"success","headSha":"490f48b8f2f6563a4ce0fdf900a09f5223fa75be","jobs":[{"conclusion":"success","name":"gate (ubuntu-latest)"},{"conclusion":"success","name":"floor"},{"conclusion":"success","name":"gate (macos-latest)"},{"conclusion":"success","name":"check"}]}
+exit 0
+$ gh run view 41127006943 --repo BiscuitBin/rove --log > run.log; echo "log exit $?"
+log exit 0
+```
+
+- `floor`, step `uv run --frozen python --version`: `Python 3.13.18`; `just coverage`
+  printed `platform linux -- Python 3.13.18, pytest-9.2.0`; `just wheel-smoke` printed
+  `wheel_smoke api: rovo 0.0.0, ...` and `wheel_smoke cli: rovo 0.0.0, ...` and the job
+  is `success`. `floor`'s log has no `biscuit` line (0), against 1 in each `gate` leg
+  (`+ biscuit-games-tooling==0.3.0 (from git+...@6c5c07f6...)`), the positive control.
+- `gate (ubuntu-latest)`, setup's ripsecrets step:
+  `ripsecrets built: /home/runner/.cache/prek/hooks/rust-uXbM8URxGofKOLpJXiOY/bin/ripsecrets`,
+  `"toolchain": "/home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"`;
+  `just check`: `All checks passed and the worktree is unchanged.`
+- `gate (macos-latest)`, setup's ripsecrets step:
+  `ripsecrets built: /Users/runner/.cache/prek/hooks/rust-TTCoz9KTa0k0gIuEbbG8/bin/ripsecrets`,
+  `"toolchain": "/opt/homebrew/opt/rustup/bin/rustc"`;
+  `just check`: `All checks passed and the worktree is unchanged.`
+
+Outcomes: §12 claim 1, CI half, holds (the 3.13 floor ran `lock-check`, `py-lint`,
+`py-typecheck`, `coverage` and `wheel-smoke` green without B); claim 6, runner half,
+holds on both OSes (each leg names the compiler that built ripsecrets); claim 11 holds
+(on Ubuntu `bg-project-check` ran every recipe through `bg-validate-docs`,
+`bg-validate-agents` and `check-clean` to the line above; macOS likewise).
 
 **Hand-backs for T05.**
 
@@ -570,6 +605,11 @@ ai_tmp/T01/protection.json`. Its response showed `checks` `[{context: check, app
 orchestrator's read-back after it first failed closed (zsh `noclobber` kept the stale
 404 file: `GET exit 1`, `jq exit 5`), then passed (`GET exit 0`, `true`, `jq exit 0`).
 
+- Departure: the PUT's exit status was not captured (applied by hand, outside the
+  agent's log; no file in `ai_tmp/T01/` records it), so step 9's "each with its exit
+  status quoted" is not met for call 3. The applied state is established only by the
+  step 10 read-back below (`GET exit 0`, assertion `true`, exit 0).
+
 Step 10's read-back, the block in `ai_tmp/T01/step9-payloads.md` run verbatim at
 2026-10-30T21:43:02Z after removing the stale `ai_tmp/protection-after.json`:
 
@@ -606,8 +646,53 @@ exit 0
 Changed from step 2's before-state: `delete_branch_on_merge` false to true; private
 vulnerability reporting false to true; protection on `main` from absent (HTTP 404) to
 `check` alone under app 15368, not strict, admins not enforced, force pushes and
-deletions off. `allow_auto_merge` stays false. Nothing else was sent. The step 10
-review (checkpoint 3) and step 11's merge are not done.
+deletions off, no required reviews and no push restrictions. `allow_auto_merge` stays
+false. Nothing else was sent. Step 11's merge is not done (see "Close-out" below).
+
+Checkpoint 3 strengthened the assertion (C2/B1 below): the one quoted above did not
+check `required_pull_request_reviews` or `restrictions`, which §10 sets to null, so it
+would have printed `true` on a protection that required a review or restricted pushes.
+The block in `ai_tmp/T01/step9-payloads.md` now appends
+`and .required_pull_request_reviews == null and .restrictions == null` and shows both
+fields in its projection. Re-run on a fresh read-only GET at 2026-10-30T21:51:36Z
+(`A` is the strengthened assertion; `p.json` the saved GET):
+
+```text
+$ gh api --method GET repos/BiscuitBin/rove/branches/main/protection > p.json; echo "GET exit $?"
+GET exit 0
+$ jq -c '{required_status_checks: {strict: .required_status_checks.strict, checks: .required_status_checks.checks}, enforce_admins: .enforce_admins.enabled, allow_force_pushes: .allow_force_pushes.enabled, allow_deletions: .allow_deletions.enabled, required_pull_request_reviews, restrictions}' p.json; echo "exit $?"
+{"required_status_checks":{"strict":false,"checks":[{"context":"check","app_id":15368}]},"enforce_admins":false,"allow_force_pushes":false,"allow_deletions":false,"required_pull_request_reviews":null,"restrictions":null}
+exit 0
+$ jq -e "$A" p.json; echo "exit $?"
+true
+exit 0
+$ jq -e "$A" ai_tmp/protection-after.json; echo "exit $?"
+true
+exit 0
+$ jq '.required_pull_request_reviews={required_approving_review_count:1}' p.json | jq -e "$A"; echo "exit $?"
+false
+exit 1
+$ jq '.restrictions={users:[],teams:[],apps:[]}' p.json | jq -e "$A"; echo "exit $?"
+false
+exit 1
+```
+
+Both fields are absent from the GET (GitHub omits a disabled section), so they read as
+null, as §10 requires. The fresh GET equals `ai_tmp/protection-after.json` apart from
+`url` (`cmp` exit 0 on `jq -S 'del(.url)'` of each).
+
+### Review record, checkpoint 3 (step 10, reviewed at `debdb10`)
+
+Two reviewers, both `codex exec -m gpt-6-astra -s read-only`, one per lens, as at
+checkpoint 2; separate triage subagents applied the fixes. Raw files and merged verdicts
+in `ai_tmp/review/T01-3/`, not committed. Three findings after merging duplicates, all valid, none high,
+so no second round runs; nothing was handed back. Only GET calls were made.
+
+| id | severity | verdict | reason | action |
+| --- | --- | --- | --- | --- |
+| C1/B2 | medium | valid | step 7's ripsecrets and `All checks passed ...` quotes were never shown in T01; the notes still said they were missing | "Step 7, green run" quotes run `41127006943` on `490f48b`; the old lines are marked superseded |
+| C2/B1 | medium | valid | step 10's `jq -e` assertion did not check `required_pull_request_reviews` or `restrictions` | assertion and projection extended, re-run with two negative controls, quoted above |
+| C3 | low | valid | call 3's PUT exit status was not quoted | recorded as a departure under call 3 |
 
 ## Open points
 
