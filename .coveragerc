@@ -1,0 +1,13 @@
+[run]
+branch = True
+source_pkgs = rovo
+parallel = True
+
+[report]
+show_missing = True
+# The floor is the Justfile's coverage_floor (--fail-under), never also here.
+exclude_also =
+    if TYPE_CHECKING:
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    @overload

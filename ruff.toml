@@ -1,0 +1,39 @@
+# Match the package's minimum Python, rather than the tooling interpreter.
+target-version = "py313"
+line-length = 99
+src = ["src", "tests"]
+# Normal discovery skips deliberately broken controls; generated paths are gitignored.
+extend-exclude = ["tests/fixtures/py-lint-violation"]
+# Leave force-exclude at its false default: explicitly named positive controls must run.
+
+[lint]
+# Check every rule so new Python code cannot silently escape a rule family.
+select = ["ALL"]
+ignore = [
+  "COM812", # Conflicts with the formatter's trailing-comma handling.
+  "ISC001", # Conflicts with the formatter's string layout.
+  "CPY001", # No copyright notice to write while the licence is undecided (decision 0006).
+]
+
+[lint.pydocstyle]
+# Google convention chooses compatible docstring spacing and summary rules.
+convention = "google"
+
+[lint.flake8-tidy-imports]
+# Absolute imports only, so a module reads the same wherever it is moved.
+ban-relative-imports = "all"
+
+[lint.per-file-ignores]
+"tests/**" = [
+  "S101",   # Assertions are how pytest states the contract.
+  "INP001", # Tests are discovered without an importable test package.
+  "S603",   # The API test runs sys.executable with fixed arguments, without a shell.
+]
+"scripts/**" = [
+  "INP001", # Repository scripts are standalone, not an importable package.
+  "T201",   # The wheel smoke prints its verdict.
+  "S603",   # The wheel smoke runs sys.executable with fixed arguments, without a shell.
+]
+
+# All formatter settings retain their defaults.
+[format]

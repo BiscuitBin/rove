@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    # Quoted because a branch named `true`, `false`, `null`, `on`, or `1.0` is
+    # valid to Git but is not a string to a YAML 1.1 parser.
+    branches: ['main']
+  workflow_dispatch:
+
+# Read-only: nothing here publishes, comments or writes a check of its own.
+# The token each step is minted with can do no more than clone this
+# repository, which is what a gate needs and all it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# A T00 stub: one job running the full gate on Python 3.14. T01 replaces it
+# with the gate matrix, the 3.13 floor job and the aggregate `check`.
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: just check

@@ -109,7 +109,8 @@ not just that it imports.
      the floor bites.
    - an `Any`-returning function in `src/` → `just py-typecheck` fails.
    - `print()` in `src/rovo/cli.py` → `just py-lint` fails naming `T201`.
-   - `teh` in a docs page → `just check-docs` fails in typos.
+   - a common misspelling (`the` with its last two letters swapped) in a docs page →
+     `just check-docs` fails in typos.
    - a heading level jump in a docs page → markdownlint fails.
    - a tab-indented line in a `.py` file → editorconfig fails.
    - a relative link to a missing file in a docs page → lychee fails offline.

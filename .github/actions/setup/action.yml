@@ -1,0 +1,49 @@
+name: Set up the rovo toolchain
+description: >-
+  uv at its pin, just from uv's tool directory, the environment uv.lock pins
+  (Python, every tool and the tooling group's checkers), and prek's hook
+  environments with lychee warmed. Runs after the checkout. A T00 stub that
+  T01 replaces.
+
+inputs:
+  python-version:
+    description: >-
+      The interpreter uv runs every recipe on, exported as UV_PYTHON. 3.14 runs
+      the full gate; 3.13 runs the Python gates without the tooling group.
+    required: false
+    default: '3.14'
+
+runs:
+  using: composite
+  steps:
+    # The cache is keyed on uv.lock, so a relock is a new key.
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        version: '0.13.6'
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+    # Through the environment, not `${{ }}` inside the shell line.
+    - run: echo "UV_PYTHON=$PYTHON_VERSION" >> "$GITHUB_ENV"
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+    # just cannot come from the project environment: the Justfile is what
+    # creates that.
+    - run: |
+        uv tool install rust-just==1.59.0
+        uv tool dir --bin >> "$GITHUB_PATH"
+      shell: bash
+    # Exactly what uv.lock says; the lock is never rewritten.
+    - run: just sync
+      shell: bash
+    # The hook clones, their toolchains and the ripsecrets build, which a cold
+    # run would otherwise fetch. Saved on any branch.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/prek
+        key: ${{ runner.os }}-${{ runner.arch }}-prek-${{ hashFiles('.pre-commit-config.yaml', '.pre-commit-fix.yaml') }}
+    # The prepare and the lychee warm are the point; the shim it writes into
+    # the runner's .git is harmless. After this step no step reaches the
+    # network.
+    - run: just install-hooks
+      shell: bash

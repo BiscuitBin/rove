@@ -1,0 +1,40 @@
+# Mutating counterpart to .pre-commit-config.yaml. Never installed as a hook;
+# run it explicitly with `just fix`.
+# uv.lock is large and generated, so without this line end-of-file-fixer and
+# trailing-whitespace would read the whole lockfile on every run.
+exclude: >-
+  (?x)^(
+    \.git/|
+    \.venv/|
+    ai_tmp/|
+    target/|
+    tests/fixtures/py-lint-violation/|
+    dist/|
+    uv\.lock$
+  )
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff-format
+        entry: .venv/bin/ruff format
+        language: system
+        files: \.pyi?$
+
+      - id: ruff-fix
+        name: ruff-fix
+        entry: .venv/bin/ruff check --fix
+        language: system
+        files: \.pyi?$
+
+  - repo: builtin
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: b82a6c8896e491b9cb377a99ff3412131920681b # v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+        name: markdownlint fix
+        args: [--fix]
