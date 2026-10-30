@@ -11,11 +11,10 @@ extend-exclude = [
 ]
 
 [default.extend-words]
-# "mis-" as a hyphenated prefix (mis-wired, mis-asserting) reads as the
-# fragment "mis", which the checker's dictionary mistakes for "miss"/"mist".
+# A's two words, which no rovo file uses except where tickets/T00-foundation.md
+# names them as A's; the checker's dictionary rewrites them to "miss"/"mist" and
+# "also". "mis-" is also a hyphenated prefix (mis-wired) that reads as "mis".
 mis = "mis"
-# The tickets name "als" as the word this file once listed and now does not
-# need; the checker's dictionary rewrites it to "also".
 als = "als"
 # ruff's rule code CPY001 (flake8-copyright), which ruff.toml ignores while the
 # licence is undecided; the checker's dictionary rewrites "CPY" to "COPY".
