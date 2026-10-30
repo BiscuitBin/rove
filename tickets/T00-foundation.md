@@ -856,12 +856,94 @@ exit 0
   `Decision NNNN: <§8 title>`, and 0004's is `Hook runner and checkers`, without §8's
   "(adapted from A's 0002)" note. `decisions/README.md` takes A's slug,
   `decision_index`, and the seven records take A's record audiences,
-  `[contributor, maintainer, agent]`.
+  `[contributor, maintainer, agent]`. The orchestrator confirmed all three as
+  decisions on 2026-10-29 (part 4).
 - `README.md` replaces the repository's `# rove` stub, and its heading is `# rovo`, the
   distribution's name. It is also the wheel's `readme`, so the wheel's `METADATA` now
   carries it.
 - The CI stub's `check` job sets `timeout-minutes: 30`, a value §10 does not state. The
   setup action keeps A's comment on `install-hooks`.
+
+### Part 4 evidence (commit b86d3c155283ae552a46a8cb1d39c6badcf6daf9)
+
+**Step 11, the commit.** Before staging, `git add -A --dry-run` listed only the
+untracked paths and the three modified files from part 3. It listed no `ai_tmp/`,
+`.venv/`, `dist/`, `target/` or cache path. `git check-ignore -v` confirmed that
+`.gitignore` covers `ai_tmp/`, `.venv/`, `dist/` and `target/`. Everything was then
+committed on `bootstrap` as `b86d3c1` ("T00: foundation tracer bullet green on its
+first commit"). No hook ran on that commit, because the shared `.git/hooks` has no shim
+(part 2, claim 6). `just check` on the committed tree, with `RUSTUP_TOOLCHAIN=stable`,
+raw log `ai_tmp/T00/part4-check.log`:
+
+```text
+==> just check-agents
+uv run --frozen bg-validate-agents
+Validated AGENTS.md, 2 adapters, and 6 skills.
+
+==> just check-clean
+uv run --frozen bg-project-check clean "$1"
+The worktree matches the check baseline.
+
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+(empty)
+exit 0
+```
+
+With the tree tracked, `just lint` (`prek run --all-files`) now runs the hooks on every
+file: 22 `Passed` lines, and the only skip is `check json` (no `*.json` file is
+tracked). This settles part 3's open point about lint seeing only tracked files.
+
+**Step 12, the fresh clone.** `git clone -b bootstrap <worktree> ai_tmp/fresh` (local,
+no network), raw log `ai_tmp/T00/part4-fresh.log`:
+
+```text
+clone exit 0
+fresh HEAD b86d3c155283ae552a46a8cb1d39c6badcf6daf9
+worktree HEAD b86d3c155283ae552a46a8cb1d39c6badcf6daf9
+common=.git gitdir=.git
+```
+
+The clone is a primary checkout: its common and git directories are equal. So
+`scripts/initialize.sh` took the `just install-hooks` branch. That writes the shim into
+the clone's own `.git/hooks`, not the shared one. `just initialize`, with
+`RUSTUP_TOOLCHAIN=stable`:
+
+```text
+uv run --frozen prek install --overwrite --hook-type=pre-commit --prepare-hooks
+Installed Git hook at `.git/hooks/pre-commit`
+uv run --frozen prek prepare-hooks --config .pre-commit-fix.yaml
+uv run --frozen prek run lychee --files README.md
+lychee...................................................................Passed
+
+Ready. Next: just check.
+Nothing has been formatted, staged, committed, tagged, or pushed.
+initialize exit 0
+```
+
+The shim names `.../ai_tmp/fresh/.venv/bin/prek`, and `git config core.hooksPath` is
+unset (exit 1). `just check` in the clone:
+
+```text
+All checks passed and the worktree is unchanged.
+check exit 0
+$ git status --short
+(empty)
+status exit 0
+```
+
+As claim 6's recipe half: with a one-line edit to `README.md` staged in the clone,
+`git hook run pre-commit` ran the installed shim. Every hook printed `Passed` or "no
+files to check" `Skipped` (detect private key, EditorConfig, markdownlint, typos,
+lychee, ripsecrets and the rest), and it exited 0. The edit was then restored, and
+`git status --short` was empty. This proves `just install-hooks` through the recipe,
+which part 2 could not prove from a secondary worktree. The runner half stays with
+T01. `ai_tmp/fresh/` was then deleted.
+
+**Departure.** `RUSTUP_TOOLCHAIN=stable` was exported for every run here, as in parts
+2 and 3: the machine's rustup has no default toolchain, and the rust-language hooks
+build with `cargo`. The machine was not changed.
 
 ## Open points
 
@@ -894,9 +976,11 @@ exit 0
 - For the orchestrator (not T00's file): `tickets/T02-python-gate.md:112` writes a
   deliberate misspelling of "the" as its example. `typos` flags it, so `just lint` and
   `just check-docs` stay red until that line changes. §13 says ticket prose must pass
-  typos. This is the only `typos` finding left in the tree.
+  typos. This is the only `typos` finding left in the tree. Resolved: the orchestrator
+  reworded the line (part 3 departures), and `typos` passes on the committed tree.
 - `just lint` before step 11's commit: `prek run --all-files` lists files with Git, so
   it sees only tracked files (`README.md` and `tickets/`). Every hook on the untracked
   files skips with "no files to check". Part 2 therefore proves the hooks with
   `--files` over `git ls-files --cached --others --exclude-standard`. The real
-  `just lint` evidence comes after the commit.
+  `just lint` evidence comes after the commit. Resolved in part 4: after `b86d3c1`,
+  `just lint` ran every hook on every tracked file.
