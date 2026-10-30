@@ -30,9 +30,8 @@ check from a passing one.
 **Monthly.** Move by hand what Renovate leaves alone, as
 [Maintain dependencies](../how-to/maintain-dependencies.md) lists: `.python-version`,
 `requires-python`, the CI `python-version` inputs, the setup action's `python-version`
-default and the `tooling` group's `requires-python` floor when a new Python is adopted,
-and the uv and just floors in [Develop locally](../how-to/develop-locally.md) after
-their pins move.
+default and the `tooling` group's `requires-python` floor, when a new Python is
+adopted.
 
 **Monthly.** Run `just check-links-online`. It is not part of the gate because it needs
 the network, so external links rot silently until someone looks.

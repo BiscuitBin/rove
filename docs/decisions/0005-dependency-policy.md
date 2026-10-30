@@ -46,9 +46,10 @@ not do, its licence, and its maintenance (who releases it and how recently).
 The tests and the wheel smoke run against one resolution, the locked one. The lower
 bound is tested only while the lock sits on it: today `uv.lock` holds typer at
 exactly 0.27.3, and once a relock moves it higher nothing here exercises the floor
-again. Nothing updates any pin until the Renovate ticket (T06) lands, so the lock ages
-deliberately rather than by neglect, and `just lock-upgrade` is a diff to read, not
-noise to wave through. `just audit` checks the locked versions against known
+again. No pin moves without a person: Renovate proposes each update and holds it for a
+maintainer's approval ([decision 0008](0008-renovate.md)), so the lock ages
+deliberately rather than by neglect, and an update, by hand or by bot, is a diff to
+read, not noise to wave through. `just audit` checks the locked versions against known
 vulnerabilities, but it needs the network, so it sits outside `just check`. The wheel
 is not fully reproducible from the lock: two clones can build it with different
 versions of hatchling's requirements.

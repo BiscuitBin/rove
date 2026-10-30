@@ -12,8 +12,8 @@ requires: []
 
 | Tool | Why |
 | --- | --- |
-| `uv`, 0.13.6 or newer | Installs Python, resolves and locks dependencies, and builds the environment `.venv/` from `uv.lock`. Every tool the gate runs comes from there. |
-| `just`, 1.59.0 or newer | The task runner, and the only supported interface to the checks. It cannot come from the project environment, because the `Justfile` is what creates that: install it from a package manager or with `uv tool install rust-just==1.59.0`. |
+| `uv`, the version CI installs or newer (the `version:` input in `.github/actions/setup/action.yml`) | Installs Python, resolves and locks dependencies, and builds the environment `.venv/` from `uv.lock`. Every tool the gate runs comes from there. |
+| `just`, the version CI installs or newer (the `rust-just==` pin in `.github/actions/setup/action.yml`) | The task runner, and the only supported interface to the checks. It cannot come from the project environment, because the `Justfile` is what creates that: install it from a package manager or with `uv tool install rust-just==<that version>`. |
 | `git` | The gate lists files and snapshots the worktree through Git. |
 | A Rust toolchain, `cargo` on `PATH` | prek builds the ripsecrets hook from source with cargo the first time the hook environments are prepared. Nothing in the package is Rust. |
 | `gh`, `rg`, `jq` | Only for the tickets' verification commands and for maintainer work on GitHub. |

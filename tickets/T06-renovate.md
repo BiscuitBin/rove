@@ -205,7 +205,7 @@ null`, `enforce_admins: false`.
 | `.github/actions/setup/action.yml` | input `python-version` `default: '3.14'` (used by `audit.yml`, which passes none) | manual, decision 0001 | not extracted |
 | `pyproject.toml` | `[tool.uv.dependency-groups] tooling = { requires-python = ">=3.14" }` | manual, decision 0001 | not extracted |
 | not pins | `uses: ./.github/actions/setup`, `runs-on: ubuntu-latest`/`macos-latest` | none | `ubuntu` runner `skipReason: invalid-version` |
-| `docs/how-to/develop-locally.md` lines 15-16 | prose floors `0.13.6 or newer`, `rust-just==1.59.0` | manual (stated floors, no manager) | not extracted |
+| `docs/how-to/develop-locally.md` lines 15-16 | prose floors `0.13.6 or newer`, `rust-just==1.59.0` (at `2c37124`) | manual (stated floors, no manager); since the hand-back below, a pointer to the setup action's pins, no literal | not extracted |
 
 Count by manager (local extraction): `github-actions` 10 deps in 3 files (7 pins, 3
 runner labels skipped), `pep621` 9 in 1, `pyenv` 1 in 1 (disabled), regex 11 in 5
@@ -265,6 +265,16 @@ matches over 3 files (hook revs 7, lychee rev 1, `LYCHEE_VERSION` 2, just 1); to
 decision record, to be amended or superseded by its owner).
 `docs/how-to/develop-locally.md` lines 15-16 state uv and just versions that no manager
 reads; after a Renovate bump they are floors that still hold, but read stale.
+
+**Hand-backs landed by T06 (the lead's instruction; departures from Files touched,
+which the §11 lifted freeze allows as `shared, own lines`).**
+
+- (a) `docs/decisions/0005-dependency-policy.md`, Consequences: "Nothing updates any pin
+  until … (T06) lands" becomes "No pin moves without a person", pointing at decision
+  0008. `docs/how-to/develop-locally.md` prerequisites: the uv and just rows name the
+  setup action's `version:` input and `rust-just==` pin instead of `0.13.6` and
+  `1.59.0`, so a Renovate bump leaves no stale literal; the matching sentences in the
+  how-to and `docs/operations/maintenance.md` that called those floors manual go.
 
 **Checks at `2c37124`.** `just check-docs`: `Validated 32 pages and 32 canonical
 topics.`, exit 0. `just check`, exit 0, last line `All checks passed and the worktree is

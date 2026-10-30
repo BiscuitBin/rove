@@ -43,8 +43,9 @@ owns them and a new Python is a decision rather than an update: `.python-version
 the interpreter the tools run on, and `requires-python`, the package's floor. The
 `python-version` inputs in `ci.yml`, the setup action's `python-version` default (which
 `audit.yml` runs on), and the `tooling` group's `requires-python` floor under
-`[tool.uv.dependency-groups]` follow those two by hand, and so do the version floors
-that [Develop locally](develop-locally.md) states for uv and just.
+`[tool.uv.dependency-groups]` follow those two by hand. [Develop locally](develop-locally.md)
+names no uv or just version of its own: it points at the setup action's pins, so a
+Renovate bump there leaves nothing stale.
 
 A bot's pull request is proposed code. Read the diff and the release notes before
 merging, above all for a hook revision or the shared checkers: a hook that stops
