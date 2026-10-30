@@ -47,8 +47,9 @@ root. The configuration:
   lychee's revision with both of its `LYCHEE_VERSION=` arguments into a third, so the
   three move together while all three are detected. A group cannot require that: the
   dashboard must list three `lycheeverse/lychee` readings, and a lychee pull request that
-  changes fewer than three lines is rejected, since no gate compares the revision with
-  `LYCHEE_VERSION`.
+  changes fewer than three lines is rejected: `just install-hooks` (and so CI's setup)
+  fails when the revision's `# lychee-v` comment and `LYCHEE_VERSION` disagree, but
+  nothing checks offline that the SHA is the commit that tag names.
 - Leaves to a person the two Python versions [decision 0001](0001-uv-and-hatchling.md)
   owns: `.python-version` and `requires-python`. Both managers that would read them
   are switched off for them.

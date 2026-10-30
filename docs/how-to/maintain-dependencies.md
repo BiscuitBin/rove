@@ -51,7 +51,9 @@ A bot's pull request is proposed code. Read the diff and the release notes befor
 merging, above all for a hook revision or the shared checkers: a hook that stops
 reporting, or a checker that accepts more, still passes `just check`. A lychee pull
 request must change the revision, its `# lychee-v` comment and both `LYCHEE_VERSION=`
-values; no gate compares them, so reject one that changes less.
+values. `just install-hooks`, and so every CI run's setup, fails when the comment and
+the two values disagree, but nothing checks that the SHA is the commit the comment's
+tag names, so reject one that changes less.
 
 ## Check that the lock still matches
 
