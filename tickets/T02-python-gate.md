@@ -195,6 +195,8 @@ environment, three tests failed on wrapped rich output before the pin and pass a
 No `tests/conftest.py` was needed. Each test was seen to fail on a deliberate defect,
 then the file was restored: `import typer` in `__init__.py` failed invariant 1 (`assert
 ['typer', 'ty...matting', ...] == []`); an extra `__all__` name failed invariant 2;
+`__all__` as the tuple `("__version__",)` failed invariant 2 on its type check
+(`'tuple' == 'list'`; review T02-1 C1);
 `no_args_is_help=False` failed only the no-arguments test; a changed version line failed
 all four version tests.
 
@@ -257,6 +259,25 @@ py-typecheck coverage wheel-smoke` exit 0, pytest on `Python 3.13.13`, `10 passe
 `TOTAL 17 0 2 0 100%`, both `wheel_smoke` lines. `just sync` restored the 3.14
 environment afterwards; `just check` then exit 0, `All checks passed and the worktree is
 unchanged.`
+
+### Review checkpoint 1 (over `9c1eaf4`)
+
+Run by the orchestrator under §14: Codex, `gpt-6-astra`, two fresh-context reviewers
+(conformance, breakage), separate triage; records in `ai_tmp/review/T02-1/`.
+
+| Id | Severity | Verdict | Reason | Action |
+| --- | --- | --- | --- | --- |
+| C1 | low | valid | the probe sent `rovo.__all__` through JSON, so a tuple `__all__` passed the "exactly `["__version__"]`" check | applied: the probe reports `type(rovo.__all__).__name__`, and the test requires `list` |
+| breakage | n/a | n/a | the reviewer reported `No findings.` | none |
+
+Triage's control: `__all__ = ("__version__",)` gave `1 failed, 2 passed` (`- list` /
+`+ tuple`), then the file was restored. Nothing handed back; no high-severity finding,
+so no second round. The setup fast-forward to `69f0d14` was approved by the orchestrator.
+
+Re-run of the Verification block with the fix uncommitted on `9c1eaf4` (raw
+`ai_tmp/T02/verify-cp1.log`): `py-lint` exit 0, `py-typecheck` exit 0, `just coverage`
+`TOTAL 17 0 2 0 100%` exit 0, `just wheel-smoke` ending `rovo 0.0.0` exit 0,
+`check-docs` exit 0, the 3.13 run exit 0, `just sync` exit 0.
 
 ## Open points
 
