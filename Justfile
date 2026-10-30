@@ -27,8 +27,9 @@ sync:
 lock:
     uv lock
 
-# Moves every locked version within pyproject.toml's constraints; the exact
-# dev pins hold still, so this moves typer's tree and B's commit at its tag.
+# Moves every locked version within pyproject.toml's constraints: typer's
+# tree, B's commit at its tag, and the transitive dependencies of the exact dev
+# pins, which themselves hold still.
 lock-upgrade:
     uv lock --upgrade
 

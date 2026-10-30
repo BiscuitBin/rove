@@ -1115,7 +1115,8 @@ Status is `done`. The push in step 13 needs authorisation and was not done.
   filenames and otherwise lints `.venv`; the control in part 2 exits 1 on `MD031` and
   `MD012`); (b) `.editorconfig`: A's `[LICENSE]` section also goes (no `LICENSE`,
   decision 6); (c) `_typos.toml`: add `cpy = "cpy"` to `[default.extend-words]` while
-  the §9 `CPY001` ignore stands, and lift it with that ignore.
+  the §9 `CPY001` ignore stands, and lift it with that ignore. Reconciled in T05:
+  decision 0006 keeps the `cpy` entry after the ignore lifts, and §5 now says so.
 - Hand-back, `CONVENTIONS.md` §9 `scripts/wheel_smoke.py` (§14 review T00-2 B1).
   Applied in T00's `scripts/wheel_smoke.py` (evidence under the review records). §9's
   bullet "records every name whose first component is `typer`, `click` or `rich`"

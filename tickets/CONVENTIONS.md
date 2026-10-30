@@ -117,8 +117,9 @@ Facts, each verified on 2026-10-29, that shape the mechanism:
 8. **`uv audit` exists** in uv 0.13.4 (`uv audit --help`: "Audit the project's
    dependencies", with `--frozen`, `--locked`, `--no-dev`, `--only-group`).
 9. **`uv export --frozen --no-default-groups --no-emit-project`** lists exactly the
-   runtime closure (typer and its five dependencies, colorama under its Windows marker)
-   and leaves out both groups; `--no-dev` alone would keep the `tooling` group. `uv build
+   runtime closure (typer and seven other packages: four of typer's own requirements,
+   colorama among them under its Windows marker, and three that rich pulls in; T04's
+   hand-back corrected "five dependencies", T05) and leaves out both groups; `--no-dev` alone would keep the `tooling` group. `uv build
    --offline --wheel` built `rovo-0.0.0-py3-none-any.whl` from a warm cache.
 
 ## 2. Toolchain and pins
@@ -313,8 +314,9 @@ sync:
 lock:
     uv lock
 
-# Moves every locked version within pyproject.toml's constraints; the exact
-# dev pins hold still, so this moves typer's tree and B's commit at its tag.
+# Moves every locked version within pyproject.toml's constraints: typer's
+# tree, B's commit at its tag, and the transitive dependencies of the exact dev
+# pins, which themselves hold still.
 lock-upgrade:
     uv lock --upgrade
 
@@ -506,7 +508,7 @@ frozen `Justfile`; T02 may tune any hook but never renames those four.
 The dotfiles are A's at `c8e1a46`, adjusted:
 
 - `.editorconfig`: A's, `[*.{py,pyi}]` with `indent_size = 4`; any Rust or Allium
-  section goes.
+  section goes, and so does `[LICENSE]` (there is no `LICENSE`, decision 0006).
 - `.gitattributes`: A's, minus every line naming a path this repository lacks.
 - `.gitignore`: A's lines for `.DS_Store`, `.cache/`, `.env*`, `.lycheecache`, `ai_tmp/`,
   the `.claude/*` block with `!.claude/skills/`, `.codex/settings.local.json`, `target/`,
@@ -515,8 +517,13 @@ The dotfiles are A's at `c8e1a46`, adjusted:
   can see aborts `bg-project-check`'s snapshot, so this list is complete before the
   first `just check`.
 - `.markdownlint-cli2.jsonc`: A's, keeping `MD033` `allowed_elements` of
-  `["br", "important"]` for the `<important if>` blocks (§7).
-- `_typos.toml`: A's, minus exclusions for paths this repository lacks, plus `uv.lock`.
+  `["br", "important"]` for the `<important if>` blocks (§7), with `ignores` of
+  `["target", ".venv", "ai_tmp"]`: markdownlint-cli2 appends `**/*.md` to the files prek
+  passes, so without `.venv` it would lint the environment's packages.
+- `_typos.toml`: A's, minus exclusions for paths this repository lacks, plus `uv.lock`,
+  plus `cpy = "cpy"` in `[default.extend-words]` for ruff's `CPY001` (§9). The entry
+  stays after that ignore lifts, because decision 0006 and the tickets name the code
+  (0006 supersedes T00's note to lift it with the ignore; reconciled in T05).
 - `lychee.toml`: A's, minus any exclusion naming a path this repository lacks.
 
 `scripts/initialize.sh` is A `scripts/initialize.sh`'s structure with uv in pixi's place:
@@ -677,7 +684,9 @@ none of those, and the repository name differs from it only as a repository name
   `version`, each exit 0 with `rovo <version>`.
 - `scripts/wheel_smoke.py`: one argument. `api` first puts at the head of
   `sys.meta_path` a finder whose `find_spec` returns `None` and records every name whose
-  first component is `typer`, `click` or `rich`; then it imports `rovo`. It asserts that
+  first component is neither `rovo` nor in `sys.stdlib_module_names` (typer 0.27
+  vendors click as `typer._click`, so `click` is not a separate package in `uv.lock`);
+  then it imports `rovo`. It asserts that
   the record is empty, so even a guarded `try: import typer` fails here. It asserts that
   `typer` is not importable (the first install step had no dependencies), that the
   version equals `importlib.metadata.version("rovo")`, and that `py.typed` is among
@@ -692,8 +701,10 @@ own files (§2):
 
 - `ruff.toml`: `target-version = "py313"`, `line-length = 99`, `src = ["src",
   "tests"]`, `extend-exclude = ["tests/fixtures/py-lint-violation"]` with A's
-  `force-exclude` comment; `[lint] select = ["ALL"]`, `ignore = ["COM812", "ISC001"]`
-  with A's comments; `[lint.pydocstyle] convention = "google"`;
+  `force-exclude` comment; `[lint] select = ["ALL"]`, `ignore = ["COM812", "ISC001", "CPY001"]`
+  with A's comments for the first two; `CPY001`, a delta from A, is commented "no
+  copyright notice while the licence is undecided (decision 0006)", and the release
+  ticket that adds the licence lifts it; `[lint.pydocstyle] convention = "google"`;
   `[lint.flake8-tidy-imports] ban-relative-imports = "all"`; per-file ignores for
   `tests/**` and `scripts/**`, each line commented.
 - `mypy.ini`: A's, with `files = src, tests, scripts`, `python_version = 3.13`,
@@ -727,7 +738,7 @@ A `.github/workflows/ci.yml`, `.github/workflows/audit.yml` and
   "0.13.6"`, its cache keyed on `uv.lock`), then just with
   `uv tool install rust-just==1.59.0` and `uv tool dir --bin` appended to
   `$GITHUB_PATH`, then `just sync`, then restores prek's hook cache keyed on the hash of
-  both prek configurations, then runs `just install-hooks`, as A's action does: on a cold
+  both prek configurations and `uv.lock`, which pins prek, then runs `just install-hooks`, as A's action does: on a cold
   cache it builds every hook environment and warms lychee, which downloads its binary at
   first run (§4), so that no later step reaches the network (§11). `install-hooks` fails
   unless lychee's pinned binary is present (§4 `warm-lychee`, which retries the
