@@ -18,14 +18,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Typer forces rich's terminal mode when GITHUB_ACTIONS is set, read once at
-  # import (typer/rich_utils.py, FORCE_TERMINAL), so help text in CliRunner
-  # tests carries ANSI codes on a runner and never locally. This is Typer's
-  # own switch back to the local behaviour. A stopgap: making the tests
-  # independent of it is handed back to T05.
-  _TYPER_FORCE_DISABLE_TERMINAL: '1'
-
 # `gate` runs the full gate, `just check`, on Python 3.14 on Ubuntu and on
 # macOS: macOS is the maintainer's platform, so a gate that is green only on
 # Linux would not be the gate they run. `floor` proves the package's floor,

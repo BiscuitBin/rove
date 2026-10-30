@@ -7,12 +7,27 @@ import sys
 from pathlib import Path
 
 import pytest
+from typer import rich_utils
 from typer.testing import CliRunner
 
 from rovo.cli import app
 
 # Click's exit status for a usage error, and Typer's for `no_args_is_help`.
 USAGE_ERROR = 2
+
+
+@pytest.fixture(autouse=True)
+def plain_help_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Help prints as plain text, whatever the environment says about colour.
+
+    Typer forces a terminal, ANSI codes and boxes, when GITHUB_ACTIONS,
+    FORCE_COLOR or PY_COLORS is set, read once at import into FORCE_TERMINAL,
+    which every help console reads when it is built; rich reads FORCE_COLOR
+    itself unless that value is False. False is what Typer's own
+    _TYPER_FORCE_DISABLE_TERMINAL sets, so a CI runner prints what a local run
+    prints. If Typer renames the attribute, setattr raises and the tests fail.
+    """
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", False)
 
 
 def runner() -> CliRunner:
