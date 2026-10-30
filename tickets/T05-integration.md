@@ -305,6 +305,14 @@ splits the prek cache into `actions/cache/restore` (`id: prek-cache`) and
 §12 claims 4 and 5 are restated for the new command, and §1 fact 9 says the gate no
 longer uses `uv export`.
 
+Landed as `4057425`, run 6 (`https://github.com/BiscuitBin/rove/actions/runs/41019478400`,
+audit 41019478394): all five jobs `success`. macOS: `Cache restored from key:
+macOS-ARM64-prek-817c4e…`, `GITHUB_TOKEN: ***` on the install-hooks step,
+`lychee 0.24.2 warmed: …`, the save step `outcome=skipped` (a hit), `All checks passed
+and the worktree is unchanged.` The cold path with the token and the early save has not
+run in CI: it runs on the next prek cache-key change. `develop-locally.md` no longer says
+lychee runs "once".
+
 **Claim outcomes.** In `CONVENTIONS.md` §12's new column (`fc01d5c`). Claim 4 failed
 cold and its step was replaced; claim 5's command left the recipe; claim 12 is T06's.
 

@@ -30,7 +30,8 @@ just initialize
 
 This runs `uv sync --locked`, which refuses a `uv.lock` that disagrees with
 `pyproject.toml` rather than rewriting it, then prepares every hook environment and
-runs lychee once, because lychee downloads its binary at first run. It needs the
+runs lychee, because lychee downloads its binary at first run; it fails if that
+download did not succeed in three tries. It needs the
 network for Python, the dependencies, the shared checkers' Git tag and the hook
 clones. It never formats, stages, commits, tags or pushes.
 
