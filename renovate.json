@@ -50,7 +50,7 @@
       "description": "lychee's rev: a full SHA with its lychee-v tag as the comment; moves with LYCHEE_VERSION",
       "managerFilePatterns": ["/^\\.pre-commit-config\\.yaml$/"],
       "matchStrings": [
-        "- repo: https://github\\.com/lycheeverse/lychee\\n    rev: (?<currentDigest>[a-f0-9]{40}) # lychee-v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+        "- repo: https://github\\.com/lycheeverse/lychee\\n    rev: (?<currentDigest>[a-f0-9]{40})[ \\t]+#[ \\t]*lychee-v(?<currentValue>\\d+\\.\\d+\\.\\d+)"
       ],
       "depNameTemplate": "lycheeverse/lychee",
       "datasourceTemplate": "github-tags",

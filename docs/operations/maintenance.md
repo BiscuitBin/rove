@@ -21,16 +21,18 @@ not by ignoring it.
 
 **Weekly.** Read Renovate's dependency dashboard, the open issue it keeps in this
 repository ([decision 0008](../decisions/0008-renovate.md)). Every pending update waits
-there; tick the ones to take, one kind at a time. Each becomes a pull request: read its
+there, except security fixes, which open as pull requests at once; tick the ones to
+take, one kind at a time. Each becomes a pull request: read its
 diff and the release notes, wait for `check`, then merge it yourself. Hook revisions and
 the shared checkers deserve the closest reading, because the gate cannot tell a weaker
 check from a passing one.
 
 **Monthly.** Move by hand what Renovate leaves alone, as
 [Maintain dependencies](../how-to/maintain-dependencies.md) lists: `.python-version`,
-`requires-python` and the CI `python-version` inputs when a new Python is adopted, and
-the uv and just floors in [Develop locally](../how-to/develop-locally.md) after their
-pins move.
+`requires-python`, the CI `python-version` inputs, the setup action's `python-version`
+default and the `tooling` group's `requires-python` floor when a new Python is adopted,
+and the uv and just floors in [Develop locally](../how-to/develop-locally.md) after
+their pins move.
 
 **Monthly.** Run `just check-links-online`. It is not part of the gate because it needs
 the network, so external links rot silently until someone looks.

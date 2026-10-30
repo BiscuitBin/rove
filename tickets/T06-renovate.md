@@ -202,6 +202,8 @@ null`, `enforce_admins: false`.
 | `.github/actions/setup/action.yml` | setup-uv `version: '0.13.6'` | native `github-actions` (known-actions table) | `astral-sh/uv`, `uses-with`, github-releases |
 | `.github/actions/setup/action.yml` | `uv tool install rust-just==1.59.0` | regex manager (just) | `rust-just` 1.59.0, pypi |
 | `.github/workflows/ci.yml` | `python-version: '3.14'`, `'3.13'` (inputs of the local action) | manual, decision 0001 | not extracted |
+| `.github/actions/setup/action.yml` | input `python-version` `default: '3.14'` (used by `audit.yml`, which passes none) | manual, decision 0001 | not extracted |
+| `pyproject.toml` | `[tool.uv.dependency-groups] tooling = { requires-python = ">=3.14" }` | manual, decision 0001 | not extracted |
 | not pins | `uses: ./.github/actions/setup`, `runs-on: ubuntu-latest`/`macos-latest` | none | `ubuntu` runner `skipReason: invalid-version` |
 | `docs/how-to/develop-locally.md` lines 15-16 | prose floors `0.13.6 or newer`, `rust-just==1.59.0` | manual (stated floors, no manager) | not extracted |
 
@@ -286,8 +288,34 @@ that lychee's `rev` and `LYCHEE_VERSION=` agree (the hook downloads the
 and a hook or B bump that weakens a check passes `just check`. Both for the adversarial
 review.
 
+**Checkpoint 1 review (`CONVENTIONS.md` §14, step 4).** Verdicts in
+`ai_tmp/review/T06-1/verdicts.md`: six findings, all valid, three distinct. The lychee
+`rev` regex now tolerates spaces and tabs around `#` (a reformatted line no longer drops
+the `rev` from the `lychee` group; the four-space indentation stays fixed); the docs
+state that the three move together only while all three are detected; the docs carry
+the `vulnerabilityAlerts` exception the security model already stated (security fixes
+open at once, outside approval and the window); and the inventory gains the setup
+action's `python-version` default and the `tooling` group's `requires-python`, both
+manual. Step 6 evidence for lychee: the dashboard must list exactly three
+`lycheeverse/lychee` readings (the `rev` and both `LYCHEE_VERSION=`), and the first
+lychee pull request must change all three lines.
+
+Re-run after the fixes, on a copy of the fixed tree, under the same `sandbox-exec`
+network denial (negative control `curl` exit 6): `config-validator.js --strict`,
+`Config validated successfully against 1 file(s)`, exit 0; `--dry-run=extract`, the same
+stats as before (`github-actions` 10, `pep621` 9, `pyenv` 1, regex 11, total 31), the
+regex readings unchanged (hook revs 7, `lycheeverse/lychee` 0.24.2 three times, the
+first with digest `2bba271`, `rust-just` 1.59.0), exit 1 from the node-version log line
+only.
+
 ## Open points
 
 - Whether the B tag should follow B's releases automatically or stay manual: B's
   checkers decide what the gate accepts, so a bump can redden `main`. The maintainer
   decides; the default here is "held for dashboard approval", as every update is.
+- Hand-back to the `Justfile` owner (`CONVENTIONS.md` §11, outside T06 Files touched):
+  a gate check that lychee's `rev` comment `# lychee-vX.Y.Z` equals `LYCHEE_VERSION`
+  (for example in `warm-lychee`), so the pairing is enforced rather than only grouped.
+- Whether security fixes should also wait for approval
+  (`"vulnerabilityAlerts": { "dependencyDashboardApproval": true }`): the maintainer
+  decides; the configuration keeps Renovate's default, and the docs say so.

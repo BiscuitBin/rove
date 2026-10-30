@@ -15,13 +15,15 @@ hand-edited, and read with `--frozen` by every recipe that checks, so no gate ca
 rewrite it. This is [decision 0005](../decisions/0005-dependency-policy.md). Renovate
 proposes the moves ([decision 0008](../decisions/0008-renovate.md)), but it moves
 nothing by itself: every update waits on its dependency dashboard until a maintainer
-approves it, and then arrives as a pull request that `check` must pass and a person
-must merge. The commands below are how a maintainer makes the same moves by hand.
+approves it, except a fix for a vulnerability GitHub reports, which arrives unasked;
+either way it comes as a pull request that `check` must pass and a person must merge. The commands below are how a maintainer makes the same moves by hand.
 
 ## What Renovate proposes and what stays manual
 
 `renovate.json` holds the configuration. Every update waits for a tick on the
-dependency dashboard issue; Renovate's window is early Monday (UTC).
+dependency dashboard issue; Renovate's window is early Monday (UTC). Security fixes are
+the exception: Renovate's `vulnerabilityAlerts` defaults open them at once, outside the
+window, and they still need `check` and a person's merge.
 
 | Pin | Where | Read by | Pull request |
 | --- | --- | --- | --- |
@@ -34,17 +36,21 @@ dependency dashboard issue; Renovate's window is early Monday (UTC).
 | uv's version | the setup action's `version:` input | `github-actions` | in the `github actions` group |
 | just's version | the setup action's `rust-just==` | regex manager | alone |
 | hook revisions and their version comments | both prek configurations | regex manager | `hook revs`, one group |
-| lychee's revision and both `LYCHEE_VERSION=` | `.pre-commit-config.yaml` | regex managers | `lychee`, one group, all three together |
+| lychee's revision and both `LYCHEE_VERSION=` | `.pre-commit-config.yaml` | regex managers | `lychee`, one group, all three together while all three are detected |
 
 Two pins stay manual, because [decision 0001](../decisions/0001-uv-and-hatchling.md)
 owns them and a new Python is a decision rather than an update: `.python-version`,
 the interpreter the tools run on, and `requires-python`, the package's floor. The
-`python-version` inputs in `ci.yml` follow those two by hand, and so do the version
-floors that [Develop locally](develop-locally.md) states for uv and just.
+`python-version` inputs in `ci.yml`, the setup action's `python-version` default (which
+`audit.yml` runs on), and the `tooling` group's `requires-python` floor under
+`[tool.uv.dependency-groups]` follow those two by hand, and so do the version floors
+that [Develop locally](develop-locally.md) states for uv and just.
 
 A bot's pull request is proposed code. Read the diff and the release notes before
 merging, above all for a hook revision or the shared checkers: a hook that stops
-reporting, or a checker that accepts more, still passes `just check`.
+reporting, or a checker that accepts more, still passes `just check`. A lychee pull
+request must change the revision, its `# lychee-v` comment and both `LYCHEE_VERSION=`
+values; no gate compares them, so reject one that changes less.
 
 ## Check that the lock still matches
 
@@ -126,7 +132,9 @@ outside `just check`.
 Every remote hook in `.pre-commit-config.yaml` and `.pre-commit-fix.yaml`, and every
 remote `uses:` in `.github/`, is pinned to a full commit SHA with its release tag as a
 comment. lychee also carries `LYCHEE_VERSION` at the head of its argument lists, which
-must match the comment; Renovate moves the three together, and a hand move must too.
+must match the comment; Renovate groups the three while it detects all three (the
+dashboard lists three `lycheeverse/lychee` readings), no gate checks that they agree,
+and a hand move must change all three too.
 To move a pin by hand, resolve the release tag to its commit (an annotated tag's
 reference names the tag object, not the commit), and replace the SHA and the comment in
 every file that names it.

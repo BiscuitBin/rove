@@ -30,9 +30,12 @@ root. The configuration:
 
 - Holds every update for approval on the dependency dashboard
   (`:dependencyDashboardApproval`): nothing opens a pull request until a maintainer ticks
-  it there. Automerge is off and stays off.
-- Proposes on one weekly window, early Monday (UTC), and runs lock-file maintenance on
-  `uv.lock` in the same window, as its own pull request, also held.
+  it there, except a fix for a vulnerability GitHub reports, which Renovate's
+  `vulnerabilityAlerts` defaults open at once and outside the weekly window. Automerge
+  is off and stays off, for those too.
+- Proposes on one weekly window, early Monday (UTC), security fixes aside, and runs
+  lock-file maintenance on `uv.lock` in the same window, as its own pull request, also
+  held.
 - Reads `pyproject.toml` with the native `pep621` manager, which relocks `uv.lock` when it
   moves a pin and reads the shared checkers' tag from `[tool.uv.sources]`; `.github/`
   with the native `github-actions` manager, which keeps each action a full SHA with its
@@ -42,7 +45,10 @@ root. The configuration:
   `LYCHEE_VERSION=` arguments, and the setup action's `rust-just==` pin.
 - Groups the action SHAs into one pull request, the hook revisions into another, and
   lychee's revision with both of its `LYCHEE_VERSION=` arguments into a third, so the
-  three always move together.
+  three move together while all three are detected. A group cannot require that: the
+  dashboard must list three `lycheeverse/lychee` readings, and a lychee pull request that
+  changes fewer than three lines is rejected, since no gate compares the revision with
+  `LYCHEE_VERSION`.
 - Leaves to a person the two Python versions [decision 0001](0001-uv-and-hatchling.md)
   owns: `.python-version` and `requires-python`. Both managers that would read them
   are switched off for them.
