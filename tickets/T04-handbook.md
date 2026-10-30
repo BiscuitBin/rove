@@ -143,6 +143,89 @@ To be written by the executing agent: the commands run while writing and their e
 statuses, where a page departs from A's and why, anything handed back (a title or slug
 change, a fact `CONVENTIONS.md` got wrong), and the review record for each checkpoint.
 
+### Part 1 evidence (records 0001 to 0007, base 69f0d14)
+
+**Setup.** The lane worktree was created from `main` (`61f2357`), not from
+`bootstrap`, so T00's commits were missing. `69f0d14` (T00's tip) descends from
+`61f2357`, so the branch was fast-forwarded to it (`git merge --ff-only 69f0d14`) before
+any work; nothing was discarded. `RUSTUP_TOOLCHAIN=stable` was exported for every run
+(departure, as in T00). `just initialize` took the secondary-worktree path (exit 0,
+`Secondary worktree: skipping install-hooks.`). Baseline at `69f0d14`:
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+(nothing)
+```
+
+**Departure: `origin/main`.** Under the single-branch decision, `origin/main` is still
+`61f2357` and holds none of T00's files, so every `origin/main` comparison in the
+acceptance criteria and the Verification block is run against `69f0d14`, T00's tip,
+instead.
+
+**Facts the records rest on, read while writing** (all at `69f0d14`):
+
+```text
+$ git -C <B> show 6c5c07f:pyproject.toml | grep -n requires-python
+5:requires-python = ">=3.14"
+$ grep -n -A1 'group-requires-python' uv.lock
+469:[package.group-requires-python]
+470-tooling = ">=3.14"
+$ grep -n 'biscuit_games_tooling?tag' uv.lock | head -1
+86:source = { git = "https://github.com/steven-cutting/biscuit_games_tooling?tag=v0.3.0#6c5c07f6bec86e86b3930dfa41392e4b440e8c85" }
+$ uv run --frozen python -c 'import sys,keyword;print("rovo" in sys.stdlib_module_names, keyword.iskeyword("rovo"), keyword.issoftkeyword("rovo"))'
+False False False
+exit 0
+$ uv run --frozen python -I -c 'import importlib.metadata as m; print(m.packages_distributions().get("rovo"))'
+None
+$ uv export --frozen --no-default-groups --no-emit-project --quiet | grep -E '^[a-z]'
+annotated-doc==0.0.5 \
+colorama==0.4.6 ; sys_platform == 'win32' \
+markdown-it-py==4.2.0 \
+mdurl==0.1.2 \
+pygments==2.21.0 \
+rich==15.0.0 \
+shellingham==1.5.4 \
+typer==0.27.3 \
+$ ls .venv/lib/python3.14/site-packages/typer | grep _click; grep -c 'name = "click"' uv.lock
+_click
+0
+$ uv run --frozen python -c 'import rovo; print(rovo.__all__)'
+['__version__']
+```
+
+Decision 0002's "a version change is also a relock" was checked in a scratch copy
+(`ai_tmp/T04/verproj`: `pyproject.toml`, `uv.lock`, `README.md`, `CHANGELOG.md`, `src/`):
+`uv lock --check --offline` exit 0 as copied, exit 1 ("The lockfile at `uv.lock` needs
+to be updated") after `version = "0.0.1"`. The worktree's files were not touched.
+
+**Hand-back, `CONVENTIONS.md` §1 fact 9.** "typer and its five dependencies" is
+inexact: the export above lists seven packages besides typer (four of them typer's own
+requirements, three pulled in by rich), colorama under its Windows marker. Decision
+0003 names the list as locked.
+
+**Records.** 0004 alone opens with the carried-from line (§8); it is A's 0002 with the
+twenty-two recipes become eight, A's pixi record (0006) become this repository's 0001,
+and the cost paragraph rewritten for the 3.14-only checkers. 0006 lists no licence
+options: none were named before this ticket ran. No record links 0008, which T06
+creates. Frontmatter is the T00 stub's, byte for byte.
+
+```text
+$ just check-docs
+markdownlint.............................................................Passed
+typos....................................................................Passed
+lychee...................................................................Passed
+uv run --frozen bg-validate-docs
+Validated 31 pages and 31 canonical topics.
+exit 0
+$ rg -n -i 'stub|T04 writes|todo|tbd|fixme' docs/decisions/000*.md
+exit 1
+```
+
+Stopped at step 3's **Adversarial review**; the orchestrator runs §14 checkpoint 1.
+
 ## Open points
 
 - The licence options to record in decision 0006, if the maintainer names any before
