@@ -109,7 +109,12 @@ build:
 # Gate: the wheel installs and works in a fresh virtual environment, offline,
 # in two steps. First the wheel alone, with no dependency: importing rovo must
 # work without typer and must not even try to import typer, click or rich.
-# Then the runtime closure uv.lock pins, from the cache, and the command.
+# Then the runtime closure uv.lock pins, from the cache, and the command. The
+# closure goes in with `uv sync` aimed at the smoke venv, not `uv pip install
+# -r`: sync fetches each file by the lock's URL and checks the lock's hash, and
+# `just sync` cached those files, while pip install resolves against index
+# pages that nothing caches on a fresh clone. --inexact keeps the wheel the
+# first step installed.
 # Exactly one wheel, which must exist (an unmatched glob is one literal
 # argument). Python runs with -I so nothing in the worktree shadows the
 # installed package.
@@ -123,8 +128,7 @@ wheel-smoke: build
     uv venv --offline --no-python-downloads --quiet target/wheel-smoke/venv
     uv pip install --python target/wheel-smoke/venv --offline --no-index --no-deps "$1"
     target/wheel-smoke/venv/bin/python -I scripts/wheel_smoke.py api
-    uv export --frozen --no-default-groups --no-emit-project --quiet -o target/wheel-smoke/requirements.txt
-    uv pip install --python target/wheel-smoke/venv --offline --require-hashes -r target/wheel-smoke/requirements.txt
+    UV_PROJECT_ENVIRONMENT=target/wheel-smoke/venv uv sync --frozen --offline --no-default-groups --no-install-project --inexact
     target/wheel-smoke/venv/bin/python -I scripts/wheel_smoke.py cli
     target/wheel-smoke/venv/bin/rovo --version
 

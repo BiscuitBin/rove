@@ -54,10 +54,10 @@ also checks that typer is not importable, that the version matches the metadata,
 the wheel installed exactly the four package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
-runtime closure `uv export` writes from `uv.lock`, offline and with `--require-hashes`,
-runs `scripts/wheel_smoke.py cli`, which checks that `python -m rovo --version` and the
-console script print the same version line, and finally runs the installed
-`rovo --version`.
+runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
+and checked against the lock's hashes, runs `scripts/wheel_smoke.py cli`, which checks
+that `python -m rovo --version` and the console script print the same version line, and
+finally runs the installed `rovo --version`.
 A build on every gate is the cost of testing the artefact that will ship.
 
 ## Coverage

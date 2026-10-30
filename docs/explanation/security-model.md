@@ -36,7 +36,8 @@ makes PyPI refuse an accidental upload ([Python packaging](packaging.md)).
   packages with their hashes, and the Git-sourced shared checkers by commit. Every
   recipe runs with `--frozen`, so nothing resolves at gate time.
   `just lock-check` fails on a lock that disagrees with `pyproject.toml`. The wheel
-  smoke installs the runtime closure with `--require-hashes` from the cache, offline.
+  smoke installs the runtime closure from the cache, offline, each file checked
+  against the lock's hash.
   The build backend's own requirements are not in the lock; only hatchling's exact pin
   holds them ([decision 0005](../decisions/0005-dependency-policy.md)).
 - **Known vulnerabilities.** `just audit` runs `uv audit --frozen` over the locked
