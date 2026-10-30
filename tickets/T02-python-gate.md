@@ -1,7 +1,7 @@
 ---
 id: T02
 title: "Python quality gate: ruff, mypy, pytest, coverage, the wheel, the text gates"
-status: open
+status: done
 depends_on: [T00]
 parallel_with: [T01, T03, T04]
 branch: ticket/t02-python-gate
@@ -438,7 +438,32 @@ Nothing handed back; no high-severity finding, so no second round. The re-run lo
 the quote, every `restored;` line shows exit 0, and `git status --short` was empty
 after the run.
 
+### Close-out (commit 27725de)
+
+```text
+$ just check
+All checks passed and the worktree is unchanged.
+exit 0
+$ git status --short
+exit 0
+```
+
+Acceptance criteria and their evidence:
+
+- Step 7's controls, each with its message, its exit status, and a passing recipe after
+  the restore: "Step 7" and the checkpoint 2 re-run.
+- `just coverage` lists every `src/rovo/**` module, with line and branch columns and
+  `TOTAL 17 0 2 0 100%`: "Step 8, Verification".
+- `select = ["ALL"]` is kept, and every ignore has a comment (the `rg` result under
+  step 8).
+- §12 claims 7 and 9 have outcomes: both hold ("Steps 1 to 5", "§12 outcomes").
+- Both adversarial reviews ran, and the one valid finding at each was applied:
+  "Review checkpoint 1" and "Review checkpoint 2".
+
 ## Open points
 
-- Whether the floor should rise to 100% while the package is this small. The maintainer
-  decides; the `Justfile` holds the number, so a change is a `main` pull request.
+- For the maintainer: whether the floor should rise to 100% while the package is this
+  small. The `Justfile` holds the number, so a change is a `main` pull request.
+- For T05: `_typos.toml`'s `mis` and `als` entries are A's words. They are needed only
+  because `tickets/T00-foundation.md:583` quotes them, so they can go when that line
+  changes.
