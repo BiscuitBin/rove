@@ -292,10 +292,12 @@ ids the `Justfile` names are untouched. One change: `_typos.toml` keeps A's `mis
 They can go once T00's notes stop quoting them (T05's call).
 
 **Step 7, the negative controls** (script `ai_tmp/T02/bin/controls.sh`, raw
-`ai_tmp/T02/controls.log` and `ai_tmp/T02/controls/`). Run on the tree committed as
-`1e7687a`, before that commit, with the same content. Each file was saved to
-`ai_tmp/scratch/`, edited, run, copied back (`cmp` identical), and the recipe run
-again. Two changes came out of the first pass:
+`ai_tmp/T02/controls.log` and `ai_tmp/T02/controls/`). The quoted run is a re-run on
+a clean worktree at `38f30ac` (the log's first line names it, and its last shows
+`git status --short` empty after the run). Each file was saved to `ai_tmp/scratch/`,
+edited, run, copied back (`cmp` identical), and the recipe run again, before the next
+control: 1b and 3 each start from the restored file. Two changes came out of the first
+pass, on the tree committed as `1e7687a`:
 
 - An unguarded `import typer` made the smoke's `api` step die with a traceback.
   It now reports the failure and the recorded attempt (`scripts/wheel_smoke.py`).
@@ -313,6 +315,8 @@ exit 1
 $ just wheel-smoke
 wheel_smoke: import rovo failed (No module named 'typer'); it tried ['typer']
 exit 1
+restored; $ just coverage -> exit 0
+restored; $ just wheel-smoke -> exit 0
 ## 1b. __init__.py gains a guarded 'try: import typer'
 $ just wheel-smoke
 wheel_smoke: import rovo tried to import ['typer']
@@ -325,7 +329,8 @@ Name                   Stmts   Miss Branch BrPart  Cover   Missing
 src/rovo/cli.py           16      0      4      1    95%   39->41
 TOTAL                     19      0      4      1    96%
 exit 0
-## 3. the same scratch, floor 100
+restored; $ just coverage -> exit 0
+## 3. the same untested branch, floor 100
 $ just coverage_floor=100 coverage
 TOTAL                     19      0      4      1    96%
 Coverage failure: total of 96 is less than fail-under=100
@@ -418,7 +423,20 @@ comment, from `rg -n -B1 '^\s*"[A-Z]+[0-9]*",' ruff.toml`: `COM812`, `ISC001`,
 **Hand-backs from T02:** none new. The `CPY001` amendment to §9 is T00's, already
 recorded. No recipe change was needed: every gate fired through the frozen `Justfile`.
 
-**Status:** left `open` until checkpoint 2 (§14, whole diff) has run.
+### Review checkpoint 2 (whole diff, over `38f30ac`)
+
+Run by the orchestrator under §14: Codex, `gpt-6-astra`, two fresh-context reviewers
+(conformance, breakage), separate triage; records in `ai_tmp/review/T02-2/`.
+
+| Id | Severity | Verdict | Reason | Action |
+| --- | --- | --- | --- | --- |
+| C1 | low | valid | controls 1a and 2 were not followed by "restore, recipe passes" before 1b and 3, though step 7 and these notes said so | applied: `controls.sh` restores and re-runs after 1a and 2; the controls were re-run on a clean `38f30ac`, and the step-7 quote and its introduction were updated |
+| breakage | n/a | n/a | the reviewer finished with `No findings.` | none |
+
+Nothing handed back; no high-severity finding, so no second round. The re-run log
+(`ai_tmp/T02/controls.log`) starts `## HEAD 38f30ac`. Every control's failure matches
+the quote, every `restored;` line shows exit 0, and `git status --short` was empty
+after the run.
 
 ## Open points
 
