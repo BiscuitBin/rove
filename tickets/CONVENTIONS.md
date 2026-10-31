@@ -908,7 +908,7 @@ the last column is its outcome and the ticket whose hand-back notes hold the evi
 | 9 | `coverage combine` succeeds when the only data comes from one process, and subprocess coverage (for the installed-script test) needs `[run] patch = subprocess` in `.coveragerc` (INI syntax; the bracketed list form is TOML-only and `.coveragerc` rejects it as `Unknown patch`) | `just coverage`, then T02's subprocess test | T00, T02 | Holds: T00 part 1 (one process), T02 (`patch = subprocess`) |
 | 10 | `bg-validate-agents` accepts six skills and B's adapter strings with no `.claude/settings.json` | `just check-agents` | T00 | Holds: T00 part 3 |
 | 11 | B's git dependency installs in `BiscuitBin` CI with no credential | T00's stub run, then T01's full run | T01 | Holds: T01 run 2 installed B from git with no credential on both 3.14 legs; T05 run 41018370415 ran B's checkers green on both |
-| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 | Not owned by T00 to T04: open, for T06 |
+| 12 | Renovate's `pep621` manager reads `[dependency-groups]` and the `[tool.uv.sources]` git tag, and relocks `uv.lock` | Renovate's dependency dashboard after the install | T06 | Holds, T06: dashboard issue #4 lists the `[dependency-groups]` pins and the `[tool.uv.sources]` tag under `pep621`, and PR #5 (prek 0.5.9) changes `pyproject.toml` and `uv.lock` with a green `check` |
 
 ## 13. Risks every ticket states where it applies
 
