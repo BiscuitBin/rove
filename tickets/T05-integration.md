@@ -1,7 +1,7 @@
 ---
 id: T05
 title: "Integration: the first green `just check` from a fresh clone and in CI"
-status: open
+status: done
 depends_on: [T01, T02, T03, T04]
 parallel_with: []
 branch: ticket/t05-integration
@@ -560,9 +560,9 @@ last (`090d25f`). Commands and exit codes: `ai_tmp/final-review/fix-log.md`.
 | F5 | `just check` runs py-lint, py-typecheck and the docs and agents checks twice (through `lint` and by name). | not real, not real | Not applied: CONVENTIONS §2/§4 fix the recipe list and order, §5 keeps the hooks, as A does; the repeats are read-only and deterministic. |
 | F6 | `floor` and `audit` run `install-hooks` though they run no hook. | not real, not real | Not applied: §10 has the setup action run `install-hooks` unconditionally with `python-version` its only input, as A's does. |
 | F7 | The lychee comment check is not in `just check`. | not real, real (low) | Not applied (split): §4 puts it in `warm-lychee`, and every CI setup fails on the drift, so it cannot merge. |
-| F8 | The prek cache key omitted the Python version, so the 3.13 floor and 3.14 Linux legs shared an entry whose python hook environment names an interpreter path. | real (low), real (low) | Applied, `090d25f`: restore and save keys carry `py<python-version>`. Rendered per job: floor `Linux-X64-prek-py3.13-…`, gate (ubuntu) and audit `…-py3.14-…`, where all three were one key before. Not yet run in CI. |
+| F8 | The prek cache key omitted the Python version, so the 3.13 floor and 3.14 Linux legs shared an entry whose python hook environment names an interpreter path. | real (low), real (low) | Applied, `090d25f`: restore and save keys carry `py<python-version>`. Rendered per job: floor `Linux-X64-prek-py3.13-…`, gate (ubuntu) and audit `…-py3.14-…`, where all three were one key before. Run on `main` in `41146124607`: floor `Linux-X64-prek-py3.13-817c4e7…`, gate (ubuntu) `Linux-X64-prek-py3.14-817c4e7…`, gate (macOS) `macOS-ARM64-prek-py3.14-817c4e7…`. |
 | F9 | `floor` checks a clean tree with inline `git status --porcelain`, not a recipe. | not real, not real | Not applied: §10 prescribes it, because `check-clean` is B's and cannot run on 3.13. |
-| F10 | `cancel-in-progress: true` cancels a superseded `main` run and `check` then reports it failed. | not real, real (low) | Not applied (split): §10 requires A's `concurrency` block; nothing consumes a `main` run's result. |
+| F10 | `cancel-in-progress: true` cancels a superseded `main` run and `check` then reports it failed. | not real, real (low) | Applied by maintainer decision, `d394341`: `cancel-in-progress` is true only for `pull_request` events, so a running `main` workflow is no longer cancelled by a newer push; a pending one can still be replaced, because a concurrency group holds one running and one pending run (the `ci.yml` comment was corrected to say so in PR #3); `audit.yml` is unchanged (it never runs on a `main` push). PR #2 run `41146035077` green at `d394341`. |
 
 Maintainer action carried from F1: the shared shim at
 `/Users/scutting/projects/biscuitbin/rove/.git/hooks/pre-commit` still names this
@@ -578,5 +578,33 @@ None at writing; step 2 may add some.
   (kept while tickets quote them); the rest of T04's re-check list, for the adversarial
   review; the maintainer decisions listed at the end of part A.
 - Protection on `main`: closed, applied by T01 and read back above.
-- Step 7's adversarial review ran (T05-1, recorded above). Step 8's merge and the first
-  `ci.yml` run on `main` are not done: carried to T06's merge stop.
+- Step 7's adversarial review ran (T05-1, recorded above). Step 8 closed: PR #2 merged
+  and the first `ci.yml` run on `main` is green, quoted under "Post-merge evidence".
+- README `blob/main` links: closed, all three return HTTP 200 after the merge.
+
+## Post-merge evidence (closing pull request)
+
+PR #2 (`bootstrap` → `main`) merged by the maintainer as a merge commit,
+`789fcbc139355ecd3faa7c7841b2f4eaea28bd24`, at 2026-10-30T23:43:15Z, after its head
+`d394341` passed all five jobs (CI run `41146035077`: both `gate` legs, `floor`,
+`check`; Audit run `41146034777`). The first `ci.yml` run on `main`:
+
+```text
+$ gh run view 41146124607 --json headSha,event,conclusion,url,jobs --jq '{headSha,event,conclusion,url,jobs:[.jobs[]|{name,conclusion}]}'
+{"conclusion":"success","event":"push","headSha":"789fcbc139355ecd3faa7c7841b2f4eaea28bd24","jobs":[{"conclusion":"success","name":"gate (macos-latest)"},{"conclusion":"success","name":"gate (ubuntu-latest)"},{"conclusion":"success","name":"floor"},{"conclusion":"success","name":"check"}],"url":"https://github.com/BiscuitBin/rove/actions/runs/41146124607"}
+exit 0
+```
+
+From that run's log: `floor` used `CPython 3.13.18`, and both `gate` legs end with
+`All checks passed and the worktree is unchanged.` The README's `blob/main` links:
+
+```text
+200 https://github.com/BiscuitBin/rove/blob/main/docs/decisions/README.md
+200 https://github.com/BiscuitBin/rove/blob/main/docs/README.md
+200 https://github.com/BiscuitBin/rove/blob/main/docs/tutorials/first-change.md
+```
+
+Every acceptance criterion now has evidence, so `status:` is `done`. The maintainer
+decisions listed in part A (the `SECURITY.md` contact is moot now that private
+vulnerability reporting is on; decision 0006's licence options) and the shared-shim
+action from F1 stay with the maintainer.

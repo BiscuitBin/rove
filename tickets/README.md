@@ -28,7 +28,7 @@ snapshot.
 | T02 | Python quality gate: ruff, mypy, pytest, coverage, the wheel, the text gates | `T02-python-gate.md` | T00 | T01, T03, T04 | done |
 | T03 | Agent contract: AGENTS.md, six house skills, the bridges | `T03-agent-contract.md` | T00 | T01, T02, T04 | done |
 | T04 | Handbook and maintainer docs: every page, decisions 0001 to 0007, README | `T04-handbook.md` | T00 | T01, T02, T03 | done |
-| T05 | Integration: the first green `just check` from a fresh clone and in CI | `T05-integration.md` | T01, T02, T03, T04 | none | open |
+| T05 | Integration: the first green `just check` from a fresh clone and in CI | `T05-integration.md` | T01, T02, T03, T04 | none | done |
 | T06 | Renovate over every pin, behind an authorised app install | `T06-renovate.md` | T05 | none | open |
 
 ## Dependency graph
