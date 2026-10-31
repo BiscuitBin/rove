@@ -131,6 +131,20 @@
       "requires": []
     },
     {
+      "path": "how-to/work-with-the-specs.md",
+      "title": "Work with the specifications",
+      "kind": "how-to",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "specification_workflow"
+      ],
+      "requires": []
+    },
+    {
       "path": "explanation/architecture.md",
       "title": "Architecture",
       "kind": "explanation",
@@ -142,6 +156,20 @@
       ],
       "canonical_for": [
         "architecture"
+      ],
+      "requires": []
+    },
+    {
+      "path": "explanation/specifications.md",
+      "title": "Specifications",
+      "kind": "explanation",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "specification_model"
       ],
       "requires": []
     },
@@ -458,6 +486,46 @@
       ],
       "canonical_for": [
         "decision_dependency_updates"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0009-specs-are-the-source-of-truth.md",
+      "title": "Decision 0009: Specifications decide behaviour",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_spec_first"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0010-project-managed-allium-cli.md",
+      "title": "Decision 0010: A project-managed Allium binary",
+      "kind": "decision",
+      "audience": [
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_allium_cli"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0011-skill-reference-material.md",
+      "title": "Decision 0011: Skill reference material beside the skills",
+      "kind": "decision",
+      "audience": [
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_skill_reference"
       ],
       "requires": []
     }

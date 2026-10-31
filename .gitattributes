@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Upstream's text, vendored unchanged (decision 0011): not this repository's to lint.
+allium-skill-reference/** linguist-vendored=true

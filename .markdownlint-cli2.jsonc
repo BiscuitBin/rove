@@ -16,5 +16,5 @@
   // No "globs": markdownlint-cli2 would append them to the files prek passes,
   // and lint (and, under `just fix`, rewrite) every .md on disk, untracked and
   // ignored ones included. Only the files prek passes are linted.
-  "ignores": ["target", ".venv", "ai_tmp"]
+  "ignores": ["target", ".venv", "ai_tmp", "allium-skill-reference"]
 }

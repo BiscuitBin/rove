@@ -84,6 +84,12 @@ warm-lychee:
     done
     exit 1
 
+# The Allium checker for docs/specs/, pinned and checksummed in the tooling
+# package. Downloads over the network into .tools/bin, which Git ignores;
+# version-checks first, so a present pin downloads nothing.
+install-allium:
+    uv run --frozen bg-install-allium
+
 # ----------------------------------------------------------------- format ---
 
 format:
@@ -183,6 +189,26 @@ check-docs:
 
 check-agents:
     uv run --frozen bg-validate-agents
+
+# The specifications, checked mechanically: every module must report an empty
+# `diagnostics` array (check) and an empty `findings` array too (analyse).
+# The wrapper asserts that, because neither subcommand's exit code does.
+# Waiver terms: docs/how-to/work-with-the-specs.md.
+check-specs:
+    uv run --frozen bg-run-allium check
+
+analyse-specs:
+    uv run --frozen bg-run-allium analyse
+
+# The test obligations allium derives from one module, as JSON: what each
+# rule, invariant, transition and surface clause would have a test for. A
+# suggestion list for a test list, not a gate: nothing asserts on it and it
+# is outside `just check`. `allium plan` takes one file and plans that module
+# alone, reading no import. The binary is named by path so that a missing
+# .tools/bin/allium fails here and does not fall through to another allium
+# on PATH.
+plan-spec module:
+    .tools/bin/allium plan "docs/specs/$1.allium"
 
 check-links-online:
     uv run --frozen prek run --all-files --hook-stage manual lychee-online

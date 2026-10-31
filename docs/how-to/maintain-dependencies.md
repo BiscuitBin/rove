@@ -30,7 +30,7 @@ window, and they still need `check` and a person's merge.
 | typer's range | `[project] dependencies` | `pep621` | alone; moves `uv.lock` within the range, and the range only when a release falls outside it |
 | coverage, mypy, prek, pytest, ruff | `[dependency-groups] dev` | `pep621` | one per tool, with its `uv.lock` change |
 | hatchling | `[build-system] requires` | `pep621` | alone; `pyproject.toml` only, since `uv.lock` does not hold it |
-| the shared checkers' tag | `[tool.uv.sources]` | `pep621` | alone, with its `uv.lock` change |
+| the shared checkers' tag | `[tool.uv.sources]` | `pep621` | alone, with its `uv.lock` change; the allium pin rides it ([Moving the Allium binary](#moving-the-allium-binary)) |
 | everything else in `uv.lock` | `uv.lock` | lock-file maintenance | one a week, alone |
 | action SHAs and their version comments | `.github/workflows/`, `.github/actions/setup/action.yml` | `github-actions` | `github actions`, one group |
 | uv's version | the setup action's `version:` input | `github-actions` | in the `github actions` group |
@@ -118,8 +118,47 @@ this project.
 `https://github.com/steven-cutting/biscuit_games_tooling` at a Git tag through
 `[tool.uv.sources]`; `uv.lock` records the commit the tag named. To move it, read that
 repository's changelog for the release you are taking, edit the `tag`, run `just lock`,
-read the diff, then `just sync` and `just check`. The package supplies the gate runner
-and both validators, so a release can fail a tree that passed.
+read the diff, then `just sync`, `just install-allium` and `just check`. The package
+supplies the gate runner, both validators, the allium installer and the allium runner,
+so a release can fail a tree that passed.
+
+## Moving the Allium binary
+
+`allium` is a checksummed binary, not a package, so `uv.lock` does not account for it and
+`just lock-check` cannot speak for it. The `biscuit-games-tooling` package holds the
+version and the SHA-256 of each supported artefact; see
+[decision 0010](../decisions/0010-project-managed-allium-cli.md). Moving the allium pin is
+a release of that package, and this repository takes it by moving the package's tag, as
+the section above describes; Renovate's pull request for the tag is therefore also the
+allium move. The package's README carries the recomputation of the checksums, because
+upstream publishes none for these files.
+
+After taking a release that moves it, reinstall and confirm:
+
+```console
+just sync
+just install-allium
+just check-specs
+just analyse-specs
+```
+
+Reinstalling is always safe to retry. The download lands beside the installed copy under a
+temporary name and is asked for both its checksum and its version there, so a failed
+download, a mismatched checksum or a binary that will not run leaves the working
+installation exactly where it was. `just install-allium` also replaces a binary that no
+longer runs, so an installation damaged by other means repairs itself rather than needing
+`.tools/` cleared by hand.
+
+A version change can move what the checker reports, in both directions: a new version
+can report something the modules were clean of, and it can also stop needing a waiver
+they carry. The module carries none at present, so any waiver added later must be
+re-verified on the commit that moves the pin, dropped where the new version no longer
+needs it, and its count and shape updated in
+[Work with the specifications](work-with-the-specs.md) in that same commit. Moving the
+tag in `pyproject.toml` is itself a trigger for both specification hooks, so the gate
+re-reads the module against the new version on the commit that moves the pin, but only
+after `just install-allium` has installed it; until then the hooks fail naming the
+version they expect.
 
 ## Security advisories
 

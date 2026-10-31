@@ -83,6 +83,17 @@ no default toolchain, the build fails while the hook environments are prepared. 
 a Rust toolchain, or select one for the shell with `RUSTUP_TOOLCHAIN=stable`, and run
 `just initialize` again.
 
+## `allium is not installed; this project pins <version>. Run just install-allium`
+
+`just check-specs` and `just analyse-specs` run the pinned checker from `.tools/bin`, and
+a fresh worktree has none, so both fail, and with them `just lint` and `just check`,
+until it is there. Run `just install-allium`, which reaches the network. The same message
+with `allium <version> is installed` in place of `allium is not installed` means the
+binary there is not the pin, as after a move of the shared checkers' tag; the same recipe
+replaces it. Never point the recipes at an `allium` already on `PATH`: the pin decides
+what the checks report, and `just plan-spec` names `.tools/bin/allium` by path for that
+reason.
+
 ## `docs validation: frontmatter <field> disagrees with the manifest`
 
 Almost always list order. The comparison between `docs/manifest.yml` and a page's

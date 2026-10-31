@@ -8,6 +8,8 @@ extend-exclude = [
   "target/",
   "ai_tmp/",
   "uv.lock",
+  # Upstream's text, vendored unchanged (decision 0011).
+  "allium-skill-reference/",
 ]
 
 [default.extend-words]

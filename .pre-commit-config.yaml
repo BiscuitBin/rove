@@ -1,5 +1,7 @@
 # uv.lock is TOML and large, so without this line the builtin check-toml would
-# parse the whole lockfile on every commit.
+# parse the whole lockfile on every commit. allium-skill-reference/ is
+# upstream's text, vendored unchanged (decision 0011), not this repository's
+# to lint.
 exclude: >-
   (?x)^(
     \.git/|
@@ -7,6 +9,7 @@ exclude: >-
     ai_tmp/|
     target/|
     dist/|
+    allium-skill-reference/|
     uv\.lock$
   )
 repos:
@@ -43,6 +46,30 @@ repos:
         language: system
         pass_filenames: false
         files: ^(AGENTS\.md|CLAUDE\.md|\.agents/|\.claude/|\.codex/|\.github/copilot-instructions\.md|pyproject\.toml$)
+
+      # The specifications, which outrank the code, held to the same standard as
+      # the two contracts above. Both need the pinned binary in the gitignored
+      # .tools/bin, so a worktree that has never run `just initialize` fails here
+      # until `just install-allium` puts one there. That is deliberate: a gate
+      # that skips itself when its tool is absent asserts nothing.
+      #
+      # The pin itself is a trigger, because a waiver is only ever valid against
+      # the version it was verified on: the allium version lives in the
+      # biscuit-games-tooling package, and that package's pin is the tag in
+      # pyproject.toml, so any pin edit in that file fires these hooks. Accepted.
+      - id: check-specs
+        name: Specification diagnostics
+        entry: uv run --frozen bg-run-allium check
+        language: system
+        pass_filenames: false
+        files: ^(docs/specs/|pyproject\.toml$)
+
+      - id: analyse-specs
+        name: Specification analysis
+        entry: uv run --frozen bg-run-allium analyse
+        language: system
+        pass_filenames: false
+        files: ^(docs/specs/|pyproject\.toml$)
 
   - repo: builtin
     hooks:

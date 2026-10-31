@@ -24,8 +24,8 @@ the only friction is that the checkers need Python 3.14 while the package suppor
 Keep the shared checkers and prek, behind `just check`. prek is an exact pin in the
 `dev` group; the checkers are the `tooling` group, pinned to their Git tag `v0.3.0`,
 and `uv.lock` records the commit that tag named when it was locked. The
-`[tool.biscuit-games-tooling]` table in `pyproject.toml` names the eight gate recipes
-in order, and `just check` runs them through `bg-project-check`, which snapshots the
+`[tool.biscuit-games-tooling]` table in `pyproject.toml` names the gate recipes (eight
+at this record's writing; ten since T07 added the specification checks) in order, and `just check` runs them through `bg-project-check`, which snapshots the
 worktree between recipes and ends with `check-clean`. Decision 0001 owns their
 installation through uv; no fork of the checkers lives here.
 

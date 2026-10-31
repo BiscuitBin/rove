@@ -26,15 +26,18 @@ follows [Python packaging](../explanation/packaging.md).
 ├── tests/                     pytest suite: the API and the command
 │   └── fixtures/py-lint-violation/  Positive controls for ruff and mypy
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py
-├── docs/                      Handbook, manifest and decision records
+├── docs/                      Handbook, manifest, specs/ and decisions/
+│   └── specs/                 The Allium modules: behaviour is decided here
 ├── tickets/                   Work, conventions and acceptance evidence
 ├── AGENTS.md  CLAUDE.md       Agent instructions; CLAUDE.md points at AGENTS.md
-├── .agents/skills/            Canonical skills
+├── .agents/skills/            Canonical skills: six house skills, spec-change, seven Allium skills
 ├── .claude/skills/  .codex/skills/  Bridges to the canonical skills
+├── .claude/settings.json      Enables the Allium plugin for Claude Code
+├── allium-skill-reference/    Reference material the Allium skills link to, vendored
 ├── .github/                   CI workflow, setup action and Copilot adapter
 ├── ruff.toml  mypy.ini  pytest.ini  .coveragerc   Python gate settings
 ├── .pre-commit-config.yaml  .pre-commit-fix.yaml  Hooks and their fixers
-└── .venv/ target/ dist/ ai_tmp/   Ignored: environment, build output, scratch
+└── .venv/ .tools/ target/ dist/ ai_tmp/   Ignored: environment, the allium binary, build output, scratch
 ```
 
 ## What each part is responsible for
@@ -47,12 +50,22 @@ lint and type gates must reject, never examples of behaviour. Agent bridges poin
 the canonical skills and add nothing. Hooks are installed only from the primary
 checkout, because all worktrees share their hook directory.
 
+`docs/specs/` holds the Allium specifications, which decide behaviour
+([decision 0009](../decisions/0009-specs-are-the-source-of-truth.md)); today it holds
+one placeholder module, `rovo.allium`, which declares none.
+`allium-skill-reference/` is vendored reference material for the Allium skills, kept
+outside `.agents/` and ignored by every linter
+([decision 0011](../decisions/0011-skill-reference-material.md)). `.tools/bin/` holds
+the pinned `allium` binary that `just install-allium` installs
+([decision 0010](../decisions/0010-project-managed-allium-cli.md)); it is ignored like
+`.venv/`.
+
 The remaining root files are configuration: `.editorconfig`, `.markdownlint-cli2.jsonc`,
 `_typos.toml`, `lychee.toml`, `.gitattributes` and `.gitignore`.
 [Configuration](../reference/configuration.md) owns their meanings. `.venv/` holds the
-environment uv builds from `uv.lock`; `target/` holds the coverage report and the wheel
-smoke's environment; `dist/` holds the sdist and wheel; `ai_tmp/` is scratch. Nothing
-under them is committed.
+environment uv builds from `uv.lock`; `.tools/` the allium binary; `target/` holds the
+coverage report and the wheel smoke's environment; `dist/` holds the sdist and wheel;
+`ai_tmp/` is scratch. Nothing under them is committed.
 
 ## Related pages
 

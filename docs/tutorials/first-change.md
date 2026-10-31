@@ -84,7 +84,7 @@ of its docstring as its help.
 just check
 ```
 
-It runs the eight gates in order, including ruff and mypy over the new code, the
+It runs the ten gates in order, including ruff and mypy over the new code, the
 coverage floor, and the wheel smoke against a freshly built wheel, then proves the run
 did not modify the worktree. Read only the first failure; later ones are often
 consequences. [Troubleshooting](../operations/troubleshooting.md) covers the common

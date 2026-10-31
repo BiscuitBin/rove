@@ -20,7 +20,8 @@ requires: []
 
 Nothing else: not pixi, not a system Python. uv installs the interpreters it needs.
 [Configuration](../reference/configuration.md) has each pin; this page states only the
-floors.
+floors. The page covers Ubuntu and macOS, the two platforms CI runs. Windows is not
+supported: the `Justfile` and the Allium installer are POSIX-only.
 
 ## First run
 
@@ -29,11 +30,13 @@ just initialize
 ```
 
 This runs `uv sync --locked`, which refuses a `uv.lock` that disagrees with
-`pyproject.toml` rather than rewriting it, then prepares every hook environment and
-runs lychee, because lychee downloads its binary at first run; it fails if that
-download did not succeed in three tries. It needs the
-network for Python, the dependencies, the shared checkers' Git tag and the hook
-clones. It never formats, stages, commits, tags or pushes.
+`pyproject.toml` rather than rewriting it, then `just install-allium`, which downloads
+the pinned, checksummed `allium` binary into the gitignored `.tools/bin/`
+([decision 0010](../decisions/0010-project-managed-allium-cli.md)), then prepares every
+hook environment and runs lychee, because lychee downloads its binary at first run; it
+fails if that download did not succeed in three tries. It needs the network for Python,
+the dependencies, the shared checkers' Git tag, the allium release and the hook clones.
+It never formats, stages, commits, tags or pushes.
 
 The Git hook shim is installed from the primary checkout only, because every worktree
 shares one `.git/hooks` and the shim names an absolute path into the worktree that
@@ -56,8 +59,10 @@ just check
 ```
 
 `just py-test` runs the suite without coverage, and passes its arguments to pytest.
-`just check` runs the eight gates in order and proves the run left the worktree
-unchanged; [Test and debug](test-and-debug.md) covers narrower runs.
+`just check` runs the ten gates in order and proves the run left the worktree
+unchanged; [Test and debug](test-and-debug.md) covers narrower runs. A change to a module
+under `docs/specs/` is checked by `just check-specs` and `just analyse-specs`
+([Work with the specifications](work-with-the-specs.md)).
 
 ## The 3.13 run
 
@@ -93,7 +98,9 @@ After pulling, re-sync so the installed dependencies match the lock:
 just sync
 ```
 
-It installs `uv.lock` exactly as committed and never rewrites it.
+It installs `uv.lock` exactly as committed and never rewrites it. If the pull moved the
+shared checkers' tag, run `just install-allium` too: the allium pin rides that tag, and
+`just sync` cannot install a binary.
 
 ## Related pages
 

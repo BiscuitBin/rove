@@ -14,3 +14,6 @@ policy.
 - `renovate.json`: Renovate proposes updates to every pin but the two Python versions
   decision 0001 owns, each held for approval on its dependency dashboard, security fixes
   aside (decision 0008).
+- The Allium gate: a placeholder root module `docs/specs/rovo.allium` that declares no
+  behaviour, the `check-specs` and `analyse-specs` gates over it, the `spec-change` skill
+  and the seven Allium skills with their reference material (decisions 0009 to 0011).

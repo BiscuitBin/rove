@@ -13,10 +13,10 @@ description: Bring a workspace to a state where the full gate runs, and interpre
    from `uv.lock` and prepares the hook environments; in a secondary worktree it skips
    only the hook shim. It downloads, so it needs explicit authorization unless the task
    already grants it.
-3. Run `just check`. It runs the eight gates that `pyproject.toml` lists, in order, and
+3. Run `just check`. It runs the ten gates that `pyproject.toml` lists, in order, and
    snapshots the worktree between them: 1 `lock-check`, 2 `lint`, 3 `py-lint`,
-   4 `py-typecheck`, 5 `coverage`, 6 `wheel-smoke`, 7 `check-docs`, 8 `check-agents`;
-   then `check-clean`.
+   4 `py-typecheck`, 5 `coverage`, 6 `wheel-smoke`, 7 `check-docs`, 8 `check-agents`,
+   9 `check-specs`, 10 `analyse-specs`; then `check-clean`.
 4. Read only the first failure and rerun the named recipe. Later failures often follow
    from earlier ones.
 5. A recipe that changes the worktree is defective: checks are read-only; `just fix`

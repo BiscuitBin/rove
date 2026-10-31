@@ -12,6 +12,14 @@ git rev-parse --is-inside-work-tree >/dev/null
 # first run.
 uv sync --locked
 
+# The Allium checker for docs/specs/, pinned and checksummed in the
+# biscuit-games-tooling package that uv.lock pins, landing in the gitignored
+# .tools/bin: the one download in the first-run path that no lockfile can
+# name. `just check-specs` and `just analyse-specs` run it, and both the hook
+# gate and `just check` run those, so a worktree without it cannot reach a
+# green gate. Version-checked first, so a present pin downloads nothing.
+just install-allium
+
 # Hooks are installed only from the primary checkout. Every worktree of this
 # repository shares one .git/hooks directory, and `prek install` writes a shim
 # naming an absolute path into whichever worktree ran it — so a hook installed
