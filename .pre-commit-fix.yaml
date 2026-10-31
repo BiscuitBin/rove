@@ -9,6 +9,7 @@ exclude: >-
     ai_tmp/|
     target/|
     tests/fixtures/py-lint-violation/|
+    allium-skill-reference/|
     dist/|
     uv\.lock$
   )

@@ -3,4 +3,4 @@ max_retries = 2
 max_concurrency = 8
 timeout = 20
 accept = [200, 204, 206, 429]
-exclude_path = [".git", "ai_tmp", "target"]
+exclude_path = [".git", "ai_tmp", "target", "allium-skill-reference"]

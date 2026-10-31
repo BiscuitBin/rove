@@ -45,6 +45,13 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           python-version: '3.14'
+      # Over the network, into the gitignored .tools/bin. The checker is
+      # pinned by the tooling package, not by uv.lock, so `just sync` cannot
+      # install it and this step does. Before `just check`, because its hook
+      # gate and its last two gates run the specification checks. Not cached:
+      # the archive is one small binary, and bg-install-allium version-checks
+      # first, so a stale one would be replaced rather than trusted.
+      - run: just install-allium
       - run: just check
 
   floor:

@@ -13,7 +13,9 @@ reachable from here. That is the whole of the arrangement; the rules behind it a
 the documentation contract, listed under Look up.
 
 This repository builds one pure-Python distribution, `rovo`: an importable package,
-`rovo`, which is the Python API, and a Typer command of the same name.
+`rovo`, which is the Python API, and a Typer command of the same name. Its behaviour is
+specified in Allium under `docs/specs/` before it is built; today the one module there
+declares none.
 
 ## Start here
 
@@ -28,10 +30,12 @@ This repository builds one pure-Python distribution, `rovo`: an importable packa
 - [Develop locally](how-to/develop-locally.md)
 - [Test and debug](how-to/test-and-debug.md)
 - [Maintain dependencies](how-to/maintain-dependencies.md)
+- [Work with the specifications](how-to/work-with-the-specs.md)
 
 ## Understand
 
 - [Architecture](explanation/architecture.md) — the API package, the command line and the boundary between them.
+- [Specifications](explanation/specifications.md) — why behaviour is written in Allium first, and what exists today.
 - [Python packaging](explanation/packaging.md) — the wheel, the sdist and the upload guard.
 - [Quality philosophy](explanation/quality-philosophy.md) — why each gate exists.
 - [Security model](explanation/security-model.md) — untrusted input and the supply chain.

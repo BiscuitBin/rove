@@ -61,6 +61,13 @@ wrote, so they are untrusted input until read.
   versions. It needs the network, so it sits outside `just check`.
 - **Tools.** Remote hooks and actions are pinned to full commit SHAs, and the shared
   checkers to a Git tag whose commit the lock records.
+- **The Allium checker.** `allium` is a prebuilt binary no lockfile can name, so the
+  shared checkers' installer pins its version and the SHA-256 of each release archive,
+  downloads over HTTPS from the upstream GitHub release, refuses a checksum or version
+  mismatch before anything replaces the installed copy, and lands it in the gitignored
+  `.tools/bin/` ([decision 0010](../decisions/0010-project-managed-allium-cli.md)).
+  `just install-allium` is a network recipe, run at first run and by the CI `gate`
+  job; `just check` itself never fetches it.
 - **Credential leakage.** The ripsecrets hook scans the tracked files in `just lint`,
   through the shared checkers' wrapper, `bg-ripsecrets`, which suppresses the scanner's
   output so that a matched value never reaches a log.

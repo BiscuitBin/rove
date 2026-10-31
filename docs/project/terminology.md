@@ -30,12 +30,14 @@ its first ticket adds its terms to this page.
 | Term | Meaning and preferred usage |
 | --- | --- |
 | Recipe | One named `Justfile` command; use recipe, not gate, for one outside `just check`. |
-| Gate | One of the eight recipes `just check` runs in order; use gate, not test, for the aggregate policy. |
+| Gate | One of the ten recipes `just check` runs in order; use gate, not test, for the aggregate policy. |
 | Positive control | A deliberately failing input a gate must reject, proving the gate can fire; use positive control, not fixture, when that is its job. |
 | Ticket | One file under `tickets/` describing one unit of work and its acceptance evidence. |
 | Lane | A ticket running in its own worktree in parallel with others; a lane edits only its ticket's files. |
 | Hand-back | A change a lane needs outside its own files, written in its ticket's notes for a later ticket to land, never applied in place. |
-| Network recipe | A recipe allowed to reach the network: `initialize`, `sync`, `lock`, `lock-upgrade`, `install-hooks`, `audit`, `check-links-online`. |
+| Network recipe | A recipe allowed to reach the network: `initialize`, `sync`, `lock`, `lock-upgrade`, `install-hooks`, `install-allium`, `audit`, `check-links-online`. |
+| Specification | An `.allium` file under `docs/specs/`. Decides behaviour, and wins wherever the code disagrees ([decision 0009](../decisions/0009-specs-are-the-source-of-truth.md)). Never requirements or design document: a ticket says what to do next, a specification says what the code does. |
+| Module | One specification, named by its file without the extension: `rovo` is `docs/specs/rovo.allium`, the root module and today the only one. `just plan-spec <module>` takes this name. Where a Python module could be meant, say specification module. |
 
 The two names differ by one letter: the repository is `rove` and everything
 it ships is `rovo` ([decision 0007](../decisions/0007-pypi-name-rovo.md)).

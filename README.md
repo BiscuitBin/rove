@@ -5,7 +5,8 @@ distribution for Python 3.13 and newer. The product is not yet specified: today 
 package exports a placeholder API, `rovo.__version__`, and the command answers
 `rovo --version` and `rovo version`. Around that placeholder the repository already runs
 the whole quality gate a real change will need, so that the product's first change lands
-on a gate that proves everything around it.
+on a gate that proves everything around it. Behaviour will be specified in Allium under
+`docs/specs/` before it is built; today the one module there declares none.
 
 ## Status
 
@@ -24,8 +25,8 @@ uv run --frozen rovo --version
 uv run --frozen python -c 'import rovo; print(rovo.__version__)'
 ```
 
-`just initialize` installs the environment exactly as `uv.lock` pins it and prepares the
-hooks; the first command then prints `rovo 0.0.0`, and the second `0.0.0`.
+`just initialize` installs the environment exactly as `uv.lock` pins it, the pinned
+Allium checker and the hooks; the first command then prints `rovo 0.0.0`, and the second `0.0.0`.
 
 ## Documentation
 

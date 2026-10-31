@@ -24,7 +24,7 @@ fully gated project around a placeholder API (`rovo.__version__`) and a placehol
 command (`rovo --version`, `rovo version`), so that the first product ticket lands on a
 gate that already proves everything around it.
 
-Four repositories are the sources. This document and every ticket cite them with a
+Five repositories are the sources. This document and every ticket cite them with a
 letter, a code-span path and, where it matters, line numbers at these exact commits:
 
 | Letter | Repository | Local clone | Commit |
@@ -32,7 +32,8 @@ letter, a code-span path and, where it matters, line numbers at these exact comm
 | **A** | `BiscuitBin/alliumpy`, the primary source. Its T00, T01, T03, T05, T07 and T11 are done, so the built files are read, not the ticket text | `/Users/scutting/projects/biscuitbin/alliumpy` | `c8e1a46` |
 | **W** | the web Copier template; the uv + hatchling project shape, the `uv run --frozen` Justfile idiom, `[dependency-groups]`, the pytest, coverage, ruff and mypy settings, the reserved-name rationale | `/Users/scutting/projects/foo/www` | `42ed403` |
 | **L** | `steven-cutting/libpawdoku`, the origin of A's patterns; its spike S01 designed the Renovate configuration | `/Users/scutting/projects/libpawdoku` | `ccdd001` |
-| **B** | `steven-cutting/biscuit_games_tooling` (public), the `bg-*` checkers: `bg-project-check`, `bg-validate-docs`, `bg-validate-agents`, `bg-ripsecrets` | `/Users/scutting/projects/biscuit_games_tooling` | `6c5c07f` (= tag `v0.3.0`) |
+| **B** | `steven-cutting/biscuit_games_tooling` (public), the `bg-*` checkers: `bg-project-check`, `bg-validate-docs`, `bg-validate-agents`, `bg-ripsecrets`, and since T07 `bg-install-allium` and `bg-run-allium` | `/Users/scutting/projects/biscuit_games_tooling` | `6c5c07f` (= tag `v0.3.0`) |
+| **P** | `BiscuitBin/pachinko`, the Allium machinery as a Biscuit repository carries it: the spec recipes and hooks, the seven Allium skills and `spec-change`, `allium-skill-reference/`, decisions 0002, 0005 and 0010 and the two spec pages; its T06 is the gate procedure. Added for T07 | `/Users/scutting/projects/pachinko` | `611a86e` |
 
 Read a pinned file with `git -C <clone> show <commit>:<path>`; never modify a clone. A
 citation is written as the letter followed by the path as a code span, for example
@@ -50,6 +51,7 @@ The ticket each rovo ticket adapts:
 | T04 Handbook and maintainer docs | A's T07 (done) and T12 | A `tickets/T07-handbook.md`, A `tickets/T12-maintainer-docs.md`, A `docs/manifest.yml`, A `docs/decisions/0002-hook-runner-and-checkers.md` |
 | T05 Integration | A's T11 (done) | A `tickets/T11-integration.md` |
 | T06 Renovate | A's T17 and L's drafted ticket | A `tickets/T17-renovate.md`, L `tickets/S01-dependency-updates.md` lines 164-905 |
+| T07 Allium gate | P's T06 (done) and T05 (done): the gate procedure and the skills as built | P `tickets/T06-allium-gate.md`, P `Justfile`, P `.pre-commit-config.yaml`, P `.agents/skills/`, P `allium-skill-reference/`, P `docs/how-to/work-with-the-specs.md`, P `docs/explanation/specifications.md` |
 
 ## 1. Decisions taken with the maintainer, and the facts everything rests on
 
@@ -279,7 +281,10 @@ ai_tmp/  .venv/  dist/  target/        gitignored; never committed
 
 `<6>` is the six skills of §7. There is no `LICENSE` (decision 6), no `.claude/settings.json`
 (B tolerates it but nothing needs it), and no `tools.txt`, `rust-toolchain.toml`, Cargo or
-pixi file: none of A's Rust side is carried.
+pixi file: none of A's Rust side is carried. T07 adds `.claude/settings.json` (P's, which
+enables the Allium plugin for Claude Code), `docs/specs/rovo.allium`,
+`allium-skill-reference/` and the eight further skills with their bridges; the
+`.gitignore` gains `!.claude/settings.json`, `.tools/` and `.allium-loop/`.
 
 ## 4. `Justfile` (T00 writes it; frozen in wave 1)
 
@@ -493,7 +498,9 @@ check:
 **Gate order** (the `recipes` list of §2), then `check-clean`: 1 `lock-check`, 2 `lint`,
 3 `py-lint`, 4 `py-typecheck`, 5 `coverage`, 6 `wheel-smoke`, 7 `check-docs`,
 8 `check-agents`. `py-test`, `build`, `format`, `fix`, `audit` and
-`check-links-online` are outside `check` (`build` runs inside `wheel-smoke`).
+`check-links-online` are outside `check` (`build` runs inside `wheel-smoke`). T07 appends
+9 `check-specs` and 10 `analyse-specs` to the list, adds `install-allium` to the network
+recipes and `plan-spec` outside `check`; the handbook states the ten-gate order.
 
 The recipes this document's §11 and `AGENTS.md` call **network recipes**: `initialize`,
 `sync`, `lock`, `lock-upgrade`, `install-hooks`, `audit`, `check-links-online`.
@@ -663,7 +670,9 @@ T00 writes each skill's final frontmatter:
 | `review-docs` | same | A's |
 
 A's `rust-change` is not carried. Six skills, twelve bridges; `just check-agents` prints
-`Validated AGENTS.md, 2 adapters, and 6 skills.`
+`Validated AGENTS.md, 2 adapters, and 6 skills.` T07 adds `spec-change` and the seven
+Allium skills from P, with their bridges: fourteen skills, twenty-eight bridges, and the
+line reads `... and 14 skills.` from then on.
 
 ## 8. Decision records
 

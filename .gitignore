@@ -17,8 +17,9 @@ ai_tmp/
 # bg-validate-agents lists files with `git ls-files --cached --others
 # --exclude-from=.gitignore` and reports any other file under .claude/ as an
 # unexpected managed file, so everything there is ignored except the tracked
-# skills. Codex writes its local settings on first use.
+# settings and skills. Codex writes its local settings on first use.
 .claude/*
+!.claude/settings.json
 !.claude/skills/
 .codex/settings.local.json
 
@@ -30,6 +31,15 @@ target/
 
 # The sdist and the wheel `just build` writes.
 dist/
+
+# The pinned allium binary, installed by `just install-allium`. Ignored for the
+# same reason as target/: a binary Git can see aborts the snapshot.
+.tools/
+
+# The Allium loop's ledger, witness record and trace
+# (allium-skill-reference/allium/driving-the-loop.md, section 8), which the
+# loop would otherwise append here itself.
+.allium-loop/
 
 # Python bytecode, tool caches, the uv environment and coverage's data files.
 __pycache__/

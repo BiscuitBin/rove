@@ -30,14 +30,15 @@ snapshot.
 | T04 | Handbook and maintainer docs: every page, decisions 0001 to 0007, README | `T04-handbook.md` | T00 | T01, T02, T03 | done |
 | T05 | Integration: the first green `just check` from a fresh clone and in CI | `T05-integration.md` | T01, T02, T03, T04 | none | done |
 | T06 | Renovate over every pin, behind an authorised app install | `T06-renovate.md` | T05 | none | open |
+| T07 | Allium gate: the placeholder module, the spec recipes, the Allium skills, the specification workflow | `T07-allium-gate.md` | T05 | none | done |
 
 ## Dependency graph
 
 ```text
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
-     ├─ T03 ─┼─ T05 ── T06
-     └─ T04 ─┘
+     ├─ T03 ─┼─ T05 ─┬─ T06
+     └─ T04 ─┘       └─ T07
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -49,6 +50,9 @@ T00 ─┬─ T01 ─┐
   clone and in CI, and lifts the freeze.
 - **T06** comes last because Renovate has to know every pin, and T01 adds the action
   pins.
+- **T07** brings in the Allium machinery the other Biscuit repositories carry: the
+  specification gate, the seven Allium skills and the specification workflow, around a
+  root module that declares no behaviour yet.
 
 ## How to pick up a ticket
 

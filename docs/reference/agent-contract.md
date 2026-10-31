@@ -32,17 +32,17 @@ second file would be a second source of truth.
   `just check`, `explicit authorization`, `ai_tmp/`, `docs/specs/` and `runes`.
 
 The phrase list is a crude check and is meant to be. It does not verify that the guidance
-is good; it verifies that the six topics were not dropped in an edit. Two of the phrases
-have nothing to govern here: this repository has no `docs/specs/` directory, because it
-has no Allium specifications, and does not use Svelte, whose `runes` the sixth phrase
-names. `AGENTS.md` says so in one honest sentence each, in its Provenance section,
-outside every `<important if>` block, until the shared package makes the list
-configurable.
+is good; it verifies that the six topics were not dropped in an edit. Five of the phrases
+govern something here; `docs/specs/` holds the Allium specifications since T07. The sixth
+does not: this repository does not use Svelte, whose `runes` the phrase names, and
+`AGENTS.md` says so in one honest sentence in its Provenance section, outside every
+`<important if>` block, until the shared package makes the list configurable.
 
 ## The skills and the blocks that route to them
 
-This repository carries six canonical skills with twelve bridges. Their triggers are
-their `description` lines:
+This repository carries fourteen canonical skills with twenty-eight bridges. The first
+table holds the six house skills and `spec-change`, whose triggers are their
+`description` lines:
 
 | Skill | Trigger |
 | --- | --- |
@@ -52,6 +52,25 @@ their `description` lines:
 | `fix-quality` | Diagnose and repair a failing gate at its root instead of suppressing the finding. |
 | `project-check` | Bring a workspace to a state where the full gate runs, and interpret what it reports. |
 | `review-docs` | Add or revise a handbook page so it satisfies the documentation contract and stays reachable. |
+| `spec-change` | Change an Allium specification and carry the change through the tests and the implementation. |
+
+Seven are the Allium skills, vendored from `juxt/allium` through pachinko at `611a86e`.
+Each carries a sentence naming `AGENTS.md` and the `just` recipe that proves its work,
+which the check below requires of every skill; in `allium` and `propagate` that sentence
+names this repository's `just coverage` and `just py-test`, in `witness` it names the
+recipes the skill re-runs and says that `just check` still runs before a change lands,
+and nothing else in them differs from upstream. No lock file records their source
+([decision 0011](../decisions/0011-skill-reference-material.md)).
+
+| Skill | Description, first sentence of its frontmatter |
+| --- | --- |
+| `allium` | Give your AI agents something more useful than a prompt. |
+| `distill` | Extract an Allium specification from an existing codebase. |
+| `elicit` | Run a structured discovery session to build an Allium specification through conversation. |
+| `propagate` | Generate tests from Allium specifications. |
+| `tend` | Tend the Allium garden. |
+| `weed` | Weed the Allium garden. |
+| `witness` | Independently witness that an Allium loop's convergence claim is true and was reached honestly. |
 
 `AGENTS.md` routes each kind of task to its skill through one `<important if="...">`
 block per task:
@@ -61,6 +80,7 @@ block per task:
 | changing Python under `src/` or `tests/` | `python-change` | `py-lint`, `py-typecheck`, `coverage`, `wheel-smoke`, `py-test` |
 | changing the command line | `python-change` | `coverage`, `wheel-smoke` |
 | adding or moving a dependency | `plan-change` | `lock`, `lock-check`, `wheel-smoke` |
+| writing or changing a module under `docs/specs/` | `spec-change`, then `allium` | `check-specs`, `analyse-specs`, `plan-spec`, `install-allium` |
 | adding or changing a page under `docs/` | `review-docs` | `check-docs` |
 | changing `AGENTS.md`, an adapter, a skill or a bridge | none | `check-agents` |
 | a failing gate, or handing work back | `fix-quality`, then `project-check` | `format`, `fix`, `lint` |
@@ -106,15 +126,24 @@ is read as guidance and becomes a second source of truth for the skill it points
 The validator lists managed files from Git, honouring this repository's `.gitignore`,
 and compares that against what it expects. Every expected file must exist; no
 unexpected file may exist under `.agents/`, `.claude/` or `.codex/`, except a
-`.claude/settings.json`, which is tolerated and absent here; and managed files must be
-regular files, never symlinks. Local assistant state stays out of the inventory by being
-listed in `.gitignore`.
+`.claude/settings.json`, which is tolerated and present here (it enables the Allium
+plugin for Claude Code and carries no guidance); and managed files must be regular
+files, never symlinks. Local assistant state stays out of the inventory by being listed
+in `.gitignore`.
+
+Because nothing else may exist under `.agents/`, the vendored skills' reference material
+lives outside it, at `allium-skill-reference/` at the repository root, with one directory
+each for `allium`, `distill` and `elicit`. It is linked only from those skills. Git marks
+that directory as vendored, and markdownlint, the link checker, typos and both hook
+configurations ignore it; [decision 0011](../decisions/0011-skill-reference-material.md)
+is the record.
 
 On this tree `just check-agents` prints
-`Validated AGENTS.md, 2 adapters, and 6 skills.`
+`Validated AGENTS.md, 2 adapters, and 14 skills.`
 
 ## Related pages
 
 - [Documentation contract](documentation-contract.md)
 - [Quality gates](quality-gates.md)
 - [Decision 0004: Hook runner and checkers](../decisions/0004-hook-runner-and-checkers.md)
+- [Decision 0011: Skill reference material beside the skills](../decisions/0011-skill-reference-material.md)

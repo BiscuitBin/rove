@@ -28,7 +28,7 @@ The project manifest, owned by T00 and frozen while the wave-1 lanes run.
 | `[tool.uv.sources]` | The shared checkers from their Git repository at tag `v0.3.0`. |
 | `[tool.hatch.build.targets.wheel]` | `packages = ["src/rovo"]`. |
 | `[tool.hatch.build.targets.sdist]` | `only-include`: `src/rovo`, `tests`, `README.md`, `CHANGELOG.md`. |
-| `[tool.biscuit-games-tooling]` | `recipes`, the eight gates `just check` runs in order, and `predicates = {}`. |
+| `[tool.biscuit-games-tooling]` | `recipes`, the ten gates `just check` runs in order, and `predicates = {}`. |
 
 `uv.lock` is generated from it by `uv lock`, committed, never hand-edited, and frozen with
 it. `.python-version` holds `3.14`, the tooling interpreter.
@@ -51,21 +51,22 @@ Owned by T02.
 
 | File | What it sets |
 | --- | --- |
-| `.pre-commit-config.yaml` | The read-only hook gate `just lint` runs and the installed hook uses: file hygiene, EditorConfig, markdownlint, typos, lychee (offline, and `lychee-online` on the manual stage), shellcheck, actionlint, ripsecrets, `py-lint`, `py-typecheck` and both contract validators. Remote hooks are pinned to commit SHAs. |
-| `.pre-commit-fix.yaml` | The mutating hooks `just fix` runs, including ruff's formatter and fixer; it skips the positive-control fixtures. |
-| `.editorconfig` | UTF-8, LF line endings, final newlines, and indentation: two spaces, four for Python and the `Justfile`. |
-| `.markdownlint-cli2.jsonc` | markdownlint's rules: no line-length limit, `<important>` and `<br>` allowed for `AGENTS.md`, and `target`, `.venv` and `ai_tmp` ignored. It checks only the files the hook runner passes, never untracked or ignored files on disk. |
-| `_typos.toml` | The only typos configuration: the excluded paths (`uv.lock` among them) and the accepted words, each commented. |
-| `lychee.toml` | The link checker's cache, retries, timeout, accepted status codes and excluded paths. |
+| `.pre-commit-config.yaml` | The read-only hook gate `just lint` runs and the installed hook uses: file hygiene, EditorConfig, markdownlint, typos, lychee (offline, and `lychee-online` on the manual stage), shellcheck, actionlint, ripsecrets, `py-lint`, `py-typecheck`, both contract validators, and the two specification checks, `check-specs` and `analyse-specs`, fired by `docs/specs/` and by `pyproject.toml`, where the tooling package's pin lives. Remote hooks are pinned to commit SHAs. `allium-skill-reference/` is excluded. |
+| `.pre-commit-fix.yaml` | The mutating hooks `just fix` runs, including ruff's formatter and fixer; it skips the positive-control fixtures and `allium-skill-reference/`. |
+| `.editorconfig` | UTF-8, LF line endings, final newlines, and indentation: two spaces, four for Python, the `Justfile` and the `.allium` modules. |
+| `.markdownlint-cli2.jsonc` | markdownlint's rules: no line-length limit, `<important>` and `<br>` allowed for `AGENTS.md`, and `target`, `.venv`, `ai_tmp` and `allium-skill-reference` ignored. It checks only the files the hook runner passes, never untracked or ignored files on disk. |
+| `_typos.toml` | The only typos configuration: the excluded paths (`uv.lock` and `allium-skill-reference/` among them) and the accepted words, each commented. |
+| `lychee.toml` | The link checker's cache, retries, timeout, accepted status codes and excluded paths, `allium-skill-reference` among them. |
 
 ## The rest
 
 | File | Owner | What it sets |
 | --- | --- | --- |
 | `Justfile` | T00, frozen in wave 1 | Every recipe, and `coverage_floor := "95"`. |
-| `.gitignore` | T00, frozen | Scratch, build output, the environment and every generated file, so the gate's snapshot never sees them. |
-| `.gitattributes` | T00, frozen | `* text=auto eol=lf`: LF line endings for every text file. |
-| `.github/` | T01 | The CI workflow and the setup action that installs uv, just, the environment and the hook environments. |
+| `.gitignore` | T00, then T07 | Scratch, build output, the environment, the pinned allium binary under `.tools/`, the Allium loop's `.allium-loop/` records and every generated file, so the gate's snapshot never sees them; Claude Code's runtime state under `.claude/` apart from its tracked `settings.json` and skills. |
+| `.gitattributes` | T00, then T07 | `* text=auto eol=lf`: LF line endings for every text file; `allium-skill-reference/**` marked `linguist-vendored`. |
+| `.claude/settings.json` | T07 | Enables the `allium@juxt-plugins` plugin for Claude Code. Provider configuration, not guidance: the agent contract tolerates it and `AGENTS.md` stays canonical. |
+| `.github/` | T01, then T07 | The CI workflow and the setup action that installs uv, just, the environment and the hook environments; the `gate` job runs `just install-allium` before `just check`. |
 | `docs/manifest.yml` | T00, frozen in wave 1 | The registry the [documentation contract](documentation-contract.md) checks. |
 
 There are no environment variables to configure. uv honours its own (`UV_PYTHON`,

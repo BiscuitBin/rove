@@ -76,5 +76,7 @@ recipes = [
   "wheel-smoke",
   "check-docs",
   "check-agents",
+  "check-specs",
+  "analyse-specs",
 ]
 predicates = {}

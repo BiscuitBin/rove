@@ -1,0 +1,25 @@
+-- allium: 3
+--
+-- rovo — the root module
+--
+-- Scope
+--   The product is undefined. This is its root module: the place the first
+--   specification change will define what rovo does. Until then it holds
+--   no behaviour, and the API (`rovo.__version__`) and the command
+--   (`rovo --version`, `rovo version`) are placeholders that no clause
+--   here describes.
+--
+-- Includes
+--   Nothing yet.
+--
+-- Excludes
+--   Every behaviour, until a specification change defines one. A ticket
+--   or a decision record may introduce the change; this module, not the
+--   code, is where the behaviour is then stated.
+--
+-- Dependencies
+--   None.
+--
+-- Vocabulary
+--   None yet. docs/project/terminology.md is the glossary; the first
+--   specification change adds the product's terms there and here.
