@@ -17,3 +17,7 @@ policy.
 - The Allium gate: a placeholder root module `docs/specs/rovo.allium` that declares no
   behaviour, the `check-specs` and `analyse-specs` gates over it, the `spec-change` skill
   and the seven Allium skills with their reference material (decisions 0009 to 0011).
+- The product specification: four Allium modules under `docs/specs/` (`rovo`, `crawl`,
+  `mirror`, `convert`) that specify rovo as a documentation mirror, elicited from the
+  product brief with two prototype specifications as evidence, with the product's terms
+  in the terminology page (decision 0012). Nothing of it is implemented yet.

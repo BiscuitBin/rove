@@ -14,8 +14,8 @@ the documentation contract, listed under Look up.
 
 This repository builds one pure-Python distribution, `rovo`: an importable package,
 `rovo`, which is the Python API, and a Typer command of the same name. Its behaviour is
-specified in Allium under `docs/specs/` before it is built; today the one module there
-declares none.
+specified in Allium under `docs/specs/` before it is built: four modules specify a
+documentation mirror, and none of it is implemented yet.
 
 ## Start here
 

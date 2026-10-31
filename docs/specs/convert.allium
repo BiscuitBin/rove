@@ -1,0 +1,475 @@
+-- allium: 3
+--
+-- convert — one fetched HTML document becomes Markdown with a measured
+-- quality result
+--
+-- Scope
+--   Pure conversion. Given the HTML of one page and the profile in force,
+--   this module says what the extracted content is, what the Markdown body
+--   must carry from it, how the loss is measured, and when a page counts as
+--   low confidence. It holds no rules: conversion is a set of pure operations
+--   that the Fidelity contract names and that `mirror` and `crawl` call.
+--
+-- Includes
+--   Extraction of the main content with the profile, a fallback extractor
+--   or the whole body; normalisation and the islands that carry what
+--   Markdown cannot; the ten quality gates, their weights, the quality
+--   score, the flags and the low-confidence verdict; the profile, which is
+--   platform knowledge as configuration; the Fidelity contract.
+--
+-- Excludes
+--   Fetching, rendering and the fetch tier (crawl); where a page is stored,
+--   its path, its frontmatter, link rewriting and the link flags (mirror);
+--   library choices (HTML parsers, converter backends, fallback extractor
+--   names), which are one black box each; per-transform DOM mechanics,
+--   which a golden corpus owns once the code exists.
+--
+-- Dependencies
+--   None. This is the leaf module.
+--
+-- Vocabulary
+--   fidelity: what the Markdown must carry from the extracted content; the
+--   Fidelity contract. profile: platform knowledge as configuration.
+--   quality score, flags, low confidence: the measured gate share, the named
+--   flags, and the boolean the report ranks on. island: a chunk Markdown
+--   cannot carry, cut out before conversion and restored after. extracted
+--   share: the share of the page's words that extraction kept.
+--   docs/project/terminology.md is the glossary.
+--
+-- Black box functions (pure): the Fidelity operations extract, normalize,
+-- convert, restore and measure, plus text_length and word_count where the
+-- comments name them. Every other computation is a derived value below.
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- One raw value -> label entry of a profile's version mapping, such as
+-- "graph-rest-1.0" -> "v1.0".
+value VersionMapping {
+    raw: String
+    label: String
+}
+
+-- What normalisation says the Markdown must carry: counted over the
+-- normalised tree plus every island, after tab expansion and chrome
+-- removal. Markdown inside an island is counted too.
+value ExpectedCounts {
+    code_blocks: Integer
+    tables: Integer
+    table_cells: Integer
+    headings: Integer
+    links: Integer
+    images: Integer
+    list_items: Integer
+    tab_panels: Integer
+    prose_words: List<String>       -- word multiset outside code
+}
+
+-- A chunk Markdown cannot carry, cut out before conversion and restored
+-- after: sanitised HTML, or an HTML shell around Markdown (details,
+-- footnotes).
+value Island {
+    payload: String
+    carries_markdown: Boolean       -- the shell holds Markdown, counted in expected
+}
+
+-- The normalised tree with its islands replaced by tokens, and everything
+-- measurement needs to know about it.
+value NormalizedContent {
+    fragment: String
+    islands: List<Island>
+    expected: ExpectedCounts
+    flags: Set<QualityFlag>         -- html_table_kept, interactive_omitted
+    anchors: Set<String>            -- every element id kept in the content
+    headings: List<String>          -- heading texts in document order
+    link_targets: List<String>      -- absolute hrefs in the content, document order
+    tab_panels_emitted: Integer
+}
+
+-- The same element classes counted on the produced Markdown body:
+-- Markdown tokens plus parsed HTML in islands.
+value OutputMeasurement {
+    code_blocks: Integer
+    tables: Integer
+    table_cells: Integer
+    headings: Integer
+    links: Integer
+    images: Integer
+    list_items: Integer
+    words: List<String>
+    code_language_rate: Decimal     -- share of fences naming a language; 1 when none
+    text_coverage: Decimal          -- multiset overlap of words with expected.prose_words
+}
+
+-- The measured result of one conversion. The score is informational; the
+-- low-confidence verdict is what the report ranks on.
+--
+-- Default stated here (veto at review): a page is low confidence when any
+-- gate failed or any flag is in config.incomplete_flags. The mirror
+-- recomputes the verdict after link rewriting with the same definition,
+-- so a link flag in incomplete_flags would count then; by default none is.
+value QualityResult {
+    expected: ExpectedCounts
+    output: OutputMeasurement
+    tab_panels_emitted: Integer
+    failed: Set<QualityGate>
+    score: Decimal                  -- weighted share of passed gates, 0 to 1
+    flags: Set<QualityFlag>         -- every failed gate name is also a flag
+    low_confidence: Boolean
+
+    text_coverage_passes: output.text_coverage >= config.text_coverage_gate
+    code_blocks_passes: output.code_blocks = expected.code_blocks
+    code_lang_rate_passes: output.code_language_rate >= config.lang_rate_gate
+    tables_passes: output.tables = expected.tables
+    table_cells_passes: output.table_cells = expected.table_cells
+    headings_passes: output.headings = expected.headings
+    links_passes:
+        expected.links = 0
+        or output.links >= config.ratio_gate * expected.links
+    images_passes: output.images = expected.images
+    list_items_passes:
+        expected.list_items = 0
+        or output.list_items >= config.ratio_gate * expected.list_items
+    tabs_expanded_passes: tab_panels_emitted = expected.tab_panels
+    all_gates_pass: failed.count = 0
+    has_incomplete_flag: flags.any(f => f in config.incomplete_flags)
+}
+
+-- The main content of one page, as extraction found it, with the metadata
+-- read from the document.
+value ExtractedContent {
+    html: String                    -- the extracted main content, chrome stripped
+    title: String                   -- first h1 in the content, else og:title, else <title>, else the URL
+    description: String             -- meta description, else the first prose paragraph cut at config.description_max_chars
+    canonical_url: String?          -- <link rel=canonical>, resolved against the page URL
+    declared_locale: String?        -- <html lang>
+    breadcrumbs: List<String>
+    navigation_targets: List<String> -- absolute hrefs in the page's navigation, outside the content
+    method: ExtractionMethod
+    has_text: Boolean
+    extracted_share: Decimal        -- words kept / words in the whole document body
+}
+
+-- The product of one conversion, before the mirror stores it.
+value ConvertedContent {
+    body: String                    -- Markdown with absolute links; the mirror rewrites them
+    title: String
+    description: String
+    canonical_url: String?
+    declared_locale: String?
+    breadcrumbs: List<String>
+    navigation_targets: List<String>
+    method: ExtractionMethod
+    anchors: Set<String>
+    headings: List<String>
+    link_targets: List<String>      -- de-duplicated, order kept
+    quality: QualityResult
+    is_empty: Boolean               -- no text after extraction, or a blank body
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+-- Every DOM-normalisation rule is one obligation of this contract. Once the
+-- code exists, a golden corpus is the witness; this contract says what it
+-- witnesses.
+contract Fidelity {
+    extract: (html: String, url: String, profile: Profile) -> ExtractedContent
+    normalize: (content: ExtractedContent, profile: Profile) -> NormalizedContent
+    convert: (fragment: String) -> String
+    restore: (markdown: String, islands: List<Island>) -> String
+    measure: (content: ExtractedContent, normalized: NormalizedContent, body: String) -> QualityResult
+
+    @invariant ExtractNeverEmptyHanded
+        -- extract tries the profile's content selection, then the fallback
+        -- extractor, then the whole document body, so it always returns
+        -- content; method records which one succeeded. It strips the
+        -- profile's chrome and nothing else.
+
+    @invariant NeverDropCarriedContent
+        -- Every construct in the extracted main content reaches the body
+        -- with its text, links, images, code and structure, as Markdown or
+        -- as an island, except for the declared reductions below.
+
+    @invariant UncarryableBecomesIsland
+        -- A construct Markdown cannot carry (a complex, header-less or
+        -- row-header table, a block definition list, details, math without
+        -- TeX, an id-only anchor) is replaced by a token before conversion
+        -- and restored after. A token the converter loses is a lost
+        -- construct and raises fidelity_loss.
+
+    @invariant ExpectedAgainstSurvived
+        -- normalize records ExpectedCounts over the normalised tree plus
+        -- every island, Markdown inside islands included; measure counts the
+        -- same element classes in the body and compares. Text coverage
+        -- compares against the extracted content's words outside code.
+
+    @invariant DeclaredReductions
+        -- The reductions normalisation makes on purpose: an interactive
+        -- embed becomes a one-line note keeping its URL or label (flag
+        -- interactive_omitted); links inside code become their text;
+        -- line-number gutters leave code; form controls go and button
+        -- labels stay; layout tables unwrap; footnote back-links go; images
+        -- keep only src, alt, title and id; custom elements keep only id,
+        -- class and the tab language. A table kept as HTML is flagged
+        -- html_table_kept. Any other lost construct raises fidelity_loss.
+
+    @invariant SanitizedMeansInert
+        -- There is one definition of sanitised. A sanitised island keeps
+        -- structural and linking attributes (rowspan, colspan, id, scope,
+        -- href, src, alt, title, open) and drops every other attribute;
+        -- drops javascript: and vbscript: targets and every data: URL
+        -- except an image source; drops script and style subtrees; never
+        -- removes text; and holds no blank line, so Markdown keeps it as
+        -- one block. An island that carries Markdown wraps it between blank
+        -- lines instead.
+
+    @invariant EveryTabPanelEmitted
+        -- Every panel of a tab group reaches the body in source order,
+        -- never only the active one: as a labelled fence when every panel
+        -- is one code sample in a named language, otherwise as a heading
+        -- plus the panel. Inactive panels are made visible before hidden
+        -- content is removed.
+
+    @invariant BodyShape
+        -- The body uses LF line endings, keeps at most one blank line in a
+        -- row outside fences, leaves fenced code byte-identical, keeps
+        -- exactly one level-one heading (synthesised from the title when
+        -- the content has none, extra ones demoted), renders heading ids
+        -- in the profile's anchor style, keeps every source id as an
+        -- anchor, and ends with exactly one LF.
+
+    @invariant ScoreIsAFraction
+        -- The gate weights sum to one, so score lies between 0 and 1, and
+        -- score = 1 exactly when no gate failed.
+
+    @invariant FailedGatesAreFlagged
+        -- failed holds exactly the gates whose pass predicate is false, and
+        -- every failed gate's name is in flags. low_confidence is true
+        -- exactly when failed is non-empty or a flag is in
+        -- config.incomplete_flags.
+
+    @invariant Determinism
+        -- The same HTML, URL and profile always produce the same
+        -- ConvertedContent, byte for byte. No clock, no network, no
+        -- randomness.
+
+    @guidance
+        -- Construct families and how they reach the body: simple tables ->
+        -- pipe tables; complex tables -> islands; callouts -> GFM alerts;
+        -- tabs -> every panel; code -> fences with a language; definition
+        -- lists -> bold term lines, or islands when block content; images
+        -- and figures -> image syntax with alt text; heading ids -> {#id}
+        -- suffixes or anchor islands; embeds -> placeholders; sup, sub, kbd
+        -- and mark -> kept inline HTML; math -> TeX delimiters or an
+        -- island; footnotes -> [^n] with definitions; details -> an island
+        -- with Markdown inside. Element counts compare normalised against
+        -- output, never raw against output, because tab expansion adds
+        -- headings by design. When maintainers review a golden change, the
+        -- output that keeps more of the page wins.
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- The ten quality gates, measured against the extracted main content.
+enum QualityGate {
+    text_coverage | code_blocks | code_lang_rate | tables | table_cells
+    | headings | links | images | list_items | tabs_expanded
+}
+
+-- Every page flag: one gate flag per gate, the flags extraction and
+-- normalisation add, the flags the fetch adds, and the link flags the
+-- mirror adds after rewriting.
+enum QualityFlag {
+    text_coverage | code_blocks | code_lang_rate | tables | table_cells
+    | headings | links | images | list_items | tabs_expanded
+    | extractor_fallback | whole_body_extracted | extracted_share
+    | empty_content | interactive_omitted | html_table_kept | fidelity_loss
+    | render_needed | soft_block_suspected
+    | uncrawled_internal | unresolved_fragment | dangling_inbound
+}
+
+-- How the main content was found. A fallback extractor is one black box;
+-- its name is a library choice and stays out of the specification.
+enum ExtractionMethod { profile | fallback | whole_body }
+
+-- How a heading's id is written: a {#id} attribute suffix, or an inline
+-- anchor island before the heading.
+enum HeadingAnchorStyle { attr | inline }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- Platform knowledge as data: which hosts it serves, which element holds
+-- the content and what is chrome (opaque content selection), which query
+-- parameters distinguish pages, which sitemap documents to read, how
+-- versions and locales are expressed, and how anchors are written. A new
+-- platform is a new profile, never a hostname branch in code.
+entity Profile {
+    name: String
+    hosts: Set<String>                      -- selects the profile at init; empty for the generic profile
+    content_selection: String               -- opaque: main-content, chrome, breadcrumb, tab, callout and login-wall selection
+    meaningful_query_params: List<String>   -- query parameters that are part of a page's identity
+    sitemap_include: List<String>           -- sitemap document filter with {section} and {locale} placeholders; always applied
+    version_param: String?                  -- the query parameter that names a version
+    version_map: List<VersionMapping>
+    version_default: String?
+    locale_codes: Set<String>               -- the first path segments this platform uses as locales
+    heading_anchor_style: HeadingAnchorStyle
+
+    has_versions: version_param != null
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+-- Fixed in code; a profile cannot override a gate.
+config {
+    -- Gates
+    text_coverage_gate: Decimal = 0.97
+    ratio_gate: Decimal = 0.98                  -- links and list items
+    lang_rate_gate: Decimal = 0.90
+    extracted_share_gate: Decimal = 0.30        -- flag extracted_share under this share of the document's words
+
+    -- Weights; they sum to one
+    weight_text_coverage: Decimal = 0.40
+    weight_code_blocks: Decimal = 0.15
+    weight_headings: Decimal = 0.10
+    weight_links: Decimal = 0.10
+    weight_tables: Decimal = 0.075
+    weight_table_cells: Decimal = 0.075
+    weight_code_lang_rate: Decimal = 0.05
+    weight_minor: Decimal = 0.05 / 3            -- each of images, list items, tabs expanded
+
+    -- The flags that make a page low confidence on their own
+    incomplete_flags: Set<QualityFlag> = { render_needed, empty_content, soft_block_suspected, extractor_fallback, whole_body_extracted }
+
+    -- Extraction
+    description_max_chars: Integer = 200
+}
+
+------------------------------------------------------------
+-- Defaults
+------------------------------------------------------------
+
+-- The three built-in profiles. init picks one by host from this catalogue
+-- and records its name; an unknown name is a usage error.
+default Profile generic = {
+    name: "generic",
+    hosts: {},
+    content_selection: "generic: main or article; password-form login wall",
+    meaningful_query_params: [],
+    sitemap_include: [],
+    version_param: null,
+    version_map: [],
+    version_default: null,
+    locale_codes: {},
+    heading_anchor_style: attr
+}
+
+default Profile mslearn = {
+    name: "mslearn",
+    hosts: { "learn.microsoft.com" },
+    content_selection: "mslearn: Learn article content and its tab groups",
+    meaningful_query_params: [ "view" ],
+    sitemap_include: [ "*/sitemapindex.xml", "*/{section}_{locale}_*.xml" ],
+    version_param: "view",
+    version_map: [
+        { raw: "graph-rest-1.0", label: "v1.0" },
+        { raw: "graph-rest-beta", label: "beta" }
+    ],
+    version_default: "v1.0",
+    locale_codes: { "en-us", "en-gb", "de-de", "fr-fr", "ja-jp", "zh-cn" },
+    heading_anchor_style: attr
+}
+
+default Profile devsite = {
+    name: "devsite",
+    hosts: { "developers.google.com" },
+    content_selection: "devsite: DevSite article content and its tab selectors",
+    meaningful_query_params: [],
+    sitemap_include: [],
+    version_param: null,
+    version_map: [],
+    version_default: null,
+    locale_codes: { "en", "de", "fr", "ja", "zh-cn" },
+    heading_anchor_style: attr
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant ProfileNamesAreUnique {
+    for a in Profiles:
+        for b in Profiles:
+            a != b implies a.name != b.name
+}
+
+invariant VersionedProfilesMapVersions {
+    for p in Profiles:
+        p.has_versions implies p.version_map.count > 0
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- The boundary between a page's HTML and its Markdown, parameterised by the
+-- profile in force. The mirror and the crawl call the Fidelity operations;
+-- this surface says what they may rely on.
+surface PageConversion {
+    facing profile: Profile
+
+    exposes:
+        profile.name
+        profile.hosts
+        profile.content_selection
+        profile.meaningful_query_params
+        profile.sitemap_include
+        profile.version_param
+        profile.version_map
+        profile.version_default
+        profile.locale_codes
+        profile.heading_anchor_style
+        profile.has_versions
+
+    contracts:
+        fulfils Fidelity
+
+    @guarantee GatesMeasureExtractedContent
+        -- Every gate compares the body against the extracted main content,
+        -- never against the whole document. What extraction dropped is
+        -- measured once, as extracted_share: when extraction kept under
+        -- config.extracted_share_gate of the document's words, the flag
+        -- extracted_share is raised. A fallback extractor raises
+        -- extractor_fallback; the whole body raises whole_body_extracted.
+
+    @guarantee FlagsAreComplete
+        -- ConvertedContent.quality.flags holds every failed gate's name,
+        -- every flag normalisation raised, extractor_fallback or
+        -- whole_body_extracted when the profile's selection did not match,
+        -- extracted_share when it applies, and empty_content when is_empty.
+        -- The fetch flags render_needed and soft_block_suspected are added
+        -- by the crawl before the mirror stores the page, and the link flags
+        -- by the mirror after rewriting; both recompute low_confidence with
+        -- the same definition.
+
+    @guarantee ProfilesAreTheOnlyPlatformKnowledge
+        -- No operation branches on a hostname. Everything a platform needs
+        -- is a Profile field, and a profile is data an operator can write.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "What should the tab-expansion gate measure, given that EveryTabPanelEmitted already requires every panel to reach the body? Today it compares panels emitted with panels found, which cannot fail by construction."
+open question "Should hidden content that is not a tab panel survive extraction, or is removing hidden elements after tab expansion the intended reduction?"
+open question "Which construct families must the fidelity corpus cover (math, footnotes, details, kbd, definition lists, complex tables) before a profile may be called supported?"

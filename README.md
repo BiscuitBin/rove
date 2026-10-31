@@ -1,12 +1,14 @@
 # rovo
 
 rovo is a Python API and a command, `rovo`, shipped together as one pure-Python
-distribution for Python 3.13 and newer. The product is not yet specified: today the
-package exports a placeholder API, `rovo.__version__`, and the command answers
-`rovo --version` and `rovo version`. Around that placeholder the repository already runs
-the whole quality gate a real change will need, so that the product's first change lands
-on a gate that proves everything around it. Behaviour will be specified in Allium under
-`docs/specs/` before it is built; today the one module there declares none.
+distribution for Python 3.13 and newer. The product is specified under `docs/specs/`
+and not yet implemented: rovo turns a product's documentation website into a local,
+self-linking Markdown mirror that re-syncs with one command. Today the package exports a
+placeholder API, `rovo.__version__`, and the command answers `rovo --version` and
+`rovo version`. Around that placeholder the repository already runs the whole quality
+gate a real change will need, so that the implementation lands on a gate that proves
+everything around it. Behaviour is specified in Allium before it is built; four modules
+under `docs/specs/` state it.
 
 ## Status
 
