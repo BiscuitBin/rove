@@ -333,6 +333,157 @@ regex readings unchanged (hook revs 7, `lycheeverse/lychee` 0.24.2 three times, 
 first with digest `2bba271`, `rust-just` 1.59.0), exit 1 from the node-version log line
 only.
 
+### Steps 5 and 6, on `main` (2026-10-31)
+
+**Step 5.** `renovate.json` reached `main` with PR #2, merged by the maintainer as a
+merge commit (`789fcbc`, 2026-10-30T23:43:15Z) after their explicit authorisation in
+this session. No install step followed: the app was already on the organisation (state
+reads above). Installation read-back, 2026-10-31T06:14:59Z, by `steven-cutting`
+(`gh api orgs/BiscuitBin/installations`, exit 0):
+
+```text
+{"app_slug":"renovate","permissions":{"administration":"read","checks":"write","contents":"write","issues":"write","members":"read","metadata":"read","packages":"read","pull_requests":"write","statuses":"write","vulnerability_alerts":"read","workflows":"write"},"repository_selection":"all"}
+```
+
+`repository_selection` is `all`, not the ticket's "`BiscuitBin/rove` only". Changing it
+is an organisation setting, so it is carried to the maintainer as an open point rather
+than changed.
+
+**Step 6, the dashboard.** Renovate's first run on `rove` came about six and a half
+hours after the merge: issue #4, `Dependency Dashboard`, opened by `app/renovate` at
+2026-10-31T06:14:17Z. No onboarding pull request was opened, because `renovate.json`
+was already on `main`. Read-back, 2026-10-31T06:14:59Z, raw output in
+`ai_tmp/T06/step6-readback.log`:
+
+```text
+$ gh issue list --repo BiscuitBin/rove --search 'Dependency Dashboard in:title' --json number,title,state
+[{"number":4,"state":"OPEN","title":"Dependency Dashboard"}]
+exit 0
+$ gh issue list --repo BiscuitBin/rove --search 'Fix Renovate Configuration in:title' --json number,state
+[]
+exit 0
+$ gh issue list --repo BiscuitBin/rove --state all --search 'Action Required in:title' --json number,state
+[]
+exit 0
+```
+
+Detected dependencies, quoted from issue #4 (the update arrows are Renovate's; only the
+`regex` lines that carry a digest are shown with it):
+
+```text
+github-actions (3)
+  .github/actions/setup/action.yml (4)
+    astral-sh/setup-uv v10.3.3@68559e99cc807c1eb7e9238fd43a15bba460eec2
+    actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    actions/cache v6.1.0@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+    astral-sh/uv 0.13.6
+  .github/workflows/audit.yml (1)
+    actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1
+  .github/workflows/ci.yml (2)
+    actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1
+    actions/checkout v7.0.1@3d3c42e5aac5ba805825da76410c181273ba90b1
+pep621 (1)
+  pyproject.toml (8)
+    typer >=0.27.3,<0.28
+    coverage ==7.17.0
+    mypy ==2.4.1
+    prek ==0.5.7 → [Updates: ==0.5.9]
+    pytest ==9.2.0
+    ruff ==0.17.3
+    biscuit-games-tooling v0.3.0
+    hatchling ==1.33.0
+pyenv (1)
+  .python-version (no dependency listed)
+regex (5)
+  .github/actions/setup/action.yml (1)
+    rust-just 1.59.0
+  .pre-commit-config.yaml (6)
+    editorconfig-checker/editorconfig-checker v3.11.1@675b1261… → [Updates: v3.11.3, v4.0.2]
+    DavidAnson/markdownlint-cli2 v0.23.2@b82a6c88… → [Updates: v0.24.0]
+    crate-ci/typos v1.50.2@512fc24f… → [Updates: v1.51.1]
+    shellcheck-py/shellcheck-py v0.11.0.1@745eface…
+    rhysd/actionlint v1.7.12@914e7df2…
+    sirwart/ripsecrets v0.1.11@7d946209…
+  .pre-commit-config.yaml (1)
+    lycheeverse/lychee 0.24.2@2bba271688c1abb1503097a064e6c3bc1d1b6a9b
+  .pre-commit-config.yaml (2)
+    lycheeverse/lychee 0.24.2
+    lycheeverse/lychee 0.24.2
+  .pre-commit-fix.yaml (1)
+    DavidAnson/markdownlint-cli2 v0.23.2@b82a6c88… → [Updates: v0.24.0]
+```
+
+Pending approval, as the dashboard listed it before any box was ticked: `prek` to
+v0.5.9 (`renovate/prek-0.x`); `hook revs` (markdownlint-cli2, typos,
+editorconfig-checker; `renovate/hook-revs`); editorconfig-checker v4
+(`renovate/major-hook-revs`); lock-file maintenance. So every update is held, as
+`:dependencyDashboardApproval` asks, and the group and major-split names are the
+configured ones.
+
+**Per-row coverage.** The dashboard lists 26 dependencies. The local extraction's 31
+are those 26 plus five it does not list: the three runner labels
+(`skipReason: invalid-version`) and the two disabled ones (`requires-python` and
+`.python-version`; the `pyenv` file is listed with nothing under it).
+
+| Inventory row | Dashboard line covering it |
+| --- | --- |
+| `hatchling==1.33.0` | pep621, `hatchling ==1.33.0` |
+| `typer>=0.27.3,<0.28` | pep621, `typer >=0.27.3,<0.28` |
+| five `==` tool pins | pep621, `coverage ==7.17.0`, `mypy ==2.4.1`, `prek ==0.5.7`, `pytest ==9.2.0`, `ruff ==0.17.3` |
+| `requires-python` | not listed: disabled by rule (manual, decision 0001) |
+| B tag `v0.3.0` | pep621, `biscuit-games-tooling v0.3.0`: the hosted app reads the `[tool.uv.sources]` tag natively, so no custom manager is needed |
+| `uv.lock` | the `lock file maintenance` pending-approval entry; the `pep621` relock is claim 12, below |
+| `.python-version` | `pyenv`, `.python-version` with no dependency: disabled by rule (manual, decision 0001) |
+| six hook `rev`s | regex, `.pre-commit-config.yaml (6)`, all six with digests |
+| lychee `rev` | regex, `lycheeverse/lychee 0.24.2@2bba2716…` |
+| `LYCHEE_VERSION=` ×2 | regex, `.pre-commit-config.yaml (2)`, `lycheeverse/lychee 0.24.2` twice |
+| `.pre-commit-fix.yaml` markdownlint-cli2 `rev` | regex, `.pre-commit-fix.yaml (1)` |
+| `actions/checkout` ×3 | github-actions, `ci.yml (2)` and `audit.yml (1)` |
+| setup-uv, cache restore, cache save | github-actions, `action.yml`: `astral-sh/setup-uv`, `actions/cache` twice |
+| setup-uv `version: '0.13.6'` | github-actions, `astral-sh/uv 0.13.6` |
+| `rust-just==1.59.0` | regex, `action.yml (1)`, `rust-just 1.59.0` |
+| `python-version` inputs, the setup action's default, the `tooling` group's `requires-python` | not extracted: manual, decision 0001 |
+| runner labels, `./.github/actions/setup` | not pins: not listed |
+
+`lycheeverse/lychee` appears exactly three times (the `rev` with digest `2bba271` and
+both `LYCHEE_VERSION=`), as checkpoint 1 required. No lychee update exists yet, so the
+"first lychee pull request moves all three" half stays open until one does.
+
+**Claim 12, the relock.** In this session, after reading the dashboard, the maintainer
+authorised approving one `pep621` update: `prek` 0.5.7 → 0.5.9, a `[dependency-groups]`
+`==` pin. The other three held entries were left alone. Only that box was ticked, by
+editing issue #4's body with `gh issue edit 4 --body-file` at 2026-10-31T06:32:48Z; the
+diff of the body was the one line
+`- [ ]` → `- [x] <!-- approve-branch=renovate/prek-0.x -->`. Renovate opened PR #5,
+`chore(deps): update dependency prek to v0.5.9` (`renovate/prek-0.x`, head `6c51650`),
+at 06:33:56Z:
+
+```text
+$ gh pr diff 5 --repo BiscuitBin/rove --name-only
+pyproject.toml
+uv.lock
+exit 0
+```
+
+The `uv.lock` change (full diff in `ai_tmp/T06/prek-pr.diff`): the `prek` package entry
+moves from `version = "0.5.7"` to `version = "0.5.9"`, with a new sdist URL and hash
+(`sha256:47bc660a…`) and all nine wheels replaced. The `[package.metadata.requires-dev]`
+`dev` specifier moves from `==0.5.7` to `==0.5.9`. No other package changes. CI on the
+head:
+
+```text
+$ gh api repos/BiscuitBin/rove/commits/6c516506c5fdb3298e822ac0a34c65cc505f3c34/check-runs --jq '.check_runs[]|select(.name=="check")|{name,conclusion,app_id:.app.id}'
+{"app_id":15368,"conclusion":"success","name":"check"}
+```
+
+The same run, `41177141412`, passed `gate (ubuntu-latest)`, `gate (macos-latest)` and
+`floor`; `audit` passed in `41177141528`. So Renovate's `pep621` manager reads
+`[dependency-groups]` (prek) and the `[tool.uv.sources]` tag (`biscuit-games-tooling
+v0.3.0` on the dashboard), and relocks `uv.lock` in the same pull request. Claim 12
+holds. PR #5 itself is a normal dependency update, and merging it is the maintainer's
+call. No tracked text outside `pyproject.toml` and `uv.lock` names `0.5.7`
+(`git grep -n '0\.5\.7' -- ':!uv.lock' ':!tickets/'` prints only `pyproject.toml:41`).
+
 ## Open points
 
 - Whether the B tag should follow B's releases automatically or stay manual: B's
@@ -340,6 +491,13 @@ only.
   decides; the default here is "held for dashboard approval", as every update is.
 - Closed: the `Justfile` hand-back (lychee's `rev` comment against `LYCHEE_VERSION`)
   landed in T06 as hand-back (b) below the review record.
-- Whether security fixes should also wait for approval
-  (`"vulnerabilityAlerts": { "dependencyDashboardApproval": true }`): the maintainer
-  decides; the configuration keeps Renovate's default, and the docs say so.
+- Closed, maintainer decision 2026-10-30: security fixes skip the approval hold.
+  The configuration keeps Renovate's `vulnerabilityAlerts` default, and the docs say so.
+- Open, maintainer (organisation setting): the Renovate installation's
+  `repository_selection` is `all`, not `BiscuitBin/rove` only, read back
+  2026-10-31T06:14:59Z. This is the one acceptance criterion without evidence, so
+  `status:` stays `open` until the maintainer narrows the installation and a read-back
+  shows `selected` with `rove` listed.
+- Open: the first lychee pull request must change all three lychee lines (the `rev`
+  and both `LYCHEE_VERSION=`). The dashboard proves all three are detected, but
+  lychee 0.24.2 has no update yet.
