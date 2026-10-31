@@ -474,15 +474,27 @@ head:
 ```text
 $ gh api repos/BiscuitBin/rove/commits/6c516506c5fdb3298e822ac0a34c65cc505f3c34/check-runs --jq '.check_runs[]|select(.name=="check")|{name,conclusion,app_id:.app.id}'
 {"app_id":15368,"conclusion":"success","name":"check"}
+exit 0
 ```
 
-The same run, `41177141412`, passed `gate (ubuntu-latest)`, `gate (macos-latest)` and
-`floor`; `audit` passed in `41177141528`. So Renovate's `pep621` manager reads
+The same run, `https://github.com/BiscuitBin/rove/actions/runs/41177141412` on head
+`6c51650`, passed `gate (ubuntu-latest)`, `gate (macos-latest)` and `floor`; `audit`
+passed in `https://github.com/BiscuitBin/rove/actions/runs/41177141528`. So Renovate's `pep621` manager reads
 `[dependency-groups]` (prek) and the `[tool.uv.sources]` tag (`biscuit-games-tooling
 v0.3.0` on the dashboard), and relocks `uv.lock` in the same pull request. Claim 12
 holds. PR #5 itself is a normal dependency update, and merging it is the maintainer's
 call. No tracked text outside `pyproject.toml` and `uv.lock` names `0.5.7`
 (`git grep -n '0\.5\.7' -- ':!uv.lock' ':!tickets/'` prints only `pyproject.toml:41`).
+
+**Checkpoint 2 review (`CONVENTIONS.md` §14, step 6).** Verdicts in
+`ai_tmp/review/T06-2/verdicts.md`: four findings, all valid, none high, three distinct.
+The open point on the installation now names the read-back that closes it (C2, B1). The
+claim-12 quote gains run URLs and its exit status: the GET was re-run with
+`echo "exit $?"` and gave the same line, then `exit 0`, logged in
+`ai_tmp/T06/pr5-check.log` (C3). C1: the row 12 Outcome cell in `tickets/CONVENTIONS.md`
+§12 lies outside Files touched. It stays as a recorded departure, because T05 created
+that column for each owning ticket to fill, §11's freeze is lifted, and the acceptance
+criterion "§12 claim 12 has an outcome" needs it.
 
 ## Open points
 
@@ -496,8 +508,12 @@ call. No tracked text outside `pyproject.toml` and `uv.lock` names `0.5.7`
 - Open, maintainer (organisation setting): the Renovate installation's
   `repository_selection` is `all`, not `BiscuitBin/rove` only, read back
   2026-10-31T06:14:59Z. This is the one acceptance criterion without evidence, so
-  `status:` stays `open` until the maintainer narrows the installation and a read-back
-  shows `selected` with `rove` listed.
+  `status:` stays `open` until the maintainer narrows the installation and a read-back,
+  quoted with date, reader and exit status, shows `repository_selection: selected`
+  (`gh api orgs/BiscuitBin/installations`) and an installation repository list whose
+  only entry is `BiscuitBin/rove` (`gh api --paginate
+  user/installations/174933380/repositories --jq '.total_count,
+  .repositories[].full_name'` printing `1` and `BiscuitBin/rove`).
 - Open: the first lychee pull request must change all three lychee lines (the `rev`
   and both `LYCHEE_VERSION=`). The dashboard proves all three are detected, but
   lychee 0.24.2 has no update yet.
