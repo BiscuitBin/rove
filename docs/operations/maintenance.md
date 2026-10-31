@@ -36,8 +36,11 @@ adopted.
 **Monthly.** Run `just check-links-online`. It is not part of the gate because it needs
 the network, so external links rot silently until someone looks.
 
-**Per shared-checkers release.** Read its changelog, move the tag, and run `just check`
-before committing: the release supplies the gate runner and both validators.
+**Per shared-checkers release.** Read its changelog, move the tag, run `just lock` and
+`just sync`, then `just install-allium`, then `just check` before committing: the release
+supplies the gate runner, both validators, and the allium installer and runner, and the
+allium pin rides the tag, so `just check` is red at its hook gate until the new binary
+is installed ([Maintain dependencies](../how-to/maintain-dependencies.md#moving-the-allium-binary)).
 
 Nothing here moves on its own: Renovate proposes, and a person approves and merges.
 

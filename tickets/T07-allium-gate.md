@@ -81,6 +81,7 @@ records and `AGENTS.md` describe the specification workflow.
 | `docs/manifest.yml`, `docs/README.md`, `docs/decisions/README.md` | shared, own lines | the five new pages registered and reachable |
 | `docs/project/repository-map.md`, `docs/project/terminology.md`, `docs/reference/commands.md`, `docs/reference/quality-gates.md`, `docs/reference/agent-contract.md`, `docs/reference/configuration.md`, `docs/how-to/develop-locally.md`, `docs/how-to/maintain-dependencies.md`, `docs/operations/troubleshooting.md`, `docs/explanation/security-model.md`, `docs/decisions/0004-hook-runner-and-checkers.md`, `docs/tutorials/first-change.md` | shared, own lines | the gate count, the skill count, the network list, the new paths |
 | `README.md`, `CHANGELOG.md` | shared, own lines | one sentence; one `Unreleased` line |
+| `docs/operations/maintenance.md` | shared, own lines | the per-release routine installs the binary (found after review 4) |
 | `tickets/CONVENTIONS.md` | shared, own lines | §0 source P; §4 and §7 notes that T07 raises the counts |
 | `tickets/README.md`, `tickets/T07-allium-gate.md` | ticket | index row, graph, this ticket |
 
@@ -307,8 +308,10 @@ required phrases was confirmed present in the text outside every `<important if>
 ### Adversarial review 1 (gate wiring): `12db5fe` with uncommitted changes
 
 Harness and model: Codex (`codex-cli 0.165.0`), `codex exec -m gpt-6-astra -s read-only`,
-two reviewers in parallel (conformance, breakage), each run by a subagent; triage by a
-third subagent; raw files in `ai_tmp/review/T07-1/`. Both reviewers could run
+its `-m`, `-s read-only`, `-C` and `-o` flags confirmed with `codex exec --help` on the
+day, and `gpt-6-astra` present in the user's Codex configuration; two reviewers in
+parallel (conformance, breakage), each run by a subagent; triage by a third subagent;
+raw files in `ai_tmp/review/T07-1/`. Both reviewers could run
 `just plan-spec rovo` (exit 0) but not the `uv run` recipes, which exited 2 inside the
 read-only sandbox on uv's cache lock; their fresh-clone and CI conclusions are source
 inspection.
@@ -427,6 +430,33 @@ gates on both runners) exists only after the push, which is separately authorise
 goes in the closing pull request's notes. The rebase onto `origin/main` and the re-run
 `tickets/README.md` step 6 asks for happen at the push stop, since `git fetch` reaches
 the network.
+
+### After review 4: `6b3c471`, a follow-up commit
+
+A self-check of the pages outside Files touched (`rg -i 'allium|docs/specs|specification'`
+over `purpose-and-scope.md`, `install-and-run.md`, `test-and-debug.md`,
+`quality-philosophy.md`, `architecture.md`, `testing.md`, `maintenance.md`,
+`documentation-contract.md`, `cli.md`, `api.md` and `SECURITY.md`) found no mention, and
+one contradiction by omission: `docs/operations/maintenance.md`'s per-release routine
+said to move the shared checkers' tag and run `just check`, which is now red at the hook
+gate until `just install-allium` installs the binary the new tag pins. The routine now
+says so and points at the how-to. Not a review finding, so no further round. At
+`6b3c471` with uncommitted changes:
+
+```text
+just check-docs
+Validated 37 pages and 37 canonical topics.
+exit 0
+
+just check
+All checks passed and the worktree is unchanged.
+exit 0
+```
+
+One harness note for the next ticket: `codex exec -o` writes the reviewer's last message
+to the file, so a reviewer told to write its findings to that same path has its body
+overwritten by its closing summary (review 2, breakage); give `-o` a different name or
+tell the reviewer not to write the file.
 
 ## Open points
 
