@@ -60,7 +60,8 @@ use "./convert.allium" as convert
 -- The resolved configuration of one mirror: built-in defaults, then
 -- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
 -- layers winning key by key. Invalid when the file is unreadable, a key is
--- unknown or a value is bad; problems names every bad key path.
+-- unknown or a value is bad, a profile name the catalogue lacks included;
+-- problems names every bad key path.
 value Configuration {
     valid: Boolean
     problems: List<String>
@@ -463,12 +464,14 @@ rule StartSync {
     let owned = options.owner_test?.hosts ?? {}
     let run_id = next_run_id(target)
     let kind = if target.is_populated: update else: initial
-    let scope = scope_of(settings, target.profile)
+    let profile = profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name)
+    let scope = scope_of(settings, profile)
     let targets = resolve_targets(target, scope, options.urls, options.paths)
     ensures:
+        target.profile = profile
         target.scope = scope
         target.recorded_root_url = settings.root_url
-        target.processing_signature = signature_of(scope, target.profile)
+        target.processing_signature = signature_of(scope, profile)
         CrawlReport.created(
             mirror: target, operator: operator, run_id: run_id, kind: kind, mode: mode,
             report_status: finished, exit_code: ok, error: null, refusal_reason: null,
@@ -494,8 +497,13 @@ rule StartSync {
         )
 
     @guidance
-        -- scope_of builds the one CrawlScope from the configuration and
-        -- the profile's locale codes; allowed_hosts and path_prefixes
+        -- The profile is the one the configuration names, resolved on
+        -- every sync, so a changed profile_name changes extraction, the
+        -- scope's locale codes and the processing signature together; a
+        -- valid configuration names a catalogue profile, so profile_for is
+        -- never null here. scope_of builds the one CrawlScope from the
+        -- configuration, its root and start URLs included, and the
+        -- profile's locale codes; allowed_hosts and path_prefixes
         -- default to the first start URL's host and directory; the
         -- profile's meaningful query parameters apply when the
         -- configuration names none. effective_policy starts from the
@@ -648,7 +656,7 @@ rule RankAndWriteReport {
     requires: exists report and report.status = open
     let target_skipped = run.targets.any(t => t in report.skipped_urls)
     let code = most_severe([
-        if report.has_failures or run.status = interrupted or run.budget_stopped: partial else: ok,
+        if report.has_failures or report.error != null or run.status = interrupted or run.budget_stopped: partial else: ok,
         if target_skipped: partial else: ok,
         if run.is_owner_testing and run.unresolved_urls.count > 0: partial else: ok,
         if run.has_tripped_host: blocked else: ok,
@@ -699,6 +707,25 @@ rule RecordCrash {
     ensures:
         run.error = error
         run.interrupt_requested = true
+}
+
+-- A crash after the run has ended, in finalisation or while the report is
+-- assembled, has no running run to interrupt: the open report records the
+-- error and is written as it stands, so every sync still leaves a report
+-- and exits partial.
+rule RecordCrashAfterRun {
+    when: RuntimeFails(operator, out_dir, error)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target
+    requires: not exists crawl/Run{target: target, status: running}
+    let report = CrawlReport{mirror: target, status: open}
+    requires: exists report and report.run_id != null
+    let run = crawl/Run{target: target, id: report.run_id}
+    requires: exists run
+    ensures:
+        report.error = error
+        report.report_status = interrupted
+        ReportReady(run: run)
 }
 
 ------------------------------------------------------------

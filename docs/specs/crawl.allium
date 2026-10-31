@@ -44,7 +44,7 @@
 --   410. docs/project/terminology.md is the glossary.
 --
 -- Black box functions (pure): hostname_of, origin_of, normalise_url,
--- url_text, seeds, product_root, stale_pages, scope_hash, known_page (as
+-- url_text, host_origin, product_root, stale_pages, scope_hash, known_page (as
 -- mirror defines it), fetch_resource, fetch_or_render, is_sitemap_document,
 -- sitemap_is_index, sitemap_entries, resolve_url, well_known_sitemaps,
 -- sitemap_admitted, llms_txt_url, llms_txt_targets, robots_allows,
@@ -143,7 +143,8 @@ value SiteResponse {
     error: String?                      -- transport error, when no response arrived
     source_url: String                  -- the URL the response came from, after redirects
     redirect_hops: List<String>         -- every URL left behind by a followed redirect
-    redirect_location: String?          -- an unfollowed redirect's target: out of scope, looping, or over the limit
+    redirect_location: String?          -- an unfollowed redirect's target
+    redirect_stop: RedirectStop?        -- why it was not followed; set exactly when redirect_location is
     markup: String
     content_type: String?
     retry_after: Duration?
@@ -155,6 +156,7 @@ value SiteResponse {
     ok: error = null and status >= 200 and status < 300
     not_modified: status = 304
     unfollowed_redirect: redirect_location != null
+    redirected_out: unfollowed_redirect and redirect_stop = out_of_scope
     absent: status in {404, 410}
     access_refused: status in {401, 403, 429}
     server_error: status >= 500
@@ -193,6 +195,10 @@ enum BlockKind { none | hard | challenge | soft }
 
 -- Why an unblocked HTTP answer still needs a browser.
 enum RenderReason { spa_shell | noscript_needs_js | main_selector_absent | thin_text }
+
+-- Why a redirect was not followed. Only out_of_scope says anything about
+-- the page; a loop or the hop limit is a fetch failure.
+enum RedirectStop { out_of_scope | loop | hop_limit }
 
 enum RobotsMode { respect | ignore }
 
@@ -253,7 +259,7 @@ entity Run {
         else if mode = owner_testing and policy.protection_escalation and stealth_mode = on: [http, browser, stealth]
         else: [http, browser]
     highest_tier: usable_tiers.last
-    page_budget_left: fetch_attempts < config.max_pages
+    page_budget_remaining: max(0, config.max_pages - fetch_attempts)   -- rows a batch may still admit beyond its targets
     byte_budget_left: bytes_fetched < config.max_bytes
 
     invariant OwnerRunHasExplicitAuthority {
@@ -371,8 +377,8 @@ entity TierHint {
     reprobe_due(run_id): run_id - learned_in_run >= config.reprobe_every_syncs
 }
 
--- The robots stance of one origin for one run, fetched once per origin on
--- first contact, under the host's limiter.
+-- The robots stance of one origin for one run, fetched once per host on
+-- first contact at the host's origin, under the host's limiter.
 entity RobotsPolicy {
     run: Run
     origin: String                      -- scheme://host[:port]
@@ -391,6 +397,7 @@ entity RobotsPolicy {
 entity Host {
     run: Run
     name: String                        -- host name, lower-cased, port dropped
+    origin: String                      -- scheme://host[:port] of the URL that opened the host; where its robots.txt is read
     rate: Decimal?                      -- requests per second; null means the control is disabled
     crawl_delay: Duration               -- the robots Crawl-delay floor, zero when none
     paused_until: Timestamp?
@@ -478,9 +485,16 @@ entity FetchAttempt {
     verdict: BlockVerdict               -- classified when the attempt is created
     render_reason: RenderReason?        -- why an unblocked http answer still needs a browser
 
+    -- A Retry-After past the cap retires the host, whatever try this is.
+    retires_host:
+        tier = http and response.retryable
+        and response.retry_after != null
+        and walk.host.run.policy.honor_retry_after
+        and response.retry_after > walk.host.run.policy.retry_after_cap
     retryable:
         tier = http and response.retryable
         and try < config.http_attempts
+        and not retires_host
     challenges: OwnerChallenge with attempt = this
     unsuccessful_challenge: challenges.any(c => c.status in {abandoned, timed_out})
     failed_outright: response.error != null or response.status = 0
@@ -608,10 +622,12 @@ rule AttachFrontier {
     ensures: FrontierAttached(run: run)
 }
 
--- Every run re-pends the row of every written page, returns interrupted
--- rows to pending, and retries every failed, blocked and skipped row;
--- there is no resume flag. Removed pages are rechecked last. A targeted
--- run re-pends only its targets.
+-- Every run re-pends the row of every written page whose source URL the
+-- scope in force admits, returns interrupted rows to pending, and retries
+-- every failed, blocked and skipped row the scope admits; there is no
+-- resume flag. Removed pages in scope are rechecked last. A page outside
+-- the scope is left for finalisation to retire, unfetched. A targeted run
+-- re-pends only its targets.
 rule PrepareRun {
     when: FrontierAttached(run)
     requires: run.status = running
@@ -645,7 +661,7 @@ rule PrepareRun {
                         priority: config.start_priority, attempts: 0, status: pending
                     )
         else:
-            for p in run.target.written_pages:
+            for p in run.target.written_pages where run.target.scope.within_bounds(source_url):
                 let recheck = FrontierEntry{frontier: frontier, identity: p.identity}
                 if exists recheck:
                     recheck.status = pending
@@ -655,7 +671,7 @@ rule PrepareRun {
                         discovered_from: null, sitemap_lastmod: p.sitemap_lastmod,
                         priority: config.recheck_priority, attempts: 0, status: pending
                     )
-            for r in run.target.removed_pages:
+            for r in run.target.removed_pages where run.target.scope.within_bounds(identity):
                 let gone_row = FrontierEntry{frontier: frontier, identity: r.identity}
                 if exists gone_row:
                     gone_row.status = pending
@@ -666,7 +682,7 @@ rule PrepareRun {
                         discovered_from: null, sitemap_lastmod: null,
                         priority: config.deferred_priority, attempts: 0, status: pending
                     )
-            for e in frontier.retry_entries:
+            for e in frontier.retry_entries where run.target.scope.within_bounds(identity):
                 e.status = pending
         DiscoveryRequested(run: run)
 
@@ -694,22 +710,24 @@ rule Discover {
     ensures:
         if run.is_owner_testing or run.targeted:
             for t in run.targets:
-                HostOpened(run: run, name: hostname_of(t))
+                HostOpened(run: run, name: hostname_of(t), origin: origin_of(t))
         else:
-            for url in seeds(run.target):
+            for url in run.target.scope.seeds:
                 UrlDiscovered(
                     run: run, url: scope.identity_of(url), depth: 0,
                     via: start, priority: config.start_priority
                 )
             for host_name in scope.allowed_hosts:
-                HostOpened(run: run, name: host_name)
+                HostOpened(run: run, name: host_name, origin: host_origin(scope, host_name))
                 SitemapsRequested(run: run, name: host_name)
                 LlmsTxtRequested(run: run, name: host_name)
         FrontierReady(run: run)
 
     @guidance
-        -- seeds are the start URLs, else the root URL; start URLs are
-        -- always in scope. Hosts are visited in sorted order. A targeted
+        -- The scope's seeds are the start URLs, else the root URL; a seed
+        -- is always in scope. host_origin is the origin of the first seed
+        -- on that host, else https on the bare name. Hosts are visited in
+        -- sorted order. A targeted
         -- run opens only its targets' hosts, so their robots.txt is still
         -- read, and walks no seeds, sitemaps or llms.txt; an owner-testing
         -- run likewise. Every host is opened before any sitemap, llms.txt
@@ -717,13 +735,13 @@ rule Discover {
 }
 
 rule OpenHost {
-    when: HostOpened(run, name)
+    when: HostOpened(run, name, origin)
     requires: run.status = running
     requires: not exists Host{run: run, name: name}
     let policy = run.policy
     ensures:
         Host.created(
-            run: run, name: name, rate: policy.rate_per_host, crawl_delay: 0.seconds,
+            run: run, name: name, origin: origin, rate: policy.rate_per_host, crawl_delay: 0.seconds,
             paused_until: null, recent_text_lengths: [], tiers_used: {},
             fetched: 0, blocked: 0, render_escalations: 0, retry_after_honored: 0,
             sitemap_children_read: 0, sitemap_entries_admitted: 0
@@ -736,26 +754,32 @@ rule OpenHost {
         RobotsRequested(run: run, name: name)
 }
 
--- robots.txt is fetched once per origin on first contact, through the
--- host's limiter, even under robots = ignore because its Sitemap lines
--- still seed discovery. Default stated here (veto at review): an
--- unreachable or refused robots.txt is disallow-all for that host, is
--- reported, and makes the run partial.
+-- robots.txt is fetched once per host on first contact, at the origin that
+-- opened the host, through the host's limiter, even under robots = ignore
+-- because its Sitemap lines still seed discovery. Default stated here
+-- (veto at review): an unreachable or refused robots.txt is disallow-all
+-- for that host, is reported, and makes the run partial.
 rule FetchRobots {
     when: RobotsRequested(run, name)
     requires: run.status = running
     let host = Host{run: run, name: name}
     requires: exists host
-    requires: not exists RobotsPolicy{run: run, origin: origin_of(name)}
-    let response = fetch_resource(robots_url(name), null, null, run, host)
-    ensures: RobotsAnswered(run: run, host: host, response: response)
+    requires: not exists RobotsPolicy{run: run, origin: host.origin}
+    let response = fetch_resource(robots_url(host.origin), null, null, run, host)
+    ensures:
+        run.bytes_fetched = run.bytes_fetched + response.size
+        RobotsAnswered(run: run, host: host, response: response)
 
     @guidance
-        -- fetch_resource is the http tier only, under the host's rate,
-        -- concurrency, pause and Retry-After, with retries, and follows at
-        -- most discovery_max_redirects redirects within the allowed hosts
+        -- A host is one name: two origins that share it, apart by scheme
+        -- or port, share its politeness state and its robots policy, which
+        -- is read at the origin that opened the host. fetch_resource is the
+        -- http tier only, under the host's rate, concurrency, pause and
+        -- Retry-After, with retries, and follows at most
+        -- discovery_max_redirects redirects within the allowed hosts
         -- without revisiting a URL; anything else comes back as an error.
-        -- It never classifies blocks and never feeds the breaker.
+        -- Its size covers every byte its retries received. It never
+        -- classifies blocks and never feeds the breaker.
 }
 
 rule AdoptRobotsRules {
@@ -763,7 +787,7 @@ rule AdoptRobotsRules {
     requires: response.ok
     ensures:
         RobotsPolicy.created(
-            run: run, origin: origin_of(host.name), stance: rules,
+            run: run, origin: host.origin, stance: rules,
             crawl_delay: robots_crawl_delay(response), declared_sitemaps: robots_sitemaps(response, host.name),
             problem: null
         )
@@ -784,8 +808,8 @@ rule DenyAllWhenRobotsRefused {
     requires: not response.ok
     requires: response.access_refused or response.server_error
     ensures:
-        RobotsPolicy.created(run: run, origin: origin_of(host.name), stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_refused)
-        DiscoveryFailed(run: run, url: robots_url(host.name), problem: robots_refused)
+        RobotsPolicy.created(run: run, origin: host.origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_refused)
+        DiscoveryFailed(run: run, url: robots_url(host.origin), problem: robots_refused)
 }
 
 rule DenyAllWhenRobotsUnreachable {
@@ -793,15 +817,15 @@ rule DenyAllWhenRobotsUnreachable {
     requires: not response.ok
     requires: response.error != null
     ensures:
-        RobotsPolicy.created(run: run, origin: origin_of(host.name), stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_unreachable)
-        DiscoveryFailed(run: run, url: robots_url(host.name), problem: robots_unreachable)
+        RobotsPolicy.created(run: run, origin: host.origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_unreachable)
+        DiscoveryFailed(run: run, url: robots_url(host.origin), problem: robots_unreachable)
 }
 
 rule AllowAllWhenRobotsAbsent {
     when: RobotsAnswered(run, host, response)
     requires: not response.ok
     requires: response.error = null and not response.access_refused and not response.server_error
-    ensures: RobotsPolicy.created(run: run, origin: origin_of(host.name), stance: allow_all, crawl_delay: null, declared_sitemaps: [], problem: null)
+    ensures: RobotsPolicy.created(run: run, origin: host.origin, stance: allow_all, crawl_delay: null, declared_sitemaps: [], problem: null)
 }
 
 -- Sitemaps named by robots.txt are declared; /sitemap.xml and
@@ -811,7 +835,9 @@ rule AllowAllWhenRobotsAbsent {
 rule QueueSitemaps {
     when: SitemapsRequested(run, name)
     requires: run.status = running
-    let policy = RobotsPolicy{run: run, origin: origin_of(name)}
+    let host = Host{run: run, name: name}
+    requires: exists host
+    let policy = RobotsPolicy{run: run, origin: host.origin}
     let declared = policy?.declared_sitemaps ?? []
     ensures:
         for url in declared:
@@ -836,7 +862,9 @@ rule FetchSitemap {
     let frontier = Frontier{mirror: run.target}
     let snapshot = SitemapSnapshot{frontier: frontier, url: url}
     let response = fetch_resource(url, snapshot?.etag, snapshot?.last_modified, run, host)
-    ensures: SitemapAnswered(run: run, host: host, url: url, declared: declared, response: response)
+    ensures:
+        run.bytes_fetched = run.bytes_fetched + response.size
+        SitemapAnswered(run: run, host: host, url: url, declared: declared, response: response)
 
     @guidance
         -- Each sitemap is read at most once per run. sitemap_admitted
@@ -928,6 +956,7 @@ rule ReadLlmsTxt {
     let scope = run.target.scope
     let response = fetch_resource(llms_txt_url(name), null, null, run, host)
     ensures:
+        run.bytes_fetched = run.bytes_fetched + response.size
         if response.ok:
             for url in llms_txt_targets(response, llms_txt_url(name)):
                 UrlObserved(run: run, url: scope.identity_of(url), via: llms_txt)
@@ -1016,21 +1045,24 @@ rule BeginCrawl {
 ------------------------------------------------------------
 
 -- Default stated here (veto at review): max_pages counts fetch attempts per
--- run; a budget stop is reported and makes the run partial;
--- operator-named targets are exempt; every byte received counts toward
--- max_bytes.
+-- run and admits rows while attempts remain; a walk admitted under the
+-- budget finishes its retries and its tiers, so the count may pass
+-- max_pages by the attempts of walks in flight and never by a new row; a
+-- budget stop is reported and makes the run partial; operator-named
+-- targets are exempt; every byte received counts toward max_bytes.
 rule SelectBatch {
     when: BatchRequested(run)
     requires: run.status = running and run.crawling
     let frontier = Frontier{mirror: run.target}
+    let scope = run.target.scope
     let pending_rows =
         if run.is_owner_testing: frontier.pending_entries where identity in run.active_urls
         else if run.targeted: frontier.pending_entries where identity in run.targets
-        else: frontier.pending_entries
-    let concurrency = (run.policy.concurrency_per_host ?? max(1, pending_rows.count)) * max(1, run.target.scope.allowed_hosts.count)
-    let lookahead = next_pending(pending_rows, concurrency * config.batch_lookahead)
-    let open_rows = lookahead where not host_tripped(run, host_name)
-    let chosen = choose_batch(open_rows, run.page_budget_left, run.targets, concurrency)
+        else: frontier.pending_entries where scope.within_bounds(identity) or exists known_page(run.target, identity)
+    let open_rows = pending_rows where not host_tripped(run, host_name)
+    let concurrency = (run.policy.concurrency_per_host ?? max(1, open_rows.count)) * max(1, scope.allowed_hosts.count)
+    let lookahead = next_pending(open_rows, concurrency * config.batch_lookahead)
+    let chosen = choose_batch(lookahead, run.page_budget_remaining, run.targets, concurrency)
     ensures:
         if not run.byte_budget_left:
             run.budget_stopped = true
@@ -1054,10 +1086,18 @@ rule SelectBatch {
                 e.status = in_progress
 
     @guidance
-        -- next_pending orders rows non-deferred first, then shallowest,
-        -- then highest priority, then discovery order. choose_batch takes
-        -- at most concurrency rows: a target is always taken; any other
-        -- row only while the page budget is left. When the first chosen row
+        -- A full standard run selects a persisted row only while the scope
+        -- in force admits its identity, or while a written page holds it,
+        -- so a narrowed scope fetches nothing it will retire; a row left
+        -- outside stays pending for a run whose scope admits it. Rows on a
+        -- tripped host are set aside before the lookahead is taken, so a
+        -- retired host never hides a healthy one, and they are skipped
+        -- only when no other row is open. next_pending orders rows
+        -- non-deferred first, then shallowest, then highest priority, then
+        -- discovery order. choose_batch takes at most concurrency rows: a
+        -- target is always taken; any other row only while
+        -- page_budget_remaining, counted down row by row, is above zero.
+        -- When the first chosen row
         -- is at depth 0, only depth-0 rows run in that batch, so start
         -- pages' links queue first. The batch runs concurrently. A
         -- targeted run selects only its targets' rows; every other pending
@@ -1103,7 +1143,7 @@ rule OpenHostForEntry {
     requires: exists run
     requires: not exists Host{run: run, name: entry.host_name}
     ensures:
-        HostOpened(run: run, name: entry.host_name)
+        HostOpened(run: run, name: entry.host_name, origin: origin_of(entry.identity))
         EntryHostReady(run: run, entry: entry)
 
     @guidance
@@ -1174,6 +1214,7 @@ rule AttemptTier {
     let verdict = classify_block(response, if walk.host.has_text_baseline: walk.host.median_text else: null)
     ensures:
         run.fetch_attempts = if try > 1 or tier != walk.tiers.first: run.fetch_attempts + 1 else: run.fetch_attempts
+        run.bytes_fetched = run.bytes_fetched + response.size
         FetchAttempt.created(
             walk: walk, tier: tier, try: try, response: response, verdict: verdict,
             render_reason: if tier = http and response.ok and verdict.kind = none: render_reason_of(response) else: null
@@ -1196,7 +1237,10 @@ rule AttemptTier {
         -- followed, at most discovery_max_redirects hops without a revisit,
         -- and recorded in redirect_hops; an out-of-scope, looping or
         -- over-limit redirect is not followed and comes back as
-        -- redirect_location. Enabled controls wait for a free concurrency
+        -- redirect_location with its redirect_stop; only an out-of-scope
+        -- stop says the page moved away. Every response counts toward
+        -- max_bytes the moment it arrives, retries and discarded renders
+        -- included. Enabled controls wait for a free concurrency
         -- slot, any host pause and a rate token. A render waits for the
         -- configured load state, capped at render_max_wait; a navigation
         -- with no response is an error, never a success. Cookies a browser
@@ -1280,7 +1324,6 @@ rule HttpRetry {
     requires: attempt.walk.status = walking and attempt.walk.host.run.status = running
     let host = attempt.walk.host
     let policy = host.run.policy
-    requires: attempt.response.retry_after = null or not policy.honor_retry_after or attempt.response.retry_after <= policy.retry_after_cap
     let retry_until = now + retry_wait(attempt.try, attempt.response.retry_after, policy)
     ensures:
         host.paused_until = later_of(host.paused_until, retry_until)
@@ -1296,15 +1339,14 @@ rule HttpRetry {
         -- request timeouts stay finite.
 }
 
--- A Retry-After beyond the cap retires the host for the run: the breaker
--- trips without a pause, and the attempt settles as it stands.
+-- A Retry-After beyond the cap retires the host for the run, on any try,
+-- the last included: the breaker trips without a pause, and the attempt
+-- settles as it stands.
 rule RetireHostOnLongRetryAfter {
     when: AttemptReady(attempt)
-    requires: attempt.retryable
+    requires: attempt.retires_host
     requires: attempt.walk.status = walking and attempt.walk.host.run.status = running
     let host = attempt.walk.host
-    let policy = host.run.policy
-    requires: attempt.response.retry_after != null and policy.honor_retry_after and attempt.response.retry_after > policy.retry_after_cap
     let breaker = host.breaker
     ensures:
         if exists breaker and breaker.status = watching:
@@ -1330,7 +1372,7 @@ rule Escalate {
     when: AttemptReady(attempt)
     let walk = attempt.walk
     requires: walk.status = walking and walk.host.run.status = running
-    requires: not attempt.retryable
+    requires: not attempt.retryable and not attempt.retires_host
     requires: attempt.wants_escalation
     requires: next_tier(walk.tiers, attempt.tier) != null
     requires: not render_added_nothing(walk.soft_suspect, attempt)
@@ -1343,7 +1385,7 @@ rule SettleWalk {
     when: AttemptReady(attempt)
     let walk = attempt.walk
     requires: walk.status = walking and walk.host.run.status = running
-    requires: not attempt.retryable
+    requires: not attempt.retryable and not attempt.retires_host
     requires:
         not attempt.wants_escalation
         or next_tier(walk.tiers, attempt.tier) = null
@@ -1387,10 +1429,13 @@ rule FeedBreaker {
             host.recent_text_lengths = last_n(append(host.recent_text_lengths, walk.standing.response.main_text), config.host_text_history)
 }
 
+-- Only a tier that stood is remembered: a render that failed and fell back
+-- to its http result teaches nothing.
 rule RememberRenderTier {
     when: walk: LadderWalk.status transitions_to settled
     requires: walk.status = settled
-    requires: walk.escalated and walk.standing.response.ok and walk.standing.verdict.kind = none
+    requires: walk.escalated and walk.standing.tier != http
+    requires: walk.standing.response.ok and walk.standing.verdict.kind = none
     requires: first_render_reason(walk.attempts) in {spa_shell, noscript_needs_js}
     let run = walk.host.run
     let frontier = Frontier{mirror: run.target}
@@ -1457,8 +1502,7 @@ rule BreakerTrips {
 -- What a settled fetch becomes
 ------------------------------------------------------------
 
--- Branch order is evaluation order. Every response counts toward
--- max_bytes, whatever its status. Default stated here (veto at review): a
+-- Branch order is evaluation order. Default stated here (veto at review): a
 -- hard or challenge verdict is a blocked outcome, reported with its URL,
 -- signature and tier; a soft verdict converts the page with the flag
 -- soft_block_suspected.
@@ -1476,7 +1520,6 @@ rule DisposeFetch {
         and response.redirect_hops.count = 0
     requires: entry.status = in_progress
     ensures:
-        run.bytes_fetched = run.bytes_fetched + response.size
         if attempt.failed_outright:
             EntryFailed(run: run, entry: entry, error: response.error ?? "no response", attempts: attempt.try)
         else if response.not_modified and exists known:
@@ -1501,7 +1544,7 @@ rule DisposeFetch {
             walk.host.blocked = walk.host.blocked + 1
             walk.host.fetched = walk.host.fetched + 1
             UrlBlocked(run: run, url: entry.identity, status: response.status, signature: attempt.verdict.signature, tier: attempt.tier)
-        else if response.unfollowed_redirect and exists known:
+        else if response.redirected_out and exists known:
             entry.status = done
             mirror/CandidateDelivered(
                 run: run, mirror: run.target, requested_identity: entry.identity,
@@ -1511,7 +1554,12 @@ rule DisposeFetch {
                 sitemap_lastmod: entry.sitemap_lastmod, raw_digest: response.raw_digest
             )
         else if response.unfollowed_redirect:
-            EntryFailed(run: run, entry: entry, error: "redirected out of scope", attempts: attempt.try)
+            EntryFailed(
+                run: run, entry: entry, attempts: attempt.try,
+                error: if response.redirect_stop = loop: "redirect loop"
+                    else if response.redirect_stop = hop_limit: "too many redirects"
+                    else: "redirected out of scope"
+            )
         else if not response.ok:
             EntryFailed(run: run, entry: entry, error: status_text(response), attempts: attempt.try)
         else:
@@ -1532,6 +1580,8 @@ rule DisposeFetch {
 
     @guidance
         -- A 304 for a URL with no stored page falls through to failed. A
+        -- redirect loop or an over-limit chain fails the entry and never
+        -- retires its page, since nothing says the target left the scope. A
         -- target is always reconverted, even when its raw HTML is
         -- unchanged, and so is a response that arrived through a redirect,
         -- so a move is never mistaken for an unchanged page; the mirror
@@ -1758,7 +1808,7 @@ invariant LearnedTierIsNeverHttp {
 
 invariant HostRateNeverRises {
     for h in Hosts:
-        h.rate != null implies h.rate <= config.rate_per_host
+        h.rate != null implies h.run.policy.rate_per_host != null and h.rate <= h.run.policy.rate_per_host
 }
 
 invariant InteractiveChallengeIsOwnerOnly {
@@ -1797,9 +1847,10 @@ surface SyncControl {
         -- row is back to pending.
 
     @guarantee NoResume
-        -- There is no resume flag: every run re-checks every written page
-        -- conditionally and retries every failed, blocked and skipped row;
-        -- an interrupted run's in-progress rows return to pending.
+        -- There is no resume flag: every run re-checks, conditionally,
+        -- every written page the scope in force admits, and retries every
+        -- failed, blocked and skipped row it admits; an interrupted run's
+        -- in-progress rows return to pending.
 
     @guarantee EnginesRefusedBeforeRequests
         -- The root refuses a configured tier whose engine is not installed

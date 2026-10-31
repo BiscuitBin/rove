@@ -80,8 +80,11 @@ external entity SyncRun {
 -- link classification alike, so a link is uncrawled exactly when the crawl
 -- would fetch its target. The root builds it from the resolved
 -- configuration and the profile at run start; start URLs are always in
--- scope and define the default hosts and prefixes.
+-- scope and define the default hosts and prefixes. It carries the root and
+-- start URLs so that the crawl seeds discovery from the scope it was given.
 value CrawlScope {
+    root_url: String?                   -- the configured root URL, when one is set
+    start_urls: List<String>            -- the configured start URLs
     allowed_hosts: Set<String>          -- host names, lower-cased, port dropped
     path_prefixes: List<String>
     include: List<String>               -- glob, or regex when prefixed re:
@@ -106,16 +109,22 @@ value CrawlScope {
         and first_path_segment(identity_of(url)) in locale_codes
         and first_path_segment(identity_of(url)) != locale
 
+    -- The URLs discovery starts from: the start URLs, else the root URL.
+    seeds: if start_urls.count > 0: start_urls else if root_url != null: [root_url] else: []
+
+    is_seed(url): seeds.any(s => identity_of(s) = identity_of(url))
+
     -- In bounds without regard to depth: the test path assignment and link
     -- classification use. Patterns match the identity, not the raw URL; a
-    -- malformed URL is out of bounds.
+    -- malformed URL is out of bounds. A seed is always in bounds.
     within_bounds(url):
-        scheme_of(identity_of(url)) in {"http", "https"}
-        and host_allowed(url)
-        and path_prefixes.any(p => starts_with(path_of(identity_of(url)), p))
-        and not exclude.any(p => pattern_matches(identity_of(url), p))
-        and (include.count = 0 or include.any(p => pattern_matches(identity_of(url), p)))
-        and not foreign_locale(url)
+        is_seed(url)
+        or (scheme_of(identity_of(url)) in {"http", "https"}
+            and host_allowed(url)
+            and path_prefixes.any(p => starts_with(path_of(identity_of(url)), p))
+            and not exclude.any(p => pattern_matches(identity_of(url), p))
+            and (include.count = 0 or include.any(p => pattern_matches(identity_of(url), p)))
+            and not foreign_locale(url))
 
     allows(url, depth): within_bounds(url) and depth >= 0 and depth <= max_depth
 
@@ -519,16 +528,30 @@ rule RejectDuplicateCandidate {
     let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
     let target = Page{mirror: candidate.mirror, identity: identity}
     requires: exists target and target.status = written and target.last_stored_run = candidate.run_id
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    let scope = candidate.mirror.scope
     ensures:
+        if exists previous and previous != target:
+            PageRetired(page: previous, reason: merged)
+        for hop in candidate.redirect_hops:
+            if scope.identity_of(hop) != target.identity:
+                AliasRecorded(mirror: candidate.mirror, url: scope.identity_of(hop), page: target)
+        if scope.identity_of(candidate.source_url) != target.identity:
+            AliasRecorded(mirror: candidate.mirror, url: scope.identity_of(candidate.source_url), page: target)
+        if candidate.requested_identity != target.identity:
+            AliasRecorded(mirror: candidate.mirror, url: candidate.requested_identity, page: target)
         candidate.status = duplicate
         CandidateDuplicate(candidate: candidate, page: target)
 
     @guidance
         -- Two requested URLs resolved to one identity in the same run (a
         -- redirect to a page already stored, or a canonical already
-        -- honoured). The first store stands; the requested URL still
-        -- becomes an alias through the first candidate's redirect hops
-        -- when it was one of them, and the link index cites the identity.
+        -- honoured). The first store's content stands; this candidate's
+        -- requested URL, redirect hops and source URL still become aliases
+        -- of the stored page, and a written page the requested URL held
+        -- is merged into it, exactly as a store would have done, so the
+        -- order in which the two URLs were fetched never changes the
+        -- mirror.
 }
 
 rule RewriteKnownPage {
@@ -568,10 +591,13 @@ rule MovePage {
     requires: not exists target or target.status = removed
     let old_path = previous.path
     let new_path = assign_path(candidate.mirror, identity)
+    let stale = Alias{mirror: candidate.mirror, url: identity}
     ensures:
         if exists target:
             ArchivedCopyDeleted(mirror: candidate.mirror, path: target.path)
             not exists target
+        if exists stale:
+            not exists stale
         previous.identity = identity
         previous.previous_digest = previous.content_digest
         if new_path != old_path:
@@ -582,8 +608,9 @@ rule MovePage {
 
     @guidance
         -- A removed record already holding the new identity is replaced:
-        -- the live page supersedes it and its archived copy is deleted.
-        -- assign_path strips the scope prefix, names a directory URL
+        -- the live page supersedes it and its archived copy is deleted. An
+        -- alias the new identity held is dropped, since a page's identity
+        -- is never an alias. assign_path strips the scope prefix, names a directory URL
         -- "index", drops .html, .htm and .aspx, appends the version label
         -- the profile maps, keeps [A-Za-z0-9._-] in each segment and
         -- replaces the rest with "-", avoids reserved device names, and
@@ -701,8 +728,10 @@ rule RefreshPage {
         for l in page.outbound_links:
             not exists l
         for hop in candidate.redirect_hops:
-            if hop != page.identity:
-                AliasRecorded(mirror: candidate.mirror, url: hop, page: page)
+            if candidate.mirror.scope.identity_of(hop) != page.identity:
+                AliasRecorded(mirror: candidate.mirror, url: candidate.mirror.scope.identity_of(hop), page: page)
+        if candidate.mirror.scope.identity_of(candidate.source_url) != page.identity:
+            AliasRecorded(mirror: candidate.mirror, url: candidate.mirror.scope.identity_of(candidate.source_url), page: page)
         if candidate.requested_identity != page.identity:
             AliasRecorded(mirror: candidate.mirror, url: candidate.requested_identity, page: page)
         candidate.status = accepted
@@ -713,15 +742,22 @@ rule RefreshPage {
         -- No file is written here. Page files are written at finalisation,
         -- after link rewriting, and only when their text would differ; an
         -- interrupted run therefore leaves no half-published page, and the
-        -- next finalisation writes whatever is missing.
+        -- next finalisation writes whatever is missing. Every URL on the
+        -- way to the page becomes an alias: the requested identity, each
+        -- redirect hop and the final source URL when a canonical moved the
+        -- identity past it, all as identities, so a link to any of them
+        -- resolves to the one page file.
 }
 
 -- Default stated here (veto at review): an alias resolves to the final
 -- identity, follows the page through a move and is dropped with the page.
--- A URL that is itself a written page's identity is never an alias.
+-- A URL that is itself a written page's identity is never an alias; a
+-- removed page's URL may be, so a URL merged into another page keeps
+-- resolving to the page that survived.
 rule RecordAlias {
     when: AliasRecorded(mirror, url, page)
-    requires: not exists Page{mirror: mirror, identity: url}
+    let own = Page{mirror: mirror, identity: url}
+    requires: not exists own or own.status = removed
     let alias = Alias{mirror: mirror, url: url}
     ensures:
         if exists alias:
@@ -732,7 +768,8 @@ rule RecordAlias {
 
 rule DropAliasOfOwnIdentity {
     when: AliasRecorded(mirror, url, page)
-    requires: exists Page{mirror: mirror, identity: url}
+    let own = Page{mirror: mirror, identity: url}
+    requires: exists own and own.status = written
     let stale = Alias{mirror: mirror, url: url}
     ensures:
         if exists stale:
@@ -847,16 +884,21 @@ rule RetirePage {
 -- Finalisation: scope, links and bodies
 ------------------------------------------------------------
 
--- Default stated here (veto at review): a page that falls outside the
--- scope in force is removed at the next finalisation, whatever its
--- content.
+-- Default stated here (veto at review): a page whose source URL falls
+-- outside the scope in force is removed, whatever its content, at the
+-- first finalisation that follows a run which did not store it. The source
+-- URL is measured, never the identity, so a page stored under a canonical
+-- outside the path prefixes stays as long as its source is in scope; a
+-- page the operator named outside the scope is published by the run that
+-- fetched it and removed by the next full run.
 rule RetireOutOfScopePages {
     when: pass: MirrorPass.created
     requires: pass.status = pending
     requires: pass.kind = finalise
     ensures:
         for p in pass.mirror.written_pages:
-            if not pass.mirror.scope.within_bounds(p.identity):
+            if not pass.mirror.scope.within_bounds(p.source_url)
+                and (pass.run_id = null or p.last_stored_run != pass.run_id):
                 PageRetired(page: p, reason: out_of_scope)
         ScopeSettled(pass: pass)
 }
