@@ -8,16 +8,25 @@ requires: []
 
 # Work with the specifications
 
-The Allium specifications under `docs/specs/` decide what rovo does. Today the sole
-module, the root, declares no behaviour: the product is undefined, and the placeholder
-API and command stand outside it. This page is the procedure;
-[Specifications](../explanation/specifications.md) is the reasoning.
+The Allium specifications under `docs/specs/` decide what rovo does. Four modules
+specify the product, a documentation mirror
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)); none of it is
+implemented yet, and the placeholder API and command stand outside them. This page is
+the procedure; [Specifications](../explanation/specifications.md) is the reasoning.
 
 ## Find the module that owns the behaviour
 
 | Module | Owns |
 | --- | --- |
-| `rovo.allium` | The root. Nothing yet: its Scope says the product is undefined, its Includes say nothing, and its Excludes say every behaviour, until a specification change defines one. It imports nothing. |
+| `rovo.allium` | The root: the `rovo` command. The commands init, sync, verify, index, report and fetch; the configuration layers; the refusals and their order; the crawl report; the exit codes. Imports the other three. |
+| `crawl.allium` | One sync run: discovery, the frontier, budgets, politeness, the tiers and the ladder, block verdicts, the breaker, learned tiers, owner testing. Imports `mirror` and `convert`. |
+| `mirror.allium` | The mirror on disk: scope and identity, the page lifecycle, aliases, paths, links and their rewriting, frontmatter, indexes, finalisation, verification, the ownership declaration. Imports `convert`. |
+| `convert.allium` | Pure conversion: extraction, normalisation, the quality gates, score, flags and the low-confidence verdict; the profile; the `Fidelity` contract. No rules; imports nothing. |
+
+The dependency direction is one way. A lower module never names an upper one: the
+upper module emits a trigger that the lower module's surface provides and a rule there
+turns into an entity, and the lower module reports back by emitting triggers the upper
+module responds to.
 
 Each module opens with Scope, Includes and Excludes. Read the whole module before
 editing it. A behaviour listed under its Excludes belongs outside that module;
@@ -44,26 +53,25 @@ clause the planner misses is still owed a test.
 ## Add a module
 
 Use the `spec-change` skill to define the behaviour before implementing it, then
-`propagate` to derive its tests. The first behaviour goes into the root: replace its
-Scope, Includes and Excludes with what the product is, and its Vocabulary with the
-product's words. A behaviour that outgrows the root's Scope goes in a module under
-`docs/specs/` with `-- allium: 3` and Scope, Includes, Excludes, Dependencies and
-Vocabulary comments. Import it from the root using `use "./<module>.allium" as
-<alias>`, replacing both placeholders with its actual name and alias. Update the
-root's header and this page's module table to reflect its new responsibility.
+`propagate` to derive its tests. A behaviour that fits no module's Scope goes in a new
+module under `docs/specs/` with `-- allium: 3` and Scope, Includes, Excludes,
+Dependencies and Vocabulary comments. Import it from the module that uses it with
+`use "./<module>.allium" as <alias>`, replacing both placeholders with its actual name
+and alias, keeping the dependency direction one way. Update the importing module's
+header and this page's module table to reflect its new responsibility.
 
 Record domain terms in [Terminology](../project/terminology.md). Run both spec
 gates and plan the new module, then follow the test and implementation loop above.
-`just plan-spec rovo` lists no obligations today, because the root states nothing;
-the first specification change gives it some, and the same change derives their
-tests with `propagate` and brings them with it.
+`just plan-spec <module>` lists each module's obligations; the implementation tickets
+derive their tests from them with `propagate`.
 
 ## Handle an open question
 
-An `open question` block records a product decision nobody has made yet. The root
-carries none today, because it states nothing to be uncertain about; the first
-specification change will raise some, and none is permission to invent an answer in
-code.
+An `open question` block records a product decision nobody has made yet. The modules
+carry five: three in `convert` (the tab-expansion gate, hidden content that is not a
+tab panel, the fidelity corpus) and two in `crawl` (sitemap children on other hosts,
+retiring a URL that fails on every sync). None is permission to invent an answer in
+code; each states the behaviour that holds until it is decided.
 
 - If your change depends on an unanswered decision, raise it rather than answer in code.
 - If a new gap appears, add an `open question` rather than guess.
@@ -88,8 +96,8 @@ and its tests for that. Use these recipes so the project's pin and report checks
 The following section is carried verbatim from pachinko at `611a86e`, which carries it
 verbatim from libpawdoku at `ccdd001`, save that its decision link names this
 repository's decision 0010 in place of pachinko's 0005. Its historical module examples
-describe libpawdoku; this repository has only the root module listed above, and it
-carries no waiver.
+describe libpawdoku; this repository has the four modules listed above, and it carries
+no waiver.
 
 ### Diagnostics and waivers
 

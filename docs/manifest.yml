@@ -528,6 +528,19 @@
         "decision_skill_reference"
       ],
       "requires": []
+    },
+    {
+      "path": "decisions/0012-rovo-is-a-documentation-mirror.md",
+      "title": "Decision 0012: rovo is a documentation mirror",
+      "kind": "decision",
+      "audience": [
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_product_definition"
+      ],
+      "requires": []
     }
   ]
 }

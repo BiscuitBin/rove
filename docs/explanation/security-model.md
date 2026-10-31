@@ -9,9 +9,10 @@ requires: []
 # Security model
 
 The important boundaries are the supply chain that builds and checks the package, and
-untrusted material reaching a contributor or an agent. The product is not yet
-specified, so it has no inputs of its own to defend yet; its first ticket adds them to
-this page.
+untrusted material reaching a contributor or an agent. The product is specified under
+`docs/specs/` and not yet implemented: its inputs, fetched documentation pages above
+all, are untrusted data by the rule below, and the implementation tickets add what
+each one needs to this page.
 
 ## Untrusted input
 

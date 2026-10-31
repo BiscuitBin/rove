@@ -7,7 +7,7 @@ description: Change an Allium specification and carry the change through the tes
 
 The specifications under `docs/specs/` decide behaviour. Code that disagrees with one is wrong until the specification is changed to say otherwise, so the specification moves first and the implementation follows.
 
-1. Read `AGENTS.md` and `docs/explanation/specifications.md`. Identify which module under `docs/specs/` owns the behaviour; each module's header states its Scope, Includes and Excludes. Today there is one, the placeholder `docs/specs/rovo.allium`, which declares no behaviour; the first real module extends or replaces it.
+1. Read `AGENTS.md` and `docs/explanation/specifications.md`. Identify which module under `docs/specs/` owns the behaviour; each module's header states its Scope, Includes and Excludes. There are four: `rovo` (the command), `crawl` (one sync run), `mirror` (the mirror on disk) and `convert` (pure conversion); the dependency direction runs from `rovo` down to `convert` and never back.
 2. Read the whole module before editing, including its `Scope`, `Excludes` and `open question` blocks. A change that belongs in another module's scope goes there instead.
 3. Read the `allium` skill for the language, then edit the specification: state the rule as a trigger, its guards and its outcomes. Record what you could not decide as a new `open question` rather than guessing at a product decision.
 4. Check that dependent modules still hold. A module others import is depended on by each of them, so a change to a trigger or an entity ripples.

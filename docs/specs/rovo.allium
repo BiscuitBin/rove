@@ -1,25 +1,956 @@
 -- allium: 3
 --
--- rovo — the root module
+-- rovo — the root module: the `rovo` command
 --
 -- Scope
---   The product is undefined. This is its root module: the place the first
---   specification change will define what rovo does. Until then it holds
---   no behaviour, and the API (`rovo.__version__`) and the command
---   (`rovo --version`, `rovo version`) are placeholders that no clause
---   here describes.
+--   rovo turns a product's documentation website into a mirror: a local,
+--   self-linking Markdown copy that documentation outside it can link to,
+--   that re-syncs with one command, and that reports how well every page
+--   converted. This module is the command line: it resolves the
+--   configuration, refuses what must be refused, starts a sync run,
+--   tallies what the run and the mirror report, ranks the exit code and
+--   writes the crawl report. The three modules it imports do the work.
 --
 -- Includes
---   Nothing yet.
+--   The commands init, sync, verify, index, report and fetch; the
+--   configuration layers; the refusals and their order; the run's kind;
+--   the crawl report and its rows; the exit codes and their ranking;
+--   progress events; the one-URL fetch.
 --
 -- Excludes
---   Every behaviour, until a specification change defines one. A ticket
---   or a decision record may introduce the change; this module, not the
---   code, is where the behaviour is then stated.
+--   How a page is fetched (crawl), stored, linked and indexed (mirror),
+--   or converted (convert); the placeholder `rovo --version` and
+--   `rovo version`, which print the distribution's version and are
+--   described by no clause; flag and file syntax; logging and table
+--   rendering.
 --
 -- Dependencies
---   None.
+--   crawl.allium: Run, the SyncControl surface, CrawlPolicy,
+--   OwnerTestOptions, RunKind, RunMode, RobotsMode, RenderMode,
+--   StealthMode, DiscoveryProblem and the triggers UrlFailed, UrlBlocked,
+--   UrlSkippedBlocked, DiscoveryFailed, HostBackedOff, BreakerTripped,
+--   OwnerTestingWarningIssued and RunEnded. mirror.allium: Mirror, Page,
+--   Operator, Tier, CrawlScope, BrokenLink, PassKind, the MirrorContents
+--   surface and the triggers PageFinalised, PageRemoved, LinksRewritten,
+--   IndexesWritten and VerificationFinished. convert.allium: Profile,
+--   QualityGate and QualityFlag.
 --
 -- Vocabulary
---   None yet. docs/project/terminology.md is the glossary; the first
---   specification change adds the product's terms there and here.
+--   sync run: one `rovo sync` invocation, of kind initial (the mirror held
+--   no page) or update. report: the crawl report every run writes.
+--   refusal: a command declined before any request, exit usage. change: one
+--   row of the report's changes. docs/project/terminology.md is the
+--   glossary.
+--
+-- Black box functions (pure): is_http_url, directory_exists,
+-- profile_for, initial_scope, scope_of, policy_of, effective_policy,
+-- owner_request_problem, resolve_config, tier_installed, normalise_url,
+-- hostname_of, resolve_targets, scope_hash, signature_of, host_reports,
+-- discovered_count, summarise, most_severe, latest_report, manifest_exists,
+-- page_files_readable, fetch_one, tool_version. Their contracts are stated
+-- where they are used.
+use "./crawl.allium" as crawl
+use "./mirror.allium" as mirror
+use "./convert.allium" as convert
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The resolved configuration of one mirror: built-in defaults, then
+-- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
+-- layers winning key by key. Invalid when the file is unreadable, a key is
+-- unknown or a value is bad; problems names every bad key path.
+value Configuration {
+    valid: Boolean
+    problems: List<String>
+    hash: String                        -- the first 16 hex digits of the SHA-256 of the resolved configuration
+    root_url: String?
+    start_urls: List<String>
+    allowed_hosts: Set<String>
+    path_prefixes: List<String>
+    include: List<String>
+    exclude: List<String>
+    max_depth: Integer
+    locale: String?
+    meaningful_query_params: List<String>
+    profile_name: String
+    robots: crawl/RobotsMode
+    render_mode: crawl/RenderMode
+    stealth_mode: crawl/StealthMode
+    max_age: Duration?
+    fail_on_low_quality: Boolean
+    unblocking_provider: String?        -- reserved; any value is a configuration error
+
+    has_seeds: root_url != null or start_urls.count > 0
+    root_changed(recorded): recorded != null and recorded != root_url
+    needs_browser: render_mode != never
+    needs_stealth: stealth_mode = on
+}
+
+-- What one sync invocation asked for, beyond the configuration.
+value SyncOptions {
+    dry_run: Boolean
+    confirmed: Boolean                  -- passed --yes
+    interactive: Boolean                -- a person is at the terminal
+    json_events: Boolean                -- progress as JSON lines on stdout
+    urls: List<String>                  -- operator-named URLs; empty for a full run
+    paths: List<String>                 -- operator-named page paths; empty for a full run
+    owner_test: crawl/OwnerTestOptions?
+
+    targeted: urls.count > 0 or paths.count > 0
+    is_owner_testing: owner_test != null
+}
+
+value HostReport {
+    host: String
+    fetched: Integer
+    blocked: Integer
+    block_rate: Decimal
+    tiers_used: Set<mirror/Tier>
+    breaker_tripped: Boolean
+    robots_ignored: Boolean
+    render_escalations: Integer
+    retry_after_honored: Integer
+    effective_policy: crawl/CrawlPolicy
+}
+
+value GateFailure {
+    gate: convert/QualityGate
+    pages: Integer
+}
+
+-- Gate tallies count gates only, never other flags.
+value QualitySummary {
+    mean_score: Decimal                 -- 0 when no page was scored
+    p10_score: Decimal                  -- the score at index round(p * (n - 1)) of the sorted scores
+    gate_failures: List<GateFailure>
+}
+
+-- One row of the report's changes: a page path and its URL, or a URL alone
+-- for a failure. A move carries both paths.
+value Change {
+    kind: ChangeKind
+    url: String
+    path: String?
+    moved_from: String?
+}
+
+value BlockedUrl {
+    url: String
+    status: Integer
+    signature: String
+    tier: mirror/Tier
+}
+
+value FailedUrl {
+    url: String
+    error: String
+    attempts: Integer
+}
+
+value DiscoveryProblemRow {
+    url: String
+    problem: crawl/DiscoveryProblem
+}
+
+value LowConfidencePage {
+    path: String
+    url: String
+    quality_score: Decimal
+    flags: Set<convert/QualityFlag>
+    touched_this_run: Boolean
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- Severity rises in declaration order: ok 0, partial 1, usage 2, blocked
+-- 3, quality 4. When several apply, the most severe is reported.
+enum ExitCode { ok | partial | usage | blocked | quality }
+
+enum ChangeKind { added | changed | unchanged | removed | moved | failed }
+
+enum ReportStatus { finished | interrupted | refused }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- The crawl report, crawl-report.json: written on every exit once the
+-- output directory exists, replacing the previous one. Rows are snapshots
+-- taken when the report is written, not live references.
+entity CrawlReport {
+    mirror: mirror/Mirror
+    operator: mirror/Operator
+    run_id: Integer?                    -- absent on refusal
+    kind: crawl/RunKind
+    mode: crawl/RunMode
+    report_status: ReportStatus
+    exit_code: ExitCode                 -- starts ok, only ever raised
+    error: String?                      -- the uncaught error, when the run crashed
+    refusal_reason: String?
+    configuration: Configuration        -- the resolved configuration the command used
+    options: SyncOptions                -- what the invocation asked for
+    tool_version: String
+    targets: Set<String>
+    declared_owned_hosts: Set<String>   -- hosts this run treated as owned; empty on refusal
+    baseline_run_id: Integer?
+    preceding_run_id: Integer?
+    requested_owner_test: crawl/OwnerTestOptions?   -- serialised without access contents
+    effective_policy: crawl/CrawlPolicy?            -- absent on refusal
+    unresolved_urls: Set<String>
+    robots_ignored: Boolean
+    discovered: Integer
+    fetched: Integer
+    converted: Integer
+    skipped_unchanged: Integer
+    bytes_fetched: Integer
+    budget_stopped: Boolean
+    breaker_tripped: Boolean
+    per_host: List<HostReport>
+    quality_summary: QualitySummary
+    scores: List<Decimal>
+    blocked_urls: List<BlockedUrl>
+    failed_urls: List<FailedUrl>
+    skipped_urls: List<String>          -- skipped because their host's breaker tripped
+    discovery_problems: List<DiscoveryProblemRow>
+    low_confidence_pages: List<LowConfidencePage>
+    broken_links: List<mirror/BrokenLink>
+    changes: List<Change>
+    started_at: Timestamp
+    status: open | written
+    finished_at: Timestamp when status = written
+
+    touched_low_confidence: low_confidence_pages where touched_this_run
+    has_failures: failed_urls.count > 0 or blocked_urls.count > 0 or discovery_problems.count > 0
+    quality_failed:
+        touched_low_confidence.count > 0 or broken_links.count > 0
+
+    transitions status {
+        open -> written
+        terminal: written
+    }
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    report_percentile: Decimal = 0.10
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- The sync refusals share one trigger and are checked in order, so a
+-- request is refused once, for its first problem; StartRun's guards are
+-- the conjunction of every refusal's negation.
+
+------------------------------------------------------------
+-- init
+------------------------------------------------------------
+
+rule InitialiseMirror {
+    when: OperatorInitialises(operator, site_url, out_dir, profile_name?)
+    requires: is_http_url(site_url)
+    requires: not exists mirror/Mirror{out_dir: out_dir}
+    let profile = profile_for(site_url, profile_name)
+    requires: profile != null
+    ensures:
+        mirror/Mirror.created(
+            out_dir: out_dir, scope: initial_scope(site_url, profile), profile: profile,
+            declared_owned_hosts: {}, recorded_root_url: null,
+            processing_signature: signature_of(initial_scope(site_url, profile), profile)
+        )
+        ConfigFileWritten(operator: operator, out_dir: out_dir, site_url: site_url, profile: profile.name)
+        CommandExited(operator: operator, code: ok)
+
+    @guidance
+        -- Writes rovo.toml with every section and its default and an empty
+        -- manifest; never crawls; refuses to overwrite an existing mirror.
+        -- profile_for returns the named profile from the catalogue, else
+        -- the catalogue profile whose hosts include the URL's host, else
+        -- generic; an unknown name is null. The root URL keeps the locale
+        -- and the first product segment; start_urls holds the given URL;
+        -- allowed_hosts holds its host; path_prefixes its directory.
+}
+
+rule RefuseInit {
+    when: OperatorInitialises(operator, site_url, out_dir, profile_name?)
+    requires:
+        not is_http_url(site_url)
+        or exists mirror/Mirror{out_dir: out_dir}
+        or profile_for(site_url, profile_name) = null
+    ensures: CommandExited(operator: operator, code: usage)
+}
+
+------------------------------------------------------------
+-- sync: the refusals, in order
+------------------------------------------------------------
+
+rule RefuseSyncWithoutDirectory {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    requires: not directory_exists(out_dir) or not exists mirror/Mirror{out_dir: out_dir}
+    ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- No report is written: there is nowhere to write it.
+}
+
+rule RefuseSyncOnBadConfig {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: not settings.valid or not settings.has_seeds or settings.unblocking_provider != null
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "invalid configuration")
+}
+
+rule RefuseSyncOnChangedRoot {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: settings.root_changed(target.recorded_root_url) and not options.confirmed
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "changed root requires confirmation")
+}
+
+rule RefuseOffHostTarget {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
+    requires: options.urls.any(u => not is_http_url(u) or hostname_of(u) not in settings.allowed_hosts)
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "invalid or off-host target")
+
+    @guidance
+        -- A named URL must be http(s) on an allowed host. Path prefixes
+        -- and include and exclude patterns are waived for it.
+}
+
+rule RefuseUnknownTargetPath {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.paths.any(p => p not in target.page_paths)
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "unknown target path")
+
+    @guidance
+        -- A named path must be a written page's relative .md path; a
+        -- removed page's path is refused.
+}
+
+rule RefuseMissingEngine {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.paths.all(p => p in target.page_paths)
+    requires:
+        (settings.needs_browser and not tier_installed(browser))
+        or (settings.needs_stealth and not tier_installed(stealth))
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "configured tier is not installed")
+
+    @guidance
+        -- A configured but missing engine is refused before any request;
+        -- render_mode = never needs no engine.
+}
+
+-- owner_request_problem returns the first problem of an owner-testing
+-- request, else null. With no owner_test it accepts only robots = respect
+-- and no owner-only override through any configuration layer. With one it
+-- requires: no named URLs or paths; a non-empty subset of the allowed
+-- hosts with a saved declaration for every host; a preceding run in this
+-- mirror that finished and was not dry, with the same scope hash; a
+-- baseline that is a finished, non-dry, non-targeted, robots-respecting
+-- standard run with the same scope hash, which the preceding run is or
+-- shares; positive rate and concurrency, non-negative backoff and pause,
+-- a positive retry cap and a finite positive challenge timeout when
+-- supplied; never both disabling a control and supplying its value;
+-- interactive challenges only with an interactive operator, rendering
+-- enabled, protection_escalation and an installed browser; access naming
+-- only selected hosts. Confirmation cannot waive any of this.
+rule RefuseInvalidOwnerRequest {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.paths.all(p => p in target.page_paths)
+    requires:
+        (not settings.needs_browser or tier_installed(browser))
+        and (not settings.needs_stealth or tier_installed(stealth))
+    let problem = owner_request_problem(target, settings, options)
+    requires: problem != null
+    ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: problem)
+
+    @guidance
+        -- The refusal warns that owner testing is only for websites the
+        -- operator owns, names the missing declaration or other problem,
+        -- and makes no network request. No ownership verification is
+        -- claimed.
+}
+
+rule ReportRefusal {
+    when: SyncRefused(operator, target, options, settings, reason)
+    ensures:
+        CrawlReport.created(
+            mirror: target, operator: operator, run_id: null,
+            kind: if target.is_populated: update else: initial,
+            mode: if options.is_owner_testing: owner_testing else: standard,
+            report_status: refused, exit_code: usage, error: null, refusal_reason: reason,
+            configuration: settings, options: options, tool_version: tool_version(),
+            targets: {}, declared_owned_hosts: {},
+            baseline_run_id: null, preceding_run_id: options.owner_test?.preceding_run_id,
+            requested_owner_test: options.owner_test, effective_policy: null,
+            unresolved_urls: {}, robots_ignored: false,
+            discovered: 0, fetched: 0, converted: 0, skipped_unchanged: 0, bytes_fetched: 0,
+            budget_stopped: false, breaker_tripped: false,
+            per_host: [], quality_summary: { mean_score: 0, p10_score: 0, gate_failures: [] },
+            scores: [], blocked_urls: [], failed_urls: [], skipped_urls: [],
+            discovery_problems: [], low_confidence_pages: [], broken_links: [], changes: [],
+            started_at: now, status: written, finished_at: now
+        )
+        if options.is_owner_testing:
+            OwnerRefusalWarned(operator: operator, hosts: options.owner_test?.hosts ?? {})
+        CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- A refused sync starts no run and records none; it replaces only
+        -- the report. A refusal treats no host as owned.
+}
+
+------------------------------------------------------------
+-- sync: starting a run
+------------------------------------------------------------
+
+rule StartSync {
+    when: OperatorRequestsSync(operator, out_dir, options)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: directory_exists(out_dir) and exists target
+    let settings = resolve_config(out_dir)
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.paths.all(p => p in target.page_paths)
+    requires:
+        (not settings.needs_browser or tier_installed(browser))
+        and (not settings.needs_stealth or tier_installed(stealth))
+    requires: owner_request_problem(target, settings, options) = null
+    let preceding = if options.owner_test != null: crawl/Run{target: target, id: options.owner_test.preceding_run_id} else: null
+    let baseline =
+        if preceding = null: null
+        else if preceding.mode = standard: preceding
+        else: preceding.baseline
+    let policy = effective_policy(settings, options.owner_test)
+    let mode = if options.is_owner_testing: owner_testing else: standard
+    let owned = options.owner_test?.hosts ?? {}
+    let run_id = next_run_id(target)
+    let kind = if target.is_populated: update else: initial
+    let scope = scope_of(settings, target.profile)
+    let targets = resolve_targets(target, scope, options.urls, options.paths)
+    ensures:
+        target.scope = scope
+        target.recorded_root_url = settings.root_url
+        target.processing_signature = signature_of(scope, target.profile)
+        CrawlReport.created(
+            mirror: target, operator: operator, run_id: run_id, kind: kind, mode: mode,
+            report_status: finished, exit_code: ok, error: null, refusal_reason: null,
+            configuration: settings, options: options, tool_version: tool_version(),
+            targets: targets, declared_owned_hosts: owned,
+            baseline_run_id: baseline?.id, preceding_run_id: preceding?.id,
+            requested_owner_test: options.owner_test, effective_policy: policy,
+            unresolved_urls: {}, robots_ignored: policy.robots = ignore,
+            discovered: 0, fetched: 0, converted: 0, skipped_unchanged: 0, bytes_fetched: 0,
+            budget_stopped: false, breaker_tripped: false,
+            per_host: [], quality_summary: { mean_score: 0, p10_score: 0, gate_failures: [] },
+            scores: [], blocked_urls: [], failed_urls: [], skipped_urls: [],
+            discovery_problems: [], low_confidence_pages: [], broken_links: [], changes: [],
+            started_at: now, status: open
+        )
+        crawl/RunRequested(
+            operator: operator, mirror: target, id: run_id, kind: kind, mode: mode,
+            baseline: baseline, preceding: preceding, scope_hash: scope_hash(scope),
+            owned_hosts: owned, requested_owner_test: options.owner_test, policy: policy,
+            dry_run: options.dry_run, interactive: options.interactive,
+            render_mode: settings.render_mode, stealth_mode: settings.stealth_mode,
+            max_age: settings.max_age, targets: targets
+        )
+
+    @guidance
+        -- scope_of builds the one CrawlScope from the configuration and
+        -- the profile's locale codes; allowed_hosts and path_prefixes
+        -- default to the first start URL's host and directory; the
+        -- profile's meaningful query parameters apply when the
+        -- configuration names none. effective_policy starts from the
+        -- standard policy afresh on every request (every control enabled,
+        -- robots respect, no escalation, no challenges, crawl's defaults
+        -- for every number) and applies only this request's owner options:
+        -- a disabled control clears its flag, a disabled rate or
+        -- concurrency becomes null, a disabled breaker pause becomes zero;
+        -- the challenge timeout defaults to crawl's. resolve_targets
+        -- normalises each named URL and maps each named path to the
+        -- identity of the page that holds it. next_run_id is one more than
+        -- the highest run id the mirror has seen. The run kind is update
+        -- whenever the mirror holds a written page.
+}
+
+------------------------------------------------------------
+-- sync: what the run and the mirror report
+------------------------------------------------------------
+
+rule TallyFailedUrl {
+    when: crawl/UrlFailed(run, url, error, attempts)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    ensures:
+        report.failed_urls = append(report.failed_urls, { url: url, error: error, attempts: attempts })
+        report.changes = append(report.changes, { kind: failed, url: url, path: null, moved_from: null })
+}
+
+rule TallyBlockedUrl {
+    when: crawl/UrlBlocked(run, url, status, signature, tier)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    ensures: report.blocked_urls = append(report.blocked_urls, { url: url, status: status, signature: signature, tier: tier })
+}
+
+rule TallySkippedUrl {
+    when: crawl/UrlSkippedBlocked(run, url)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    ensures: report.skipped_urls = append(report.skipped_urls, url)
+}
+
+rule TallyDiscoveryProblem {
+    when: crawl/DiscoveryFailed(run, url, problem)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    ensures: report.discovery_problems = append(report.discovery_problems, { url: url, problem: problem })
+}
+
+rule AnnounceBackoff {
+    when: crawl/HostBackedOff(host, until)
+    ensures: ProgressReported(operator: host.run.operator, event: host_backoff, host: host.name, until: until)
+}
+
+rule AnnounceTrip {
+    when: crawl/BreakerTripped(host)
+    let report = CrawlReport{mirror: host.run.target, run_id: host.run.id}
+    requires: exists report and report.status = open
+    ensures:
+        report.breaker_tripped = true
+        ProgressReported(operator: host.run.operator, event: breaker_tripped, host: host.name, until: null)
+}
+
+rule AnnounceOwnerWarning {
+    when: crawl/OwnerTestingWarningIssued(operator, hosts, policy)
+    ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null)
+}
+
+rule TallyRemoval {
+    when: mirror/PageRemoved(mirror, page, reason, candidate?)
+    let report = CrawlReport{mirror: mirror, status: open}
+    requires: exists report
+    requires: report.status = open
+    ensures: report.changes = append(report.changes, { kind: removed, url: page.identity, path: page.path, moved_from: null })
+}
+
+-- Default stated here (veto at review): an unchanged page is never counted
+-- converted; a page not touched this run appears in the changes only when
+-- finalisation found it changed; the quality summary describes the whole
+-- mirror; fail_on_low_quality considers pages touched this run plus broken
+-- links.
+rule TallyFinalisedPage {
+    when: mirror/PageFinalised(pass, page, outcome, previous_path?, seen_this_run)
+    requires: pass.run_id != null
+    let report = CrawlReport{mirror: pass.mirror, run_id: pass.run_id}
+    requires: exists report and report.status = open
+    ensures:
+        report.scores = append(report.scores, page.quality.score)
+        if page.low_confidence:
+            report.low_confidence_pages = append(report.low_confidence_pages, {
+                path: page.path, url: page.identity, quality_score: page.quality.score,
+                flags: page.flags, touched_this_run: seen_this_run
+            })
+        if seen_this_run and outcome = unchanged:
+            report.skipped_unchanged = report.skipped_unchanged + 1
+        if seen_this_run and outcome != unchanged:
+            report.converted = report.converted + 1
+        if seen_this_run or outcome != unchanged:
+            report.changes = append(report.changes, {
+                kind: if outcome = added: added else if outcome = changed: changed else if outcome = moved: moved else: unchanged,
+                url: page.identity, path: page.path, moved_from: previous_path
+            })
+}
+
+rule CloseRun {
+    when: crawl/RunEnded(run)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    ensures:
+        report.report_status = if run.status = interrupted: interrupted else: finished
+        report.error = run.error
+        report.unresolved_urls = run.unresolved_urls
+        report.per_host = host_reports(run.hosts, run.policy)
+        report.discovered = discovered_count(run)
+        report.fetched = run.fetch_attempts
+        report.bytes_fetched = run.bytes_fetched
+        report.budget_stopped = run.budget_stopped
+        if report.options.dry_run:
+            ReportReady(run: run)
+        else:
+            mirror/PassRequested(operator: run.operator, mirror: run.target, kind: finalise, run_id: run.id)
+
+    @guidance
+        -- host_reports makes one HostReport per host, sorted by name, with
+        -- robots_ignored from the policy and block_rate over the host's
+        -- settled fetches. discovered_count is the number of frontier rows
+        -- after discovery. Finalisation runs after an interrupted run too,
+        -- so links and indexes stay consistent with whatever was stored.
+}
+
+rule TakeBrokenLinks {
+    when: mirror/LinksRewritten(mirror, pass, operator, broken)
+    requires: pass.run_id != null
+    let report = CrawlReport{mirror: mirror, run_id: pass.run_id}
+    requires: exists report and report.status = open
+    ensures: report.broken_links = broken
+}
+
+rule FinaliseRunReport {
+    when: mirror/IndexesWritten(mirror, pass, operator)
+    requires: pass.kind = finalise and pass.run_id != null
+    let run = crawl/Run{target: mirror, id: pass.run_id}
+    requires: exists run
+    ensures: ReportReady(run: run)
+}
+
+rule RankAndWriteReport {
+    when: ReportReady(run)
+    let report = CrawlReport{mirror: run.target, run_id: run.id}
+    requires: exists report and report.status = open
+    let target_skipped = run.targets.any(t => t in report.skipped_urls)
+    let code = most_severe([
+        if report.has_failures or run.status = interrupted or run.budget_stopped: partial else: ok,
+        if target_skipped: partial else: ok,
+        if run.is_owner_testing and run.unresolved_urls.count > 0: partial else: ok,
+        if run.has_tripped_host: blocked else: ok,
+        if report.configuration.fail_on_low_quality and report.quality_failed: quality else: ok
+    ])
+    ensures:
+        report.exit_code = code
+        report.quality_summary = summarise(report.scores, report.low_confidence_pages, config.report_percentile)
+        report.status = written
+        report.finished_at = now
+        ReportWritten(report: report)
+        ProgressReported(operator: run.operator, event: done, host: null, until: null)
+        CommandExited(operator: run.operator, code: code)
+
+    @guidance
+        -- Exit codes combine by max. Every list in the report is sorted
+        -- by URL or path, gate names included, so two runs over the same
+        -- outcome write the same report apart from the run metadata.
+        -- summarise rounds the mean and the percentile to four places and
+        -- counts gate failures by gate over the low-confidence pages. The
+        -- report is written in a finally around the whole run and
+        -- replaced atomically. With json_events the progress stream ends
+        -- with one done event.
+}
+
+------------------------------------------------------------
+-- sync: interrupts and crashes
+------------------------------------------------------------
+
+rule InterruptSync {
+    when: OperatorInterrupts(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target
+    let run = crawl/Run{target: target, status: running}
+    requires: exists run and run.status = running
+    ensures: run.interrupt_requested = true
+}
+
+-- The runtime raises this on the operator's behalf when an uncaught error
+-- escapes the run: the report records the error and the run ends as
+-- interrupted.
+rule RecordCrash {
+    when: RuntimeFails(operator, out_dir, error)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target
+    let run = crawl/Run{target: target, status: running}
+    requires: exists run and run.status = running
+    ensures:
+        run.error = error
+        run.interrupt_requested = true
+}
+
+------------------------------------------------------------
+-- verify, index, report
+------------------------------------------------------------
+
+rule Verify {
+    when: OperatorVerifies(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target and manifest_exists(target)
+    ensures: mirror/PassRequested(operator: operator, mirror: target, kind: verify)
+}
+
+rule RefuseVerify {
+    when: OperatorVerifies(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: not exists target or not manifest_exists(target)
+    ensures: CommandExited(operator: operator, code: usage)
+}
+
+-- Default stated here (veto at review): verify exits quality for any
+-- finding, and verify, index and report exit usage for a missing manifest,
+-- an unreadable page file or an absent report.
+rule ReportVerification {
+    when: mirror/VerificationFinished(mirror, pass, operator, failures)
+    ensures:
+        VerificationReported(operator: operator, failures: failures)
+        CommandExited(operator: operator, code: if failures.count = 0: ok else: quality)
+
+    @guidance
+        -- Verify is offline and never contacts the site. Gate tallies over
+        -- the mirror are printed with the findings and never change the
+        -- exit code.
+}
+
+rule RebuildIndex {
+    when: OperatorRebuildsIndex(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target and page_files_readable(target)
+    ensures: mirror/PassRequested(operator: operator, mirror: target, kind: index)
+}
+
+rule RefuseRebuildIndex {
+    when: OperatorRebuildsIndex(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: not exists target or not page_files_readable(target)
+    ensures: CommandExited(operator: operator, code: usage)
+}
+
+rule FinishIndexCommand {
+    when: mirror/IndexesWritten(mirror, pass, operator)
+    requires: pass.kind = index
+    ensures: CommandExited(operator: operator, code: ok)
+
+    @guidance
+        -- The indexes are rebuilt offline from the manifest and the page
+        -- files; links are not re-resolved.
+}
+
+rule ShowReport {
+    when: OperatorShowsReport(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: exists target
+    let report = latest_report(target)
+    requires: report != null
+    ensures:
+        ReportShown(operator: operator, report: report)
+        CommandExited(operator: operator, code: ok)
+}
+
+rule RefuseShowReport {
+    when: OperatorShowsReport(operator, out_dir)
+    let target = mirror/Mirror{out_dir: out_dir}
+    requires: not exists target or latest_report(target) = null
+    ensures: CommandExited(operator: operator, code: usage)
+}
+
+------------------------------------------------------------
+-- fetch
+------------------------------------------------------------
+
+rule RefuseOwnerTestingFetch {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    requires: owner_test != null or tier = stealth or not is_http_url(url)
+    ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- No request is made. Relaxed settings need a mirror, a finished
+        -- standard run, saved ownership and an explicit owner-testing sync.
+}
+
+rule RefuseMissingFetchTier {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    requires: owner_test = null and tier != stealth and is_http_url(url)
+    requires: tier != null and tier != http and not tier_installed(tier)
+    ensures: CommandExited(operator: operator, code: usage)
+}
+
+rule FetchOneUrl {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    requires: owner_test = null and tier != stealth and is_http_url(url)
+    requires: tier = null or tier = http or tier_installed(tier)
+    let result = fetch_one(url, tier, resolve_config(""))
+    ensures:
+        if result.ok:
+            PagePrinted(operator: operator, body: result.body)
+        CommandExited(operator: operator, code: if result.ok: ok else: partial)
+
+    @guidance
+        -- Prints the Markdown of one page to stdout and writes nothing
+        -- into a mirror. Without a configuration it uses built-in defaults
+        -- and the profile the catalogue picks by host. Every request,
+        -- redirect and browser subrequest respects robots, the limiter,
+        -- Retry-After and the standard policy; http may render for
+        -- JavaScript, never to bypass a block. A robots refusal,
+        -- challenge, block or failed fetch prints no page and exits
+        -- partial.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant RefusedReportsHaveNoRun {
+    for r in CrawlReports:
+        r.report_status = refused implies r.run_id = null and r.exit_code = usage
+}
+
+invariant RunReportsNameTheirRun {
+    for r in CrawlReports:
+        r.report_status != refused implies r.run_id != null and r.effective_policy != null
+}
+
+invariant OneOpenReportPerMirror {
+    for a in CrawlReports:
+        for b in CrawlReports:
+            a != b and a.mirror = b.mirror and a.status = open implies b.status = written
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface MirrorCommands {
+    facing operator: mirror/Operator
+
+    provides:
+        OperatorInitialises(operator, site_url, out_dir, profile_name?)
+        OperatorRequestsSync(operator, out_dir, options)
+        OperatorInterrupts(operator, out_dir)
+        RuntimeFails(operator, out_dir, error)
+        OperatorVerifies(operator, out_dir)
+        OperatorRebuildsIndex(operator, out_dir)
+        OperatorShowsReport(operator, out_dir)
+        OperatorFetchesUrl(operator, url, tier?, owner_test?)
+
+    @guarantee InitExitCodes
+        -- 0: a starter configuration and an empty manifest are written and
+        -- nothing is crawled. 2: the URL is not http(s), the directory
+        -- already holds a mirror, or the profile name is unknown.
+
+    @guarantee SyncExitCodes
+        -- 0: the run finished with nothing to report. 1: a page failed or
+        -- was blocked, a discovery problem was recorded, a target was
+        -- skipped, a budget stopped the run, the run was interrupted or
+        -- crashed, or an owner-testing run left URLs unresolved. 2: a
+        -- refusal: no mirror, invalid configuration, a changed root
+        -- without confirmation, an off-host or unknown target, a missing
+        -- engine, or an invalid owner-testing request. 3: a host's breaker
+        -- tripped. 4: fail_on_low_quality is set and a page touched this
+        -- run is low confidence or a broken link exists. The highest
+        -- applicable code wins.
+
+    @guarantee VerifyIndexReportExitCodes
+        -- verify: 0 with no finding, 4 with any, 2 without a manifest.
+        -- index: 0 when rebuilt, 2 when a page file cannot be read.
+        -- report: 0 when shown, 2 when there is no report. fetch: 0 when
+        -- a page was printed, 1 when the fetch failed or was refused by
+        -- the site, 2 for owner options, the stealth tier, a missing
+        -- engine or a non-http URL.
+
+    @guarantee ReportOnEveryExit
+        -- Once the output directory holds a mirror, every sync, including
+        -- a refused, dry, interrupted or crashed one, leaves
+        -- crawl-report.json with its exit code, its run kind (initial or
+        -- update), its status and, for a crash, the error text.
+
+    @guarantee ProgressOnRequest
+        -- With json_events, progress arrives as one JSON event per line on
+        -- stdout: start, page, host_backoff, breaker_tripped,
+        -- owner_testing_warning and done. A dry run still prints its
+        -- frontier as plain text.
+
+    @guarantee RefusalsInOrder
+        -- A sync is refused once, for its first problem, in the order the
+        -- refusal rules are declared, and a refusal makes no network
+        -- request.
+
+    @guarantee OwnershipSavedThroughTheMirror
+        -- Saving an ownership declaration is the mirror's
+        -- OperatorSavesOwnership; it never starts a run and never relaxes
+        -- a standard run.
+}
+
+-- The report as the operator reads it.
+surface ReportView {
+    facing operator: mirror/Operator
+    context report: CrawlReport where operator = operator
+
+    exposes:
+        report.run_id
+        report.kind
+        report.mode
+        report.report_status
+        report.exit_code
+        report.error
+        report.refusal_reason
+        report.configuration.hash
+        report.configuration.fail_on_low_quality
+        report.options.dry_run
+        report.options.json_events
+        report.options.targeted
+        report.tool_version
+        report.targets
+        report.declared_owned_hosts
+        report.baseline_run_id
+        report.preceding_run_id
+        report.requested_owner_test
+        report.effective_policy
+        report.unresolved_urls
+        report.robots_ignored
+        report.discovered
+        report.fetched
+        report.converted
+        report.skipped_unchanged
+        report.bytes_fetched
+        report.budget_stopped
+        report.breaker_tripped
+        report.per_host
+        report.quality_summary
+        report.blocked_urls
+        report.failed_urls
+        report.skipped_urls
+        report.discovery_problems
+        report.low_confidence_pages
+        report.broken_links
+        report.changes
+        report.started_at
+        report.finished_at
+
+    @guarantee SecretsNeverSerialised
+        -- Owner access contents and browser sessions never appear in the
+        -- report, the log or any page file; the requested owner options
+        -- are serialised without them.
+}

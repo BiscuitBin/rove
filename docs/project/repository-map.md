@@ -51,8 +51,9 @@ the canonical skills and add nothing. Hooks are installed only from the primary
 checkout, because all worktrees share their hook directory.
 
 `docs/specs/` holds the Allium specifications, which decide behaviour
-([decision 0009](../decisions/0009-specs-are-the-source-of-truth.md)); today it holds
-one placeholder module, `rovo.allium`, which declares none.
+([decision 0009](../decisions/0009-specs-are-the-source-of-truth.md)): the root
+`rovo.allium` and the three modules it imports, `crawl`, `mirror` and `convert`
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)).
 `allium-skill-reference/` is vendored reference material for the Allium skills, kept
 outside `.agents/` and ignored by every linter
 ([decision 0011](../decisions/0011-skill-reference-material.md)). `.tools/bin/` holds

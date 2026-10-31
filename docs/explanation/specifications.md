@@ -31,18 +31,23 @@ its tests and implementation with it.
 
 ## What exists today
 
-There is one module, `rovo.allium`, the root, and it declares no behaviour. Its header
-says why: the product is undefined, so the module's Scope is the place the first
-specification change will define it, its Includes are empty, and its Excludes are every
-behaviour until then. The placeholder API, `rovo.__version__`, and the placeholder
-command, `rovo --version` and `rovo version`, stand outside it: they hold the product's
-place and no clause describes them.
+Four modules specify the product, a documentation mirror
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). `convert` is
+the leaf: pure conversion with no rules, held together by the `Fidelity` contract.
+`mirror` owns the mirror on disk: identity, the page lifecycle, links, indexes,
+finalisation and verification. `crawl` owns one sync run: discovery, the frontier,
+politeness, the tiers, the breaker and owner testing. `rovo`, the root, owns the
+command line: the commands, the refusals, the report and the exit codes. Each header
+states its Scope, Includes, Excludes, Dependencies and Vocabulary, and
+[Work with the specifications](../how-to/work-with-the-specs.md) has the table.
 
-Empty diagnostics and findings say the module is valid, not that the package does
-anything. `just plan-spec rovo` lists no obligations, because there is no clause to owe a
-test. The first specification change gives the root a Scope, entities and rules, or adds
-a module the root imports, with explicit boundaries so that each behaviour has an owner;
-the same change derives the tests, confirms they fail, and builds until they pass.
+The placeholder API, `rovo.__version__`, and the placeholder command, `rovo --version`
+and `rovo version`, stand outside the modules: they hold the product's place and no
+clause describes them. Empty diagnostics and findings say the modules are valid, not
+that the package does anything: nothing in the specification is implemented yet.
+`just plan-spec <module>` lists the obligations each module owes a test; the
+implementation tickets derive those tests, confirm they fail, and build until they
+pass.
 
 ## Open questions are a feature
 
@@ -50,10 +55,13 @@ An `open question` records a product decision nobody has made yet. An unwritten
 gap is easily filled by whoever writes the code first; a written one stays visible
 until someone entitled to decide answers it.
 
-The root carries none today, because it states nothing. That will not last: the first
-specification change will reach decisions the maintainer has not made, and each becomes
-an `open question` rather than a guess in code. A low count is normal for a settled
-module, but it is not a reason to hide uncertainty.
+The modules carry five, each stating the behaviour that holds until it is decided:
+what the tab-expansion gate should measure, whether hidden content outside a tab panel
+survives extraction, which construct families the fidelity corpus must cover, whether a
+sitemap index may point at child sitemaps on other hosts, and whether a URL that fails
+on every sync is ever retired. Every other decision the elicitation reached is stated
+outright, many as defaults the maintainer may veto at review. A low count is normal for
+a settled module, but it is not a reason to hide uncertainty.
 
 ## What a specification is not
 

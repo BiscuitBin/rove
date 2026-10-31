@@ -15,19 +15,22 @@ requires: []
 
 ## What it does today
 
-The product is not yet specified. What exists is a gated skeleton around a placeholder:
-the API exports `rovo.__version__` and nothing else, and the command answers
-`rovo --version` and `rovo version`. Around that placeholder the repository already
-runs everything a real change will need: lint and type gates with positive controls, a
-coverage floor, a wheel built and smoke-installed offline on every `just check`, the
-documentation and agent contracts, and CI. The product's first ticket replaces the
-placeholder and lands on a gate that already proves everything around it.
+The product is specified under `docs/specs/` and not yet implemented: rovo turns a
+product's documentation website into a local, self-linking Markdown mirror that
+re-syncs with one command and reports how well every page converted
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). What exists in
+code is a gated skeleton around a placeholder: the API exports `rovo.__version__` and
+nothing else, and the command answers `rovo --version` and `rovo version`. Around that
+placeholder the repository already runs everything a real change will need: lint and
+type gates with positive controls, a coverage floor, a wheel built and smoke-installed
+offline on every `just check`, the documentation and agent contracts, and CI. The
+implementation tickets replace the placeholder and land on a gate that already proves
+everything around it.
 
 ## What it deliberately does not do
 
-It does not describe or invent the product: no page, test or command here says what
-`rovo` will do beyond the placeholder, and anything that would is a defect until a
-ticket specifies it. Nothing is released: the package is not on PyPI, and a
+It does not invent the product: the specifications say what `rovo` does, and a page,
+test or command that says otherwise is a defect until a specification change says so. Nothing is released: the package is not on PyPI, and a
 `Private :: Do Not Upload` classifier makes PyPI refuse an accidental upload. There is
 no licence yet ([decision 0006](../decisions/0006-licence-deferred.md)), so the
 repository grants no rights beyond GitHub's terms of service, and a release waits for

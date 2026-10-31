@@ -10,8 +10,8 @@ requires: []
 
 One import package, `rovo`, carries two interfaces: the Python API and the `rovo`
 command. The architecture is one rule about which way imports run between them. The
-product is not yet specified, so what sits on each side today is a placeholder; the
-rule is what the product's first ticket inherits.
+product is specified under `docs/specs/` and not yet implemented, so what sits on each
+side today is a placeholder; the rule is what the implementation tickets inherit.
 
 ## The modules
 

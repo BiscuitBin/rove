@@ -13,10 +13,10 @@ to be revisited. Each entry is numbered and never renumbered; a decision that is
 superseded is marked rather than deleted, because the reasoning is what makes the
 successor legible.
 
-These are decisions about how this repository is built, checked and distributed. The
-product is not yet specified, so no record decides product behaviour; that arrives with
-the product's own tickets, stated in the specifications under `docs/specs/`
-([decision 0009](0009-specs-are-the-source-of-truth.md)).
+These are decisions about how this repository is built, checked and distributed, and
+one, [decision 0012](0012-rovo-is-a-documentation-mirror.md), about what the product is.
+Product behaviour itself is stated in the specifications under `docs/specs/`
+([decision 0009](0009-specs-are-the-source-of-truth.md)), never in a record.
 
 ## The record
 
@@ -33,6 +33,7 @@ the product's own tickets, stated in the specifications under `docs/specs/`
 | [0009](0009-specs-are-the-source-of-truth.md) | Specifications decide behaviour |
 | [0010](0010-project-managed-allium-cli.md) | A project-managed Allium binary |
 | [0011](0011-skill-reference-material.md) | Skill reference material beside the skills |
+| [0012](0012-rovo-is-a-documentation-mirror.md) | rovo is a documentation mirror |
 
 ## The numbering
 
@@ -40,7 +41,9 @@ This series is the repository's own and starts at 0001. Records 0004 and 0005 ar
 adapted from alliumpy's decisions 0002 and 0004 at `c8e1a46`, and each opens by saying
 so, so that its argument can be checked against the original. Records 0009 to 0011 are
 adapted from pachinko's decisions 0002, 0005 and 0010 at `611a86e`, which carried them
-from libpawdoku at `ccdd001`; each opens by naming both. The others are new.
+from libpawdoku at `ccdd001`; each opens by naming both. The others are new, and
+[decision 0012](0012-rovo-is-a-documentation-mirror.md) is the first that defines the
+product.
 [Decision 0001](0001-uv-and-hatchling.md) owns how the tools are installed;
 [decision 0004](0004-hook-runner-and-checkers.md) owns which runner and checkers they
 are.

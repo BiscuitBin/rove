@@ -1,0 +1,1269 @@
+-- allium: 3
+--
+-- mirror — the mirror on disk and the pages, links and indexes in it
+--
+-- Scope
+--   What a mirror is: an output directory holding page files, a manifest
+--   of pages, aliases and links, generated indexes and the last report.
+--   This module says how a page is identified, where its file lives, what
+--   happens when its URL moves or the page disappears, how links between
+--   pages are rewritten, how the indexes are generated, and what verify
+--   checks. The crawl hands it page candidates; the root hands it passes
+--   (finalise, index, verify) and reads what it emits.
+--
+-- Includes
+--   The crawl scope and URL identity; the page lifecycle (written and
+--   removed, moves, revival, duplicates); aliases; the removed area and
+--   pruning; path assignment; the ownership declaration; link resolution,
+--   rewriting and the link flags; frontmatter; the indexes (index.md,
+--   index.jsonl, links.jsonl, llms.txt, _index.md); keywords; the
+--   finalisation of a run; verification.
+--
+-- Excludes
+--   Fetching, discovery, the frontier, politeness, tiers and owner testing
+--   (crawl); conversion and the quality gates (convert); commands, exit
+--   codes and the crawl report (rovo); storage mechanics (the manifest's
+--   format, atomic writes).
+--
+-- Dependencies
+--   convert.allium: Profile, ConvertedContent, QualityResult, QualityFlag,
+--   ExtractionMethod and config.incomplete_flags.
+--
+-- Vocabulary
+--   mirror: the output directory, its page files, manifest, indexes and
+--   last report. page, page file: a mirrored page and its .md file.
+--   identity: the normalised URL that keys a page; canonical URL is what a
+--   page declares about itself; source URL is the URL whose response was
+--   converted, after redirects. alias: any other URL that resolves to a
+--   page (a redirect hop, a non-canonical URL). removed, removed area: a
+--   page gone at the source; _removed/ holds its archived file unless
+--   prune deletes it. moved: a page whose identity changed, so its path
+--   changed. absent: a URL that answers 404 or 410. uncrawled: a link to
+--   an in-scope URL with no page; the page flag is uncrawled_internal.
+--   dangling: a link to a removed page; the page flag is dangling_inbound.
+--   pass: one finalise, index or verify job over the mirror. tier: the
+--   fetch tier a page's response came from (http, browser, stealth).
+--   docs/project/terminology.md is the glossary.
+--
+-- Black box functions (pure): normalise_url, hostname_of, scheme_of,
+-- path_of, first_path_segment, resolve_url, pattern_matches, starts_with,
+-- known_page, assign_path, version_label, link_destinations,
+-- rewrite_destinations, digest, keywords_of, frontmatter_of,
+-- page_file_current, index_entries, link_index_entries,
+-- directory_indexes_for, llms_summary, find_broken_links,
+-- verification_failures, gate_flag, casefold, ends_with, last_segment,
+-- has_segment. Their contracts are stated where they are used.
+use "./convert.allium" as convert
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- The person or script running a command. What an invocation carries
+-- (confirmation, interactivity, progress format) travels with the command
+-- in the root module; the operator itself has no state here.
+external entity Operator {
+}
+
+-- A sync run, as the mirror sees it: the party that delivers page
+-- candidates. A type placeholder that crawl.allium's Run stands in for;
+-- that module governs its lifecycle.
+external entity SyncRun {
+    id: Integer                         -- mirror-local, stable, never reused
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- The one URL scope of a mirror. It serves the crawl, path assignment and
+-- link classification alike, so a link is uncrawled exactly when the crawl
+-- would fetch its target. The root builds it from the resolved
+-- configuration and the profile at run start; start URLs are always in
+-- scope and define the default hosts and prefixes.
+value CrawlScope {
+    allowed_hosts: Set<String>          -- host names, lower-cased, port dropped
+    path_prefixes: List<String>
+    include: List<String>               -- glob, or regex when prefixed re:
+    exclude: List<String>
+    max_depth: Integer
+    locale: String?                     -- pinned locale; null = no pinning
+    meaningful_query_params: List<String>
+    locale_codes: Set<String>           -- from the profile: the segments that are locales
+
+    -- Identity: lower-case scheme and host, default port dropped, dot
+    -- segments resolved, a trailing index.html folded into "/", only
+    -- meaningful (never tracking) query parameters kept and sorted, the
+    -- fragment dropped, a trailing slash kept.
+    identity_of(url): normalise_url(url, meaningful_query_params)
+
+    host_allowed(url): hostname_of(identity_of(url)) in allowed_hosts
+
+    -- Only the first path segment is ever a locale, and only when the
+    -- profile lists it as one.
+    foreign_locale(url):
+        locale != null
+        and first_path_segment(identity_of(url)) in locale_codes
+        and first_path_segment(identity_of(url)) != locale
+
+    -- In bounds without regard to depth: the test path assignment and link
+    -- classification use. Patterns match the identity, not the raw URL; a
+    -- malformed URL is out of bounds.
+    within_bounds(url):
+        scheme_of(identity_of(url)) in {"http", "https"}
+        and host_allowed(url)
+        and path_prefixes.any(p => starts_with(path_of(identity_of(url)), p))
+        and not exclude.any(p => pattern_matches(identity_of(url), p))
+        and (include.count = 0 or include.any(p => pattern_matches(identity_of(url), p)))
+        and not foreign_locale(url)
+
+    allows(url, depth): within_bounds(url) and depth >= 0 and depth <= max_depth
+
+    -- Default stated here (veto at review): a declared canonical becomes
+    -- the identity whenever its host is allowed, even outside the path
+    -- prefixes; otherwise the source URL's identity stands.
+    page_identity(source_url, canonical_url):
+        if canonical_url != null and host_allowed(canonical_url): identity_of(canonical_url)
+        else: identity_of(source_url)
+}
+
+-- The YAML block at the top of every page file. Keys are sorted and absent
+-- values are omitted. It carries no wall-clock time: fetch times live in
+-- the manifest, so an unchanged page's file never changes.
+value Frontmatter {
+    source_url: String
+    title: String
+    content_digest: String              -- of the body only, never the frontmatter
+    quality_score: Decimal
+    low_confidence: Boolean
+    quality_flags: Set<convert/QualityFlag>
+    tier: Tier
+    method: convert/ExtractionMethod
+    profile: String
+    keywords: List<String>
+    description: String?
+    canonical_url: String?
+    breadcrumbs: List<String>?
+    etag: String?
+    last_modified: String?
+    sitemap_lastmod: String?
+    version: String?
+    locale: String?
+}
+
+-- One line of index.jsonl, and the source of index.md and llms.txt lines.
+value IndexEntry {
+    path: String
+    identity: String
+    source_url: String
+    title: String
+    description: String
+    keywords: List<String>
+    headings: List<String>
+    quality_score: Decimal
+    low_confidence: Boolean
+    quality_flags: Set<convert/QualityFlag>
+    content_digest: String
+    last_modified: String?
+    version: String?
+    locale: String?
+    word_count: Integer
+    outbound_internal: Integer
+    inbound_internal: Integer
+}
+
+-- One line of links.jsonl: a URL some page links to, whether or not the
+-- mirror holds a page for it.
+value LinkIndexEntry {
+    url: String                         -- the identity, without fragment
+    kind: LinkKind
+    path: String?                       -- when a written page holds the URL
+    cited_by: List<String>              -- sorted paths of the pages that link to it
+}
+
+-- A generated per-directory index (_index.md).
+value DirectoryIndex {
+    directory: String
+    heading: String
+    entries: List<IndexEntry>
+}
+
+-- A relative link in a page file that reaches no file or no anchor.
+value BrokenLink {
+    from_path: String
+    href: String
+    reason: BrokenLinkReason
+}
+
+-- One finding of verify.
+value VerificationFailure {
+    path: String
+    reason: VerificationReason
+    detail: String                      -- the gate, link or digest concerned
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+-- The fetch tiers, declared here because a page records the tier its
+-- response came from; the crawl walks them.
+enum Tier { http | browser | stealth }
+
+-- internal: a written page holds the target. uncrawled: in bounds, no
+-- page. dangling: the target is a removed page. external: anything else.
+enum LinkKind { internal | uncrawled | dangling | external }
+
+enum BrokenLinkReason { missing_file | outside_mirror | fragment_not_found }
+
+enum VerificationReason {
+    missing_file | unmanaged_file | invalid_page_file | digest_mismatch
+    | quality_drift | broken_link | index_stale
+}
+
+-- Why a page was removed: it answered 404 or 410 (absent), it redirected
+-- out of scope, it fell outside a narrowed scope, or its URL now resolves
+-- to another page (merged).
+enum RemovalReason { absent | redirected_out | out_of_scope | merged }
+
+-- What one settled fetch delivers.
+enum CandidateOutcome { converted | unchanged | absent | redirected_out }
+
+-- What finalisation found a page to be, relative to the last run.
+enum StoreOutcome { added | changed | unchanged | moved }
+
+enum PassKind { finalise | index | verify }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- An output directory and its manifest. The root creates it at init and
+-- writes its scope at every run start; the crawl and the passes read it.
+entity Mirror {
+    out_dir: String
+    scope: CrawlScope
+    profile: convert/Profile
+    declared_owned_hosts: Set<String>   -- the operator's saved "I own this host" statement, unverified
+    recorded_root_url: String?          -- the root URL the last run used
+    processing_signature: String        -- digest of the conversion settings and the profile; never budgets or seeds
+
+    pages: Page with mirror = this
+    aliases: Alias with mirror = this
+    index: Index with mirror = this
+
+    written_pages: pages where status = written
+    removed_pages: pages where status = removed
+    page_paths: written_pages -> path
+    is_populated: written_pages.count > 0
+    has_declared_owner: declared_owned_hosts.count > 0
+}
+
+-- A page of the mirror: written, or removed at the source. A removed page
+-- keeps its record and its path so that a return restores it in place.
+entity Page {
+    mirror: Mirror
+    identity: String
+    path: String                        -- relative .md path; changes only when the identity moves
+    canonical_url: String?              -- what the page declared, when it did
+    source_url: String                  -- the URL whose response was converted
+    title: String
+    description: String
+    method: convert/ExtractionMethod
+    tier: Tier
+    quality: convert/QualityResult      -- the measurement at conversion, fetch flags included
+    flags: Set<convert/QualityFlag>     -- quality.flags plus the link flags of the last finalisation
+    low_confidence: Boolean             -- recomputed after link rewriting with convert's definition
+    anchors: Set<String>
+    headings: List<String>
+    keywords: List<String>              -- a pure function of the body
+    breadcrumbs: List<String>
+    locale: String?
+    version: String?
+    raw_digest: String                  -- of the fetched HTML; the crawl's change shortcut
+    content_digest: String              -- of the published body; serves change detection and the frontmatter
+    previous_digest: String?            -- content_digest before this run touched the page; null when new or revived
+    moved_from: String?                 -- the old path while a move awaits finalisation
+    etag: String?
+    last_modified: String?
+    sitemap_lastmod: String?
+    processing_signature: String        -- the mirror's signature when the page was converted
+    converted_body: String              -- Markdown with absolute links, as converted
+    body: String                        -- Markdown with rewritten links, as published
+    frontmatter: Frontmatter?           -- set at finalisation
+    last_outcome: StoreOutcome          -- what the last finalisation found the page to be
+    last_seen_run: Integer              -- the run that last fetched or confirmed the page
+    last_stored_run: Integer            -- the run that last stored converted content
+    first_seen: Timestamp
+    fetched_at: Timestamp               -- moves when converted content was stored
+    last_seen: Timestamp
+    last_changed: Timestamp             -- moves when the published body changed
+    status: written | removed
+    removed_at: Timestamp when status = removed
+    removal_reason: RemovalReason when status = removed
+    redirect_target: String?            -- recorded when the page redirected out of scope
+
+    outbound_links: Link with source = this
+    inbound_links: Link with target = this
+    aliases: Alias with target = this
+
+    internal_outbound: outbound_links where kind = internal
+    internal_inbound: inbound_links where kind = internal
+    outbound_internal: internal_outbound.count
+    inbound_internal: internal_inbound.count
+    has_uncrawled_link: outbound_links.any(l => l.kind = uncrawled)
+    has_dangling_link: outbound_links.any(l => l.kind = dangling)
+    has_unresolved_fragment: outbound_links.any(l => not l.fragment_resolved)
+    is_new_this_run: previous_digest = null
+    was_moved: moved_from != null
+
+    invariant ScoreIsAFraction {
+        quality.score >= 0 and quality.score <= 1
+    }
+
+    invariant FullScoreIffAllGatesPass {
+        quality.all_gates_pass = (quality.score = 1)
+    }
+
+    invariant FailedGatesAreFlagged {
+        quality.failed.all(g => gate_flag(g) in flags)
+    }
+
+    invariant LowConfidenceDefinition {
+        low_confidence = (not quality.all_gates_pass or flags.any(f => f in convert/config.incomplete_flags))
+    }
+
+    invariant LinkFlagsAgreeWithLinks {
+        status = written implies
+            (uncrawled_internal in flags) = has_uncrawled_link
+            and (dangling_inbound in flags) = has_dangling_link
+            and (unresolved_fragment in flags) = has_unresolved_fragment
+    }
+
+    invariant KeywordsAreBounded {
+        keywords.count <= config.keywords_per_page
+            and keywords.unique.count = keywords.count
+    }
+
+    transitions status {
+        written -> removed
+        removed -> written
+    }
+}
+
+-- A URL that resolves to a page: a redirect hop or a non-canonical URL.
+-- An alias points at the page itself, so it follows an identity move and
+-- is dropped with the page.
+entity Alias {
+    mirror: Mirror
+    url: String
+    target: Page
+
+    invariant AliasIsNotItsTarget {
+        url != target.identity
+    }
+}
+
+-- One outbound link of a page, as resolved at the last finalisation. The
+-- whole set of a page is replaced each time; images never become links.
+entity Link {
+    source: Page
+    target_identity: String             -- the destination's identity, before alias resolution
+    fragment: String?
+    kind: LinkKind
+    target: Page?                       -- present when kind = internal
+    fragment_resolved: Boolean          -- no fragment, or the fragment names an anchor of the target
+
+    invariant OnlyInternalLinksHaveTargets {
+        (kind = internal) = (target != null)
+    }
+}
+
+-- What one settled fetch delivers to the mirror: converted content, a
+-- confirmation that the page is unchanged, news that it is absent, or news
+-- that it redirected out of scope. The crawl creates it; the rules below
+-- pick it up by `.created`, so every candidate is accepted or marked a
+-- duplicate in the same step.
+entity PageCandidate {
+    mirror: Mirror
+    run_id: Integer
+    requested_identity: String          -- the frontier identity the fetch started from
+    source_url: String                  -- the URL whose response was converted, after redirects
+    redirect_hops: List<String>         -- every URL left behind by a redirect on the way
+    redirect_target: String?            -- the out-of-scope target, when the outcome says so
+    depth: Integer
+    outcome: CandidateOutcome
+    content: convert/ConvertedContent?  -- present for a converted outcome; fetch flags already added
+    tier: Tier
+    etag: String?
+    last_modified: String?
+    sitemap_lastmod: String?
+    raw_digest: String
+    status: pending | accepted | duplicate
+
+    transitions status {
+        pending -> accepted
+        pending -> duplicate
+        terminal: accepted, duplicate
+    }
+}
+
+-- One job over the mirror, created by the root: finalise (after a run:
+-- retire out-of-scope pages, resolve and rewrite links, write page files
+-- and indexes), index (write the indexes offline) or verify (check the
+-- mirror on disk and report).
+entity MirrorPass {
+    mirror: Mirror
+    operator: Operator                  -- whoever the pass answers to
+    kind: PassKind
+    run_id: Integer?                    -- the run a finalise pass follows; null for a command
+    failures: List<VerificationFailure>
+    broken_links: List<BrokenLink>
+    status: pending | completed
+
+    transitions status {
+        pending -> completed
+        terminal: completed
+    }
+}
+
+-- The generated indexes: index.md for people, index.jsonl for machines,
+-- llms.txt for agents, _index.md per large directory, links.jsonl for every
+-- URL the pages cite. Regenerated from scratch by every pass that writes
+-- them.
+entity Index {
+    mirror: Mirror
+    entries: List<IndexEntry>           -- one per written page, sorted by path
+    link_entries: List<LinkIndexEntry>  -- sorted by URL
+    directory_indexes: List<DirectoryIndex>
+    summary: String                     -- the llms.txt blockquote: the start page's description
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    max_path_chars: Integer = 200
+    collision_hash_chars: Integer = 6
+    keywords_per_page: Integer = 8
+    keywords_min: Integer = 5
+    hierarchical_index_threshold: Integer = 200    -- pages in a directory before it gets its own _index.md
+    llms_txt_cap: Integer = 2000                   -- pages listed one by one before directories are listed instead
+    prune: Boolean = false                         -- delete a removed page's file instead of archiving it
+    path_template: String = "{path}"               -- placeholders {path} {host} {version} {locale}
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Several rules share the PageCandidate.created trigger on purpose; their
+-- guards partition the outcomes and the page states, so exactly one fires
+-- per candidate. known_page(mirror, url) is the written page whose
+-- identity is the URL, else the written target of an alias for the URL,
+-- else null: a page's own identity beats an alias.
+
+------------------------------------------------------------
+-- Intake
+------------------------------------------------------------
+
+-- The crawl delivers one candidate per settled fetch through the
+-- PageIntake surface; the root requests passes through MirrorContents.
+-- Both become entities here so that the rules below pick them up.
+
+rule AdmitCandidate {
+    when: CandidateDelivered(run, mirror, requested_identity, source_url, redirect_hops, redirect_target?, depth, outcome, content?, tier, etag?, last_modified?, sitemap_lastmod?, raw_digest)
+    ensures: PageCandidate.created(
+        mirror: mirror, run_id: run.id, requested_identity: requested_identity,
+        source_url: source_url, redirect_hops: redirect_hops, redirect_target: redirect_target,
+        depth: depth, outcome: outcome, content: content, tier: tier,
+        etag: etag, last_modified: last_modified, sitemap_lastmod: sitemap_lastmod,
+        raw_digest: raw_digest, status: pending
+    )
+}
+
+rule RequestPass {
+    when: PassRequested(operator, mirror, kind, run_id?)
+    ensures: MirrorPass.created(
+        mirror: mirror, operator: operator, kind: kind, run_id: run_id,
+        failures: [], broken_links: [], status: pending
+    )
+}
+
+------------------------------------------------------------
+-- Ownership
+------------------------------------------------------------
+
+rule SaveOwnership {
+    when: OperatorSavesOwnership(operator, mirror, hosts)
+    requires: hosts.all(h => h in mirror.scope.allowed_hosts)
+    ensures: mirror.declared_owned_hosts = hosts
+
+    @guidance
+        -- Saving declarations is an affirmative "I own these websites"
+        -- configuration action, never permission to crawl a third party's
+        -- website and never a run by itself. An empty set revokes the
+        -- declarations. A host outside the allowed hosts is refused. Host
+        -- names are normalised exactly as URL hosts, with no wildcard or
+        -- inherited subdomain authority.
+}
+
+------------------------------------------------------------
+-- Storing converted content
+------------------------------------------------------------
+
+rule RejectDuplicateCandidate {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    requires: exists target and target.status = written and target.last_stored_run = candidate.run_id
+    ensures:
+        candidate.status = duplicate
+        CandidateDuplicate(candidate: candidate, page: target)
+
+    @guidance
+        -- Two requested URLs resolved to one identity in the same run (a
+        -- redirect to a page already stored, or a canonical already
+        -- honoured). The first store stands; the requested URL still
+        -- becomes an alias through the first candidate's redirect hops
+        -- when it was one of them, and the link index cites the identity.
+}
+
+rule RewriteKnownPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: exists target and target.status = written and target.last_stored_run != candidate.run_id
+    ensures:
+        target.previous_digest = target.content_digest
+        if exists previous and previous != target:
+            PageRetired(page: previous, reason: merged)
+        PageContentAccepted(candidate: candidate, page: target)
+
+    @guidance
+        -- The identity already has a written page: the requested page
+        -- itself, or another page the new canonical names. In the second
+        -- case the requested page is merged into the target: it is
+        -- removed with reason merged and its URL becomes an alias of the
+        -- target, so links to either URL resolve to one page file.
+}
+
+-- Default stated here (veto at review): the path follows the URL. When
+-- the identity of a known page changes, the page keeps its record and
+-- history, its path is reassigned, its file moves, and the run reports one
+-- moved change carrying the old and the new path, never also added. No
+-- stub is left at the old path; docs outside the mirror resolve the move
+-- from git history.
+rule MovePage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: exists previous
+    requires: not exists target or target.status = removed
+    let old_path = previous.path
+    let new_path = assign_path(candidate.mirror, identity)
+    ensures:
+        if exists target:
+            ArchivedCopyDeleted(mirror: candidate.mirror, path: target.path)
+            not exists target
+        previous.identity = identity
+        previous.previous_digest = previous.content_digest
+        if new_path != old_path:
+            previous.moved_from = old_path
+            previous.path = new_path
+            PageFileMoved(mirror: candidate.mirror, from_path: old_path, to_path: new_path)
+        PageContentAccepted(candidate: candidate, page: previous)
+
+    @guidance
+        -- A removed record already holding the new identity is replaced:
+        -- the live page supersedes it and its archived copy is deleted.
+        -- assign_path strips the scope prefix, names a directory URL
+        -- "index", drops .html, .htm and .aspx, appends the version label
+        -- the profile maps, keeps [A-Za-z0-9._-] in each segment and
+        -- replaces the rest with "-", avoids reserved device names, and
+        -- applies path_template. A candidate path held by another page
+        -- (compared case-insensitively), reserved (index.md, index.jsonl,
+        -- links.jsonl, llms.txt, crawl-report.json, rovo.toml, _index.md,
+        -- _removed/, .rovo/) or longer than max_path_chars becomes a stem
+        -- cut to max_path_chars - 10, "-", and the first
+        -- collision_hash_chars hex of the identity's digest; the suffix
+        -- depends on the identity alone, never on crawl order.
+}
+
+-- Default stated here (veto at review): a removed page that answers again
+-- is written again at a path for its current URL, which is its old path
+-- when that is still free, and the run reports it added. Its archived copy
+-- leaves the removed area.
+rule ReviveRemovedPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: not exists previous
+    requires: exists target and target.status = removed
+    let archived_path = target.path
+    ensures:
+        target.status = written
+        target.removed_at = null
+        target.removal_reason = null
+        target.redirect_target = null
+        target.path = assign_path(candidate.mirror, identity)
+        target.previous_digest = null
+        target.first_seen = now
+        ArchivedCopyDeleted(mirror: candidate.mirror, path: archived_path)
+        PageContentAccepted(candidate: candidate, page: target)
+}
+
+rule StoreNewPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: not exists previous
+    requires: not exists target
+    let content = candidate.content
+    requires: content != null
+    ensures:
+        Page.created(
+            mirror: candidate.mirror, identity: identity,
+            path: assign_path(candidate.mirror, identity),
+            canonical_url: content.canonical_url, source_url: candidate.source_url,
+            title: content.title, description: content.description,
+            method: content.method, tier: candidate.tier,
+            quality: content.quality, flags: content.quality.flags,
+            low_confidence: content.quality.low_confidence,
+            anchors: content.anchors, headings: content.headings, keywords: [],
+            breadcrumbs: content.breadcrumbs,
+            locale: candidate.mirror.scope.locale ?? content.declared_locale,
+            version: version_label(candidate.mirror.profile, identity),
+            raw_digest: candidate.raw_digest,
+            content_digest: digest(content.body), previous_digest: null, moved_from: null,
+            etag: candidate.etag, last_modified: candidate.last_modified,
+            sitemap_lastmod: candidate.sitemap_lastmod,
+            processing_signature: candidate.mirror.processing_signature,
+            converted_body: content.body, body: content.body, frontmatter: null,
+            last_outcome: added, last_seen_run: candidate.run_id, last_stored_run: candidate.run_id,
+            first_seen: now, fetched_at: now, last_seen: now, last_changed: now,
+            status: written, redirect_target: null
+        )
+        PageContentAccepted(candidate: candidate, page: Page{mirror: candidate.mirror, identity: identity})
+
+    @guidance
+        -- The page is created with provisional content fields; the shared
+        -- RefreshPage rule below sets them for every stored candidate, new
+        -- or known, so there is one definition of what a store writes.
+        -- version_label maps the identity's version parameter through the
+        -- profile's version map and is null when the profile has no
+        -- version parameter.
+}
+
+-- Shared effects of every store. The page's links are dropped and
+-- re-resolved at finalisation, so the link flags and low-confidence
+-- verdict are provisional until then.
+rule RefreshPage {
+    when: PageContentAccepted(candidate, page)
+    requires: candidate.status = pending
+    let content = candidate.content
+    requires: content != null
+    ensures:
+        page.canonical_url = content.canonical_url
+        page.source_url = candidate.source_url
+        page.title = content.title
+        page.description = content.description
+        page.method = content.method
+        page.tier = candidate.tier
+        page.quality = content.quality
+        page.flags = content.quality.flags
+        page.low_confidence = content.quality.low_confidence
+        page.anchors = content.anchors
+        page.headings = content.headings
+        page.breadcrumbs = content.breadcrumbs
+        page.locale = candidate.mirror.scope.locale ?? content.declared_locale
+        page.version = version_label(candidate.mirror.profile, page.identity)
+        page.raw_digest = candidate.raw_digest
+        page.etag = candidate.etag
+        page.last_modified = candidate.last_modified
+        page.sitemap_lastmod = candidate.sitemap_lastmod
+        page.processing_signature = candidate.mirror.processing_signature
+        page.converted_body = content.body
+        page.last_seen_run = candidate.run_id
+        page.last_stored_run = candidate.run_id
+        page.fetched_at = now
+        page.last_seen = now
+        for l in page.outbound_links:
+            not exists l
+        for hop in candidate.redirect_hops:
+            if hop != page.identity:
+                AliasRecorded(mirror: candidate.mirror, url: hop, page: page)
+        if candidate.requested_identity != page.identity:
+            AliasRecorded(mirror: candidate.mirror, url: candidate.requested_identity, page: page)
+        candidate.status = accepted
+        PageStored(candidate: candidate, page: page)
+        LinksFound(candidate: candidate, page: page, depth: candidate.depth, targets: content.link_targets, navigation_targets: content.navigation_targets)
+
+    @guidance
+        -- No file is written here. Page files are written at finalisation,
+        -- after link rewriting, and only when their text would differ; an
+        -- interrupted run therefore leaves no half-published page, and the
+        -- next finalisation writes whatever is missing.
+}
+
+-- Default stated here (veto at review): an alias resolves to the final
+-- identity, follows the page through a move and is dropped with the page.
+-- A URL that is itself a written page's identity is never an alias.
+rule RecordAlias {
+    when: AliasRecorded(mirror, url, page)
+    requires: not exists Page{mirror: mirror, identity: url}
+    let alias = Alias{mirror: mirror, url: url}
+    ensures:
+        if exists alias:
+            alias.target = page
+        else:
+            Alias.created(mirror: mirror, url: url, target: page)
+}
+
+rule DropAliasOfOwnIdentity {
+    when: AliasRecorded(mirror, url, page)
+    requires: exists Page{mirror: mirror, identity: url}
+    let stale = Alias{mirror: mirror, url: url}
+    ensures:
+        if exists stale:
+            not exists stale
+}
+
+------------------------------------------------------------
+-- Unchanged, absent and redirected candidates
+------------------------------------------------------------
+
+rule RecordUnchanged {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = unchanged
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: exists previous
+    ensures:
+        previous.last_seen = now
+        previous.last_seen_run = candidate.run_id
+        previous.etag = candidate.etag ?? previous.etag
+        previous.last_modified = candidate.last_modified ?? previous.last_modified
+        previous.sitemap_lastmod = candidate.sitemap_lastmod ?? previous.sitemap_lastmod
+        candidate.status = accepted
+        PageStored(candidate: candidate, page: previous)
+
+    @guidance
+        -- A not-modified answer or an unchanged raw document. The page
+        -- file is untouched; the stored measurement is carried, not
+        -- re-measured. Taking the entry's sitemap lastmod means the same
+        -- lastmod does not force a refetch again.
+}
+
+rule DiscardUnchangedWithoutPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = unchanged
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity)
+    ensures:
+        candidate.status = accepted
+        CandidateDiscarded(candidate: candidate)
+}
+
+-- Default stated here (veto at review): a 404 or 410 removes the written
+-- page; on a URL with no written page it is a no-op recheck.
+rule RemoveAbsentPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = absent
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: exists previous
+    ensures:
+        candidate.status = accepted
+        PageRetired(page: previous, reason: absent, candidate: candidate)
+}
+
+rule AcceptAbsentWithoutPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = absent
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity)
+    ensures: candidate.status = accepted
+}
+
+-- Default stated here (veto at review): a known page that now redirects
+-- out of scope is removed and the target is recorded on its record.
+rule RemoveRedirectedOutPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = redirected_out
+    let previous = known_page(candidate.mirror, candidate.requested_identity)
+    requires: exists previous
+    ensures:
+        candidate.status = accepted
+        PageRetired(page: previous, reason: redirected_out, redirect_target: candidate.redirect_target, candidate: candidate)
+}
+
+rule AcceptRedirectedOutWithoutPage {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = redirected_out
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity)
+    ensures: candidate.status = accepted
+}
+
+------------------------------------------------------------
+-- Removal
+------------------------------------------------------------
+
+-- Every removal goes through here: the page keeps its record and path,
+-- its aliases and links go, and its file is archived under _removed/ at
+-- the same relative path, or deleted when prune is set.
+rule RetirePage {
+    when: PageRetired(page, reason, redirect_target?, candidate?)
+    requires: page.status = written
+    ensures:
+        page.status = removed
+        page.removed_at = now
+        page.removal_reason = reason
+        page.redirect_target = redirect_target
+        page.moved_from = null
+        for a in page.aliases:
+            not exists a
+        for l in page.outbound_links:
+            not exists l
+        if config.prune:
+            PageFileDeleted(mirror: page.mirror, path: page.path)
+        else:
+            PageFileArchived(mirror: page.mirror, path: page.path)
+        PageRemoved(mirror: page.mirror, page: page, reason: reason, candidate: candidate)
+
+    @guidance
+        -- Pages that linked here keep their links until the next
+        -- finalisation re-resolves them as dangling. The first removal is
+        -- kept: a removed page is never reported removed again.
+}
+
+------------------------------------------------------------
+-- Finalisation: scope, links and bodies
+------------------------------------------------------------
+
+-- Default stated here (veto at review): a page that falls outside the
+-- scope in force is removed at the next finalisation, whatever its
+-- content.
+rule RetireOutOfScopePages {
+    when: pass: MirrorPass.created
+    requires: pass.status = pending
+    requires: pass.kind = finalise
+    ensures:
+        for p in pass.mirror.written_pages:
+            if not pass.mirror.scope.within_bounds(p.identity):
+                PageRetired(page: p, reason: out_of_scope)
+        ScopeSettled(pass: pass)
+}
+
+-- Every finalisation resolves the links of every written page against the
+-- complete set of written pages, so redirects, removals and new pages are
+-- reflected in every page, not only the refetched ones.
+rule ResolveMirrorLinks {
+    when: ScopeSettled(pass)
+    requires: pass.status = pending
+    ensures:
+        for page in pass.mirror.written_pages:
+            for l in page.outbound_links:
+                not exists l
+            for d in link_destinations(page.converted_body):
+                DestinationFound(pass: pass, page: page, target: d.target, fragment: d.fragment)
+            PageLinksResolved(pass: pass, page: page)
+        MirrorLinksResolved(pass: pass)
+
+    @guidance
+        -- link_destinations lists every link (target as written, fragment)
+        -- outside frontmatter, fenced code, inline code and pre or code
+        -- blocks; images, empty targets
+        -- and non-web targets (mailto:, tel:, javascript:, data:) are left
+        -- as written and never become links. Every page's destinations are
+        -- resolved and every page's body finalised before
+        -- MirrorLinksResolved is handled.
+}
+
+-- The destination is made absolute against the page's source URL and
+-- normalised to an identity. A written page holding it, directly or
+-- through an alias, makes the link internal.
+rule LinkToPage {
+    when: DestinationFound(pass, page, target, fragment?)
+    let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    let holder = known_page(page.mirror, identity)
+    requires: exists holder
+    ensures: Link.created(
+        source: page, target_identity: identity, fragment: fragment,
+        kind: internal, target: holder,
+        fragment_resolved: fragment = null or fragment in holder.anchors
+    )
+}
+
+rule LinkToRemovedPage {
+    when: DestinationFound(pass, page, target, fragment?)
+    let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    requires: not exists known_page(page.mirror, identity)
+    let holder = Page{mirror: page.mirror, identity: identity}
+    requires: exists holder and holder.status = removed
+    ensures: Link.created(
+        source: page, target_identity: identity, fragment: fragment,
+        kind: dangling, target: null, fragment_resolved: true
+    )
+}
+
+rule LinkToUncrawledPage {
+    when: DestinationFound(pass, page, target, fragment?)
+    let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    requires: not exists known_page(page.mirror, identity)
+    requires: not exists Page{mirror: page.mirror, identity: identity}
+    requires: page.mirror.scope.within_bounds(identity)
+    ensures: Link.created(
+        source: page, target_identity: identity, fragment: fragment,
+        kind: uncrawled, target: null, fragment_resolved: true
+    )
+}
+
+rule LinkToExternalPage {
+    when: DestinationFound(pass, page, target, fragment?)
+    let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    requires: not exists known_page(page.mirror, identity)
+    requires: not exists Page{mirror: page.mirror, identity: identity}
+    requires: not page.mirror.scope.within_bounds(identity)
+    ensures: Link.created(
+        source: page, target_identity: identity, fragment: fragment,
+        kind: external, target: null, fragment_resolved: true
+    )
+}
+
+-- The body is the converted body with each internal destination replaced
+-- by a relative path plus its fragment (a self-link with a fragment becomes
+-- a bare fragment) and every other destination left absolute. Every other
+-- byte, code samples included, is untouched. Link flags, keywords and the
+-- low-confidence verdict are recomputed from scratch.
+rule FinalisePageBody {
+    when: PageLinksResolved(pass, page)
+    let body = rewrite_destinations(page.converted_body, page)
+    let link_flags =
+        (if page.has_uncrawled_link: { uncrawled_internal } else: {})
+        + (if page.has_unresolved_fragment: { unresolved_fragment } else: {})
+        + (if page.has_dangling_link: { dangling_inbound } else: {})
+    ensures:
+        page.body = body
+        page.content_digest = digest(body)
+        page.flags = page.quality.flags + link_flags
+        page.low_confidence = page.quality.low_confidence or link_flags.any(f => f in convert/config.incomplete_flags)
+        page.keywords = keywords_of(body, config.keywords_per_page, config.keywords_min)
+        PageBodyFinalised(pass: pass, page: page)
+
+    @guidance
+        -- keywords_of returns up to keywords_per_page distinctive terms of
+        -- one body, topped up to keywords_min when the body allows, and
+        -- depends on nothing but that body, so an unchanged page keeps its
+        -- keywords. rewrite_destinations is idempotent.
+}
+
+-- Default stated here (veto at review): the published body's digest alone
+-- decides whether a page is added, changed or unchanged; a move is one
+-- moved change; a page file is written only when its text would differ
+-- from the file on disk.
+rule PublishPage {
+    when: PageBodyFinalised(pass, page)
+    let outcome =
+        if page.was_moved: moved
+        else if page.is_new_this_run: added
+        else if page.previous_digest != page.content_digest: changed
+        else: unchanged
+    let previous_path = page.moved_from
+    ensures:
+        page.frontmatter = frontmatter_of(page)
+        page.last_outcome = outcome
+        if outcome != unchanged:
+            page.last_changed = now
+        page.previous_digest = page.content_digest
+        page.moved_from = null
+        if not page_file_current(page):
+            PageFileWritten(mirror: page.mirror, page: page)
+        PageFinalised(
+            pass: pass, page: page, outcome: outcome, previous_path: previous_path,
+            seen_this_run: page.last_seen_run = pass.run_id
+        )
+
+    @guidance
+        -- frontmatter_of takes the page's current fields. page_file_current
+        -- is true when the page file exists and its text equals the
+        -- frontmatter followed by the body; a file written is replaced
+        -- atomically. previous_path is the old path of a moved page.
+}
+
+------------------------------------------------------------
+-- Finalisation: indexes
+------------------------------------------------------------
+
+rule FinishLinkPass {
+    when: MirrorLinksResolved(pass)
+    requires: pass.status = pending
+    ensures:
+        pass.broken_links = find_broken_links(pass.mirror)
+        LinksRewritten(mirror: pass.mirror, pass: pass, operator: pass.operator, broken: find_broken_links(pass.mirror))
+        IndexBuildDue(pass: pass)
+
+    @guidance
+        -- find_broken_links lists every relative destination in a page
+        -- file that leaves the mirror, reaches no file, or names a
+        -- fragment absent from the target file; a missing page file is
+        -- itself broken. After a complete finalisation it is empty; a
+        -- non-empty list means a file could not be written.
+}
+
+rule RebuildIndexes {
+    when: pass: MirrorPass.created
+    requires: pass.status = pending
+    requires: pass.kind = index
+    ensures: IndexBuildDue(pass: pass)
+}
+
+-- Index outputs are a pure function of the written pages, their links and
+-- config: rebuilding from unchanged input leaves every output
+-- byte-identical, and no index carries wall-clock time.
+rule BuildIndexes {
+    when: IndexBuildDue(pass)
+    requires: pass.status = pending
+    let mirror = pass.mirror
+    let entries = index_entries(mirror.written_pages)
+    let link_entries = link_index_entries(mirror.written_pages, mirror.aliases)
+    let index = mirror.index
+    ensures:
+        if exists index:
+            index.entries = entries
+            index.link_entries = link_entries
+            index.directory_indexes = directory_indexes_for(entries, config.hierarchical_index_threshold)
+            index.summary = llms_summary(mirror, entries)
+        else:
+            Index.created(
+                mirror: mirror, entries: entries, link_entries: link_entries,
+                directory_indexes: directory_indexes_for(entries, config.hierarchical_index_threshold),
+                summary: llms_summary(mirror, entries)
+            )
+        IndexFilesWritten(mirror: mirror)
+        pass.status = completed
+        IndexesWritten(mirror: mirror, pass: pass, operator: pass.operator)
+
+    @guidance
+        -- index_entries makes one IndexEntry per written page in path
+        -- order. index.md groups entries under one heading per top-level
+        -- directory and marks low-confidence pages; a directory holding
+        -- more than hierarchical_index_threshold pages (counted directly,
+        -- not recursively) gets its own _index.md, linked from its
+        -- parent's index, so no directory index is orphaned. llms.txt
+        -- lists every page up to llms_txt_cap; past it, a directory that
+        -- has its own _index.md is listed as one link, and root pages are
+        -- always listed. The summary is the description of the page whose
+        -- identity or alias matches a start URL, else the first page by
+        -- path. links.jsonl holds one LinkIndexEntry per cited identity,
+        -- without fragment, sorted by URL, with the kind link resolution
+        -- gave it and the citing pages' paths sorted. Stale _index.md
+        -- files outside the removed area are deleted. Index files are
+        -- written only when their text would differ.
+}
+
+------------------------------------------------------------
+-- Verification
+------------------------------------------------------------
+
+-- Default stated here (veto at review): verify reports drift from the
+-- recorded result, not the recorded result again; a fragment resolves
+-- when the target file holds the anchor; the generated indexes are checked
+-- too.
+rule VerifyPages {
+    when: pass: MirrorPass.created
+    requires: pass.status = pending
+    requires: pass.kind = verify
+    let failures = verification_failures(pass.mirror)
+    ensures:
+        pass.failures = failures
+        pass.status = completed
+        VerificationFinished(mirror: pass.mirror, pass: pass, operator: pass.operator, failures: failures)
+
+    @guidance
+        -- verification_failures is offline and never contacts the site. It
+        -- reports: a written page whose file is missing (missing_file); a
+        -- Markdown file outside the removed area and the generated indexes
+        -- that the manifest does not know (unmanaged_file); a page file
+        -- without the required frontmatter keys or that does not parse
+        -- (invalid_page_file); a body whose digest differs from the
+        -- frontmatter's or the manifest's content_digest
+        -- (digest_mismatch); a gate that fails on the current body against
+        -- the stored expected counts but did not fail when the page was
+        -- measured (quality_drift); a relative link in a page file or a
+        -- generated index that leaves the mirror, reaches no file, or
+        -- names a fragment the target file does not hold (broken_link);
+        -- an index file whose text differs from what BuildIndexes would
+        -- write (index_stale).
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant UniquePageIdentity {
+    for a in Pages:
+        for b in Pages:
+            a != b and a.mirror = b.mirror implies a.identity != b.identity
+}
+
+-- Paths are unique ignoring case, so the mirror is portable to
+-- case-insensitive file systems.
+invariant UniquePagePathIgnoringCase {
+    for a in Pages:
+        for b in Pages:
+            a != b and a.mirror = b.mirror implies casefold(a.path) != casefold(b.path)
+}
+
+invariant PagePathsAvoidManagedNames {
+    for p in Pages:
+        ends_with(p.path, ".md")
+        and p.path != "index.md"
+        and last_segment(p.path) != "_index.md"
+        and not has_segment(p.path, "_removed")
+        and not has_segment(p.path, ".rovo")
+}
+
+invariant OneAliasPerUrl {
+    for a in Aliases:
+        for b in Aliases:
+            a != b and a.mirror = b.mirror implies a.url != b.url
+}
+
+invariant AliasesPointAtWrittenPages {
+    for a in Aliases:
+        a.target.status = written
+}
+
+invariant PageProcessedUnderOneSignature {
+    for p in Pages:
+        p.last_stored_run <= p.last_seen_run
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- What the mirror on disk promises whoever reads it: the operator, a diff,
+-- an agent, or documentation outside the mirror that links into it.
+surface MirrorContents {
+    facing operator: Operator
+    context mirror: Mirror
+
+    exposes:
+        mirror.out_dir
+        mirror.scope
+        mirror.profile.name
+        mirror.declared_owned_hosts
+        mirror.recorded_root_url
+        mirror.processing_signature
+        mirror.is_populated
+        mirror.has_declared_owner
+        mirror.page_paths
+        for p in mirror.written_pages:
+            p.identity
+            p.path
+            p.frontmatter
+            p.body
+            p.flags
+            p.low_confidence
+            p.last_outcome
+            p.outbound_internal
+            p.inbound_internal
+        for r in mirror.removed_pages:
+            r.path
+            r.removed_at
+            r.removal_reason
+            r.redirect_target
+        mirror.index?.entries
+        mirror.index?.link_entries
+        mirror.index?.directory_indexes
+        mirror.index?.summary
+
+    provides:
+        OperatorSavesOwnership(operator, mirror, hosts)
+        PassRequested(operator, mirror, kind, run_id?)
+
+    @guarantee PageFileProvenance
+        -- Every page file starts with YAML frontmatter whose keys are
+        -- sorted. It always carries source_url, title, content_digest,
+        -- quality_score, low_confidence, quality_flags, tier, method,
+        -- profile and keywords; description, canonical_url, breadcrumbs,
+        -- etag, last_modified, sitemap_lastmod, version and locale appear
+        -- only when they have a value. The content digest covers the body
+        -- after the frontmatter only, so a frontmatter edit never moves
+        -- it. No page file carries a wall-clock time.
+
+    @guarantee RelativeLinksOnly
+        -- A link to a written page is a relative path from the linking
+        -- file, plus its fragment, so the mirror links to itself and
+        -- documentation outside the mirror can link to a page file and a
+        -- heading fragment. A fragment is defined by the anchors the
+        -- target file holds. Every other link stays absolute.
+
+    @guarantee UnchangedRunIsStable
+        -- A sync against an unchanged site rewrites no page file and no
+        -- index file: change detection, keywords, frontmatter and indexes
+        -- are pure functions of the page bodies, links and configuration,
+        -- and no generated file carries a wall-clock time. A diff of the
+        -- mirror after a sync therefore shows only what changed upstream.
+
+    @guarantee DeterministicIndexes
+        -- Rebuilding the indexes from unchanged input leaves every output
+        -- byte-identical; entries are sorted by path and link entries by
+        -- URL; files are LF-terminated UTF-8.
+
+    @guarantee CodeSamplesNeverRewritten
+        -- Destinations in frontmatter, fenced code, inline code and pre or
+        -- code blocks are never rewritten or verified.
+
+    @guarantee RemovedAreaKeepsPath
+        -- A removed page's file is archived under _removed/ at the same
+        -- relative path unless prune deletes it, and the page keeps its
+        -- record and path, so a return restores it in place.
+
+    @guarantee OwnershipIsADeclaration
+        -- Saving ownership records the operator's statement and nothing
+        -- more: it is not verified, it enables no run, and it names only
+        -- hosts the scope allows; any other host is refused.
+}
+
+-- What the crawl may deliver and what the mirror does with it.
+surface PageIntake {
+    facing run: SyncRun
+    context mirror: Mirror
+
+    exposes:
+        run.id
+        mirror.scope
+        mirror.processing_signature
+        for p in mirror.written_pages:
+            p.identity
+            p.raw_digest
+            p.etag
+            p.last_modified
+            p.sitemap_lastmod
+            p.processing_signature
+            p.low_confidence
+
+    provides:
+        CandidateDelivered(run, mirror, requested_identity, source_url, redirect_hops, redirect_target?, depth, outcome, content?, tier, etag?, last_modified?, sitemap_lastmod?, raw_digest)
+
+    @guarantee EveryCandidateIsSettled
+        -- Every delivered candidate is accepted or marked a duplicate in
+        -- the same step, and exactly one of PageStored, CandidateDuplicate,
+        -- CandidateDiscarded or PageRemoved follows it, so the run can
+        -- settle the frontier entry it came from.
+
+    @guarantee ConvertedContentCarriesFetchFlags
+        -- A converted candidate's content already carries the fetch flags
+        -- render_needed and soft_block_suspected in its quality result,
+        -- with low_confidence recomputed, so the mirror stores one
+        -- measurement.
+}
