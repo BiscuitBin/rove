@@ -14,8 +14,9 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request supersedes the older run. On main every
-# commit keeps its own run: a cancelled run would leave `check` red there.
+# A newer push to a pull request cancels the older run. On main a running
+# workflow is never cancelled, so `check` does not go red mid-run; GitHub
+# still replaces a pending run when a newer push arrives.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

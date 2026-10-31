@@ -562,7 +562,7 @@ last (`090d25f`). Commands and exit codes: `ai_tmp/final-review/fix-log.md`.
 | F7 | The lychee comment check is not in `just check`. | not real, real (low) | Not applied (split): §4 puts it in `warm-lychee`, and every CI setup fails on the drift, so it cannot merge. |
 | F8 | The prek cache key omitted the Python version, so the 3.13 floor and 3.14 Linux legs shared an entry whose python hook environment names an interpreter path. | real (low), real (low) | Applied, `090d25f`: restore and save keys carry `py<python-version>`. Rendered per job: floor `Linux-X64-prek-py3.13-…`, gate (ubuntu) and audit `…-py3.14-…`, where all three were one key before. Run on `main` in `41146124607`: floor `Linux-X64-prek-py3.13-817c4e7…`, gate (ubuntu) `Linux-X64-prek-py3.14-817c4e7…`, gate (macOS) `macOS-ARM64-prek-py3.14-817c4e7…`. |
 | F9 | `floor` checks a clean tree with inline `git status --porcelain`, not a recipe. | not real, not real | Not applied: §10 prescribes it, because `check-clean` is B's and cannot run on 3.13. |
-| F10 | `cancel-in-progress: true` cancels a superseded `main` run and `check` then reports it failed. | not real, real (low) | Applied by maintainer decision, `d394341`: `cancel-in-progress` is true only for `pull_request` events, so each `main` push keeps its run; `audit.yml` is unchanged (it never runs on a `main` push). PR #2 run `41146035077` green at `d394341`. |
+| F10 | `cancel-in-progress: true` cancels a superseded `main` run and `check` then reports it failed. | not real, real (low) | Applied by maintainer decision, `d394341`: `cancel-in-progress` is true only for `pull_request` events, so a running `main` workflow is no longer cancelled by a newer push; a pending one can still be replaced, because a concurrency group holds one running and one pending run (the `ci.yml` comment was corrected to say so in PR #3); `audit.yml` is unchanged (it never runs on a `main` push). PR #2 run `41146035077` green at `d394341`. |
 
 Maintainer action carried from F1: the shared shim at
 `/Users/scutting/projects/biscuitbin/rove/.git/hooks/pre-commit` still names this
@@ -586,7 +586,8 @@ None at writing; step 2 may add some.
 
 PR #2 (`bootstrap` → `main`) merged by the maintainer as a merge commit,
 `789fcbc139355ecd3faa7c7841b2f4eaea28bd24`, at 2026-10-30T23:43:15Z, after its head
-`d394341` passed all five jobs (run `41146035077`). The first `ci.yml` run on `main`:
+`d394341` passed all five jobs (CI run `41146035077`: both `gate` legs, `floor`,
+`check`; Audit run `41146034777`). The first `ci.yml` run on `main`:
 
 ```text
 $ gh run view 41146124607 --json headSha,event,conclusion,url,jobs --jq '{headSha,event,conclusion,url,jobs:[.jobs[]|{name,conclusion}]}'
