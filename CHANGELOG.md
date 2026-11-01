@@ -21,3 +21,9 @@ policy.
   `mirror`, `convert`) that specify rovo as a documentation mirror, elicited from the
   product brief with two prototype specifications as evidence, with the product's terms
   in the terminology page (decision 0012). Nothing of it is implemented yet.
+- The product's foundation, with no specification behaviour yet: the runtime
+  dependencies httpx, beautifulsoup4, lxml and markdownify and the `browser` extra
+  (playwright); the private modules `_convert`, `_mirror`, `_crawl`, `_config` and
+  `_report` with a test holding their import direction; the end-to-end harness serving
+  fixture sites on `127.0.0.1`, the `browser` marker and `just e2e-browser`; and decision
+  0013, the mirror's state as JSON under `.rovo/`, written atomically.

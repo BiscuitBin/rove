@@ -25,6 +25,31 @@ dependencies = [
   # The command-line framework. Imported by rovo.cli alone, never by `import rovo`
   # (decision 0003). A compatible range: uv.lock is the pin (decision 0005).
   "typer>=0.27.3,<0.28",
+  # The HTTP client the crawl fetches pages with. urllib has no connection pooling with
+  # limits, no timeout per phase and no HTTP/2. BSD-3-Clause; released by Encode
+  # (Tom Christie), the locked 0.28.1 uploaded 2024-12-06. At 0.x: the next minor bounds it.
+  "httpx>=0.28.1,<0.29",
+  # The HTML tree that extraction and link rewriting walk. The standard library has
+  # html.parser, a tokenizer, but no navigable tree. MIT; released by Leonard Richardson,
+  # the locked 4.15.0 uploaded 2026-06-07.
+  "beautifulsoup4>=4.15.0,<5",
+  # The parser beautifulsoup4 is driven with: fast and the one the tests run, where
+  # html.parser is slow and lenient. BSD-3-Clause (the wheel bundles libxml2 and libxslt,
+  # MIT); released by the lxml dev team, the locked 6.1.3 uploaded 2026-09-02.
+  "lxml>=6.1.3,<7",
+  # HTML to Markdown, the conversion's core; the standard library has no converter.
+  # MIT (by its classifier; the metadata has no License field); released by Matthew
+  # Tretter, the locked 1.2.3 uploaded 2026-06-30.
+  "markdownify>=1.2.3,<2",
+]
+
+[project.optional-dependencies]
+browser = [
+  # The browser tier: renders pages that need JavaScript; the standard library has no
+  # JavaScript engine. The extra installs the Python package only, never a browser
+  # (`playwright install` fetches those). Apache-2.0; released by Microsoft, the locked
+  # 1.64.1 uploaded 2026-10-22. Imported by nothing yet.
+  "playwright>=1.64.1,<2",
 ]
 
 [project.scripts]

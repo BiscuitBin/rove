@@ -133,6 +133,13 @@ py-typecheck:
 py-test *args:
     uv run --frozen pytest "$@"
 
+# The tests marked browser, with the browser extra. Not a gate and outside
+# `just check`, which needs neither a browser nor the network. Offline: on a
+# cold cache it fails rather than fetching playwright, and no recipe installs
+# playwright's browsers yet.
+e2e-browser *args:
+    uv run --frozen --offline --extra browser pytest -m browser "$@"
+
 # Gate: the suite under coverage, then the floor. .coveragerc sets
 # parallel = true, so every process writes its own data file and combine
 # always has something to merge; erase first, so no stale file counts.

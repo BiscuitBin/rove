@@ -17,8 +17,12 @@ frameworks, the scope and the conventions.
 `pytest.ini` configures the suite: `testpaths = tests`, and
 `addopts = -ra --strict-config --strict-markers`, so an unknown marker or configuration
 key is an error rather than a silent no-op. `xfail_strict = true` makes an unexpected
-pass fail, and `filterwarnings = error` turns every warning into a failure. Tests live
-directly under `tests/`, one file per surface, with no package and no `conftest.py`.
+pass fail, and `filterwarnings = error` turns every warning into a failure. `markers`
+registers the one marker, `browser`. Tests live directly under `tests/`, one file per
+surface, with no package and no `conftest.py`; the exception is `tests/e2e/`, the
+end-to-end tests, whose `conftest.py` holds the harness. No package means pytest and mypy
+key each test module by its basename, so no basename under `tests/e2e/` repeats one
+under `tests/`.
 Test names state the behaviour, and each test has a docstring, because ruff's
 rules apply to tests too.
 
@@ -32,6 +36,20 @@ invariant judges the report: no module whose first component is `typer`, `rich` 
 `click` was loaded (invariant 1); `__all__` is exactly `["__version__"]` (invariant 2);
 and `rovo.__version__` equals `importlib.metadata.version("rovo")` (invariant 3). A new
 public name changes the second test, deliberately.
+
+## The import direction
+
+`tests/test_import_direction.py` reads every module under `src/rovo/` with `ast`,
+without importing any of it, and collects each `import`, each `from ... import` (as the
+module and as the module plus each name) and each `importlib.import_module` or
+`__import__` call with a literal name. One test per rule: nothing under `rovo._convert`
+imports `rovo._mirror`, `rovo._crawl` or `rovo.cli`; nothing under `rovo._mirror`
+imports `rovo._crawl` or `rovo.cli`; nothing under `rovo._crawl` imports `rovo.cli`; and
+`src/rovo/__init__.py` imports no private module, not `rovo.cli`, and nothing whose first
+component is `httpx`, `bs4`, `lxml`, `markdownify`, `playwright` or `typer`. A further
+test requires the scan to have found the root and all five private modules, so an
+emptied walk cannot pass. A name computed at run time escapes it; the API probe and the
+wheel smoke still catch what `import rovo` actually loads.
 
 ## The command line
 
@@ -51,7 +69,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the four package files (`py.typed` among them) and the
+the wheel installed exactly the nine package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -59,6 +77,26 @@ and checked against the lock's hashes, runs `scripts/wheel_smoke.py cli`, which 
 that `python -m rovo --version` and the console script print the same version line, and
 finally runs the installed `rovo --version`.
 A build on every gate is the cost of testing the artefact that will ship.
+
+## The end-to-end harness
+
+`tests/e2e/conftest.py` provides the factory fixture `serve_site`: `serve_site("basic")`
+serves `tests/fixtures/sites/basic/` with the standard library's `ThreadingHTTPServer`
+and `SimpleHTTPRequestHandler`, request logging silenced, bound to an ephemeral port on
+`127.0.0.1` in a background thread, and returns the base URL
+(`http://127.0.0.1:<port>/`). When the test ends, every server it started is shut down
+and closed, and its threads are joined (the server joins its request threads too), so
+`filterwarnings = error` sees no unclosed socket. Nothing reaches the network.
+
+`tests/fixtures/sites/<name>/` holds the fixture sites, one directory each; `basic` is a
+single `index.html`. `tests/e2e/test_harness.py` proves the harness: the basic site
+answers 200 with its heading. The suite and `just coverage` run the end-to-end tests
+with everything else.
+
+The `browser` marker is for tests that need playwright and a browser. Without the
+`browser` extra installed they skip through `pytest.importorskip`; `just e2e-browser`
+runs them with the extra. Today the one such test checks that playwright's sync API
+imports.
 
 ## Coverage
 
@@ -78,7 +116,8 @@ than contrive a way to cover it.
 
 ## The positive controls
 
-`tests/fixtures/py-lint-violation/` holds `ruff.py` and `mypy.py`, deliberately broken
+Of `tests/fixtures/`, only `py-lint-violation/` is a positive control; `sites/` holds
+the end-to-end fixture sites. `tests/fixtures/py-lint-violation/` holds `ruff.py` and `mypy.py`, deliberately broken
 files the lint and type gates must reject. They are not tests: pytest does not collect
 them, `ruff.toml` and `mypy.ini` exclude them from normal discovery, and the fixer
 configuration leaves them alone. [Quality gates](quality-gates.md) describes what each

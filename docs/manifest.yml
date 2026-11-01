@@ -541,6 +541,20 @@
         "decision_product_definition"
       ],
       "requires": []
+    },
+    {
+      "path": "decisions/0013-mirror-state-on-disk.md",
+      "title": "Decision 0013: The mirror's state on disk",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_mirror_state"
+      ],
+      "requires": []
     }
   ]
 }

@@ -31,6 +31,7 @@ snapshot.
 | T05 | Integration: the first green `just check` from a fresh clone and in CI | `T05-integration.md` | T01, T02, T03, T04 | none | done |
 | T06 | Renovate over every pin, behind an authorised app install | `T06-renovate.md` | T05 | none | open |
 | T07 | Allium gate: the placeholder module, the spec recipes, the Allium skills, the specification workflow | `T07-allium-gate.md` | T05 | none | done |
+| T08 | Product foundation: the state-on-disk decision, the runtime dependencies, the private package skeleton, the end-to-end harness | `T08-foundation.md` | T07 | none | done |
 
 ## Dependency graph
 
@@ -38,7 +39,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07
+     └─ T04 ─┘       └─ T07 ─ T08
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -53,6 +54,10 @@ T00 ─┬─ T01 ─┐
 - **T07** brings in the Allium machinery the other Biscuit repositories carry: the
   specification gate, the seven Allium skills and the specification workflow, around a
   root module that declares no behaviour yet.
+- **T08** is slice 0 of the product's implementation (T08 to T20, on
+  `full-final-prototype`): decision 0013 on the mirror's state on disk, the runtime
+  dependencies, the private package skeleton with its import-direction test, and the
+  end-to-end harness. It implements no specification behaviour.
 
 ## How to pick up a ticket
 

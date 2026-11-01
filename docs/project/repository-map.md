@@ -22,9 +22,14 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── __init__.py            The public API: __all__ and __version__
 │   ├── cli.py                 The Typer app behind the rovo command
 │   ├── __main__.py            python -m rovo
-│   └── py.typed               Marks the package as typed
-├── tests/                     pytest suite: the API and the command
-│   └── fixtures/py-lint-violation/  Positive controls for ruff and mypy
+│   ├── py.typed               Marks the package as typed
+│   ├── _convert/ _mirror/ _crawl/  Private modules, in that import direction
+│   └── _config.py  _report.py  Private modules for the command
+├── tests/                     pytest suite: the API, the command and the import direction
+│   ├── e2e/                   End-to-end tests and their harness (conftest.py)
+│   └── fixtures/
+│       ├── py-lint-violation/ Positive controls for ruff and mypy
+│       └── sites/             Static sites the end-to-end tests serve
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py
 ├── docs/                      Handbook, manifest, specs/ and decisions/
 │   └── specs/                 The Allium modules: behaviour is decided here
@@ -46,7 +51,8 @@ follows [Python packaging](../explanation/packaging.md).
 command imports the API, never the reverse
 ([decision 0003](../decisions/0003-typer-cli-and-lazy-import.md)). Tests exercise the
 installed package. Fixtures are positive controls, deliberately broken files that the
-lint and type gates must reject, never examples of behaviour. Agent bridges point at
+lint and type gates must reject, never examples of behaviour; the one exception is
+`tests/fixtures/sites/`, the static sites the end-to-end tests serve. Agent bridges point at
 the canonical skills and add nothing. Hooks are installed only from the primary
 checkout, because all worktrees share their hook directory.
 

@@ -21,6 +21,7 @@ side today is a placeholder; the rule is what the implementation tickets inherit
 | `rovo.cli` (`src/rovo/cli.py`) | The Typer application `app`: the root callback with the eager `--version` option, and the `version` command. It imports `rovo` and presents it. |
 | `rovo.__main__` (`src/rovo/__main__.py`) | `python -m rovo`: imports `app` and runs it under the program name `rovo`, so it and the console script print the same usage line. |
 | `py.typed` | Marks the package as typed, so type checkers read its annotations. |
+| `rovo._convert`, `rovo._mirror`, `rovo._crawl`, `rovo._config`, `rovo._report` | Private modules, empty until the implementation tickets fill them. The first three follow the specification's direction ([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)): `_convert` imports nothing of rovo's, `_mirror` may import `_convert`, and `_crawl` may import both; none imports `rovo.cli`. `_config` and `_report` serve the command and the root. `import rovo` loads none of them. |
 
 The console script `rovo` is `rovo.cli:app`, declared in `[project.scripts]`.
 
@@ -33,7 +34,10 @@ uses only the API never pays for the command line's start-up time or imports
 line: `tests/test_api.py` imports `rovo` in a fresh interpreter and asserts that
 no typer, rich or click module was loaded, and the wheel smoke imports `rovo` from a wheel installed with no
 dependencies while recording every import attempted outside `rovo` and the standard
-library.
+library. A third holds the direction inside the package:
+`tests/test_import_direction.py` reads every module with `ast` and fails when one
+imports against it, or when `src/rovo/__init__.py` imports a private module, the command
+line or a runtime dependency.
 
 What goes where follows from the boundary, as a guide rather than a gate. Behaviour, and anything a Python caller could want,
 belongs in the API, where it is tested as Python. `rovo.cli` parses arguments, calls

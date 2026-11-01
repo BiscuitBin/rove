@@ -19,7 +19,8 @@ The project manifest, owned by T00 and frozen while the wave-1 lanes run.
 | Table | What it sets |
 | --- | --- |
 | `[build-system]` | hatchling, pinned exactly, as the build backend. |
-| `[project]` | Name `rovo`, the static `version`, `readme = "README.md"`, `requires-python = ">=3.13"`, the classifiers (including the upload guard), and the runtime dependency `typer>=0.27.3,<0.28`. No `license` field ([decision 0006](../decisions/0006-licence-deferred.md)). |
+| `[project]` | Name `rovo`, the static `version`, `readme = "README.md"`, `requires-python = ">=3.13"`, the classifiers (including the upload guard), and the runtime dependencies `typer>=0.27.3,<0.28`, `httpx>=0.28.1,<0.29`, `beautifulsoup4>=4.15.0,<5`, `lxml>=6.1.3,<7` and `markdownify>=1.2.3,<2`, each with its [decision 0005](../decisions/0005-dependency-policy.md) note. No `license` field ([decision 0006](../decisions/0006-licence-deferred.md)). |
+| `[project.optional-dependencies]` | `browser = ["playwright>=1.64.1,<2"]`: the browser tier's Python package, never a browser. |
 | `[project.scripts]` | The console script `rovo = "rovo.cli:app"`. |
 | `[project.urls]` | `Repository`, the GitHub repository `BiscuitBin/rove`. |
 | `[dependency-groups]` | `dev`: coverage, mypy, prek, pytest and ruff, each pinned exactly. `tooling`: the shared checkers. |
@@ -42,7 +43,7 @@ one file.
 | --- | --- |
 | `ruff.toml` | `target-version = "py313"`, `line-length = 99`, `src = ["src", "tests"]`, the fixtures excluded from discovery; `select = ["ALL"]` with `COM812`, `ISC001` and `CPY001` ignored, each with its reason; Google docstrings; relative imports banned; per-file ignores for `tests/**` and `scripts/**`, each commented; the formatter excludes `*.md`, so `just format` never rewrites Python quoted in Markdown. |
 | `mypy.ini` | `strict = True` over `src`, `tests` and `scripts`, `python_version = 3.13`, the fixtures excluded, `warn_unused_ignores`, `warn_unused_configs`, `warn_unreachable` and `warn_redundant_casts`. |
-| `pytest.ini` | `testpaths = tests`, strict configuration and markers, `xfail_strict`, warnings as errors. |
+| `pytest.ini` | `testpaths = tests`, strict configuration and markers, the one registered marker `browser`, `xfail_strict`, warnings as errors. |
 | `.coveragerc` | `branch`, `source_pkgs = rovo`, `parallel`, and `patch = subprocess`, which measures the Python subprocesses the tests start; the report's `show_missing` and excluded lines. The floor is the `Justfile`'s `coverage_floor`, never here. |
 
 ## Hooks and text checks

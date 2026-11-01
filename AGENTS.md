@@ -18,8 +18,10 @@ file or the user's request.
 ## Project map
 
 - `src/rovo/` holds the package: the API in `src/rovo/__init__.py`, the command line in
-  `src/rovo/cli.py`.
-- `tests/` holds the pytest suite; `tests/fixtures/` holds the lint positive controls.
+  `src/rovo/cli.py`, and the private modules `_convert`, `_mirror`, `_crawl`, `_config`
+  and `_report`.
+- `tests/` holds the pytest suite; `tests/fixtures/` holds the lint positive controls and,
+  under `sites/`, the static sites the end-to-end tests in `tests/e2e/` serve.
 - `scripts/` holds the first-run script and the wheel smoke.
 - `docs/` is the handbook, registered in `docs/manifest.yml`; `docs/decisions/` holds
   the decision records; `docs/specs/` holds the Allium specifications: the root

@@ -19,7 +19,19 @@ from pathlib import Path
 from types import ModuleType
 
 # Every file the wheel may install outside its .dist-info/: the package, no tests, no fixtures.
-PACKAGE_FILES = frozenset({"rovo/__init__.py", "rovo/__main__.py", "rovo/cli.py", "rovo/py.typed"})
+PACKAGE_FILES = frozenset(
+    {
+        "rovo/__init__.py",
+        "rovo/__main__.py",
+        "rovo/cli.py",
+        "rovo/py.typed",
+        "rovo/_config.py",
+        "rovo/_report.py",
+        "rovo/_convert/__init__.py",
+        "rovo/_mirror/__init__.py",
+        "rovo/_crawl/__init__.py",
+    }
+)
 # The one console script the installer generates and records, relative to site-packages.
 CONSOLE_SCRIPT = "../../../bin/rovo"
 
@@ -68,7 +80,7 @@ def _api() -> int:
         return _fail(reason)
     print(
         f"wheel_smoke api: rovo {rovo.__version__}, no CLI module imported,"
-        " exactly the four package files and the expected metadata"
+        " exactly the nine package files and the expected metadata"
     )
     return 0
 
