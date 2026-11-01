@@ -612,15 +612,15 @@ rule MovePage {
         -- alias the new identity held is dropped, since a page's identity
         -- is never an alias. assign_path strips the scope prefix, names a directory URL
         -- "index", drops .html, .htm and .aspx, appends the version label
-        -- the profile maps, keeps [A-Za-z0-9._-] in each segment and
-        -- replaces the rest with "-", avoids reserved device names, and
-        -- applies path_template. A candidate path held by another page
-        -- (compared case-insensitively), reserved (index.md, index.jsonl,
+        -- the profile maps, keeps [A-Za-z0-9._-] in each segment and replaces the rest with "-",
+        -- replaces the leading "_" or "." of a directory segment equal to _removed or .rovo (ignoring
+        -- case) with "-" (so -removed/, -rovo/), avoids reserved device names, and applies
+        -- path_template. A candidate path held by another page (compared case-insensitively), reserved (index.md, index.jsonl,
         -- links.jsonl, llms.txt, crawl-report.json, rovo.toml, _index.md,
         -- _removed/, .rovo/) or longer than max_path_chars becomes a stem
-        -- cut to max_path_chars - 10, "-", and the first
-        -- collision_hash_chars hex of the identity's digest; the suffix
-        -- depends on the identity alone, never on crawl order.
+        -- cut to max_path_chars - 10, "-", and the first collision_hash_chars hex of the identity's digest;
+        -- the suffix depends on the identity alone, never on crawl order. Segments compare ignoring case because
+        -- a case-insensitive file system holds _REMOVED/ and _removed/ as one directory.
 }
 
 -- Default stated here (veto at review): a removed page that answers again
