@@ -57,7 +57,8 @@ use "./convert.allium" as convert
 -- Value Types
 ------------------------------------------------------------
 
--- The resolved configuration of one mirror: built-in defaults, then
+-- The resolved configuration of one mirror: built-in defaults (config's
+-- render_mode, max_depth and fail_on_low_quality among them), then
 -- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
 -- layers winning key by key. Invalid when the file is unreadable, a key is
 -- unknown or a value is bad, a profile name the catalogue lacks included;
@@ -241,6 +242,11 @@ entity CrawlReport {
 
 config {
     report_percentile: Decimal = 0.10
+
+    -- Built-in defaults: the first layer of Configuration, before rovo.toml
+    render_mode: crawl/RenderMode = never
+    max_depth: Integer = 10
+    fail_on_low_quality: Boolean = false
 }
 
 ------------------------------------------------------------
