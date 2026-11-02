@@ -23,11 +23,11 @@ specifications, so the how is a decision record's to fix.
 
 The specifications fix three facts any storage must agree with. `.rovo/` is a reserved
 name in the mirror: path assignment never gives a page a path inside it (`mirror.allium`,
-the reserved list at lines 619 and 620, and the invariant `PagePathsAvoidManagedNames`
-at line 1172). Fetch times live in the manifest and never in a page file (the comment
-above `value Frontmatter`, lines 139 to 141, and the frontmatter contract at line 1243).
-No index and no generated file carries wall-clock time (line 1071 and the guarantee
-`UnchangedRunIsStable` at line 1256). The crawl report, `crawl-report.json`, sits at the
+the reserved list at lines 620 and 621, and the invariant `PagePathsAvoidManagedNames`
+at line 1198). Fetch times live in the manifest and never in a page file (the comment
+above `value Frontmatter`, lines 139 to 141, and the frontmatter contract at line 1269).
+No index and no generated file carries wall-clock time (line 1097 and the guarantee
+`UnchangedRunIsStable` at line 1282). The crawl report, `crawl-report.json`, sits at the
 mirror's root, where `rovo.allium` (line 182) and the reserved list put it.
 
 Three formats were weighed. SQLite answers concurrent writers and partial updates, and

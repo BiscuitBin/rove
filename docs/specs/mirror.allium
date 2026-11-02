@@ -591,6 +591,7 @@ rule MovePage {
     requires: not exists target or target.status = removed
     let old_path = previous.path
     let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     let stale = Alias{mirror: candidate.mirror, url: identity}
     ensures:
         if exists target:
@@ -621,6 +622,10 @@ rule MovePage {
         -- cut to max_path_chars - 10, "-", and the first collision_hash_chars hex of the identity's digest;
         -- the suffix depends on the identity alone, never on crawl order. Segments compare ignoring case because
         -- a case-insensitive file system holds _REMOVED/ and _removed/ as one directory.
+        -- When that suffixed path is itself held (ignoring case), reserved or too long, the
+        -- suffix is the full 64-hex digest instead, with the stem cut so the result still
+        -- fits max_path_chars. When that path is unusable too, assign_path is null: the
+        -- candidate is refused (RefuseUnplaceableCandidate) and nothing in the mirror changes.
 }
 
 -- Default stated here (veto at review): a removed page that answers again
@@ -636,12 +641,14 @@ rule ReviveRemovedPage {
     requires: not exists previous
     requires: exists target and target.status = removed
     let archived_path = target.path
+    let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     ensures:
         target.status = written
         target.removed_at = null
         target.removal_reason = null
         target.redirect_target = null
-        target.path = assign_path(candidate.mirror, identity)
+        target.path = new_path
         target.previous_digest = null
         target.first_seen = now
         ArchivedCopyDeleted(mirror: candidate.mirror, path: archived_path)
@@ -658,10 +665,12 @@ rule StoreNewPage {
     requires: not exists target
     let content = candidate.content
     requires: content != null
+    let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     ensures:
         Page.created(
             mirror: candidate.mirror, identity: identity,
-            path: assign_path(candidate.mirror, identity),
+            path: new_path,
             canonical_url: content.canonical_url, source_url: candidate.source_url,
             title: content.title, description: content.description,
             method: content.method, tier: candidate.tier,
@@ -690,6 +699,23 @@ rule StoreNewPage {
         -- version_label maps the identity's version parameter through the
         -- profile's version map and is null when the profile has no
         -- version parameter.
+}
+
+-- A candidate that needs a path (a new page, a move or a revival) and
+-- gets none from assign_path is refused: it is discarded, so the crawl
+-- fails its entry and the run reports the URL as failed. The page a move
+-- would have moved keeps its identity and path, a removed record stays
+-- removed, no alias is recorded and no links are queued.
+rule RefuseUnplaceableCandidate {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    requires: not exists target or target.status = removed
+    requires: assign_path(candidate.mirror, identity) = null
+    ensures:
+        candidate.status = accepted
+        CandidateDiscarded(candidate: candidate, reason: "no free path")
 }
 
 -- Shared effects of every store. The page's links are dropped and
@@ -807,7 +833,7 @@ rule DiscardUnchangedWithoutPage {
     requires: not exists known_page(candidate.mirror, candidate.requested_identity)
     ensures:
         candidate.status = accepted
-        CandidateDiscarded(candidate: candidate)
+        CandidateDiscarded(candidate: candidate, reason: "no page to confirm")
 }
 
 -- Default stated here (veto at review): a 404 or 410 removes the written

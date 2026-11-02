@@ -1589,7 +1589,8 @@ rule DisposeFetch {
         -- render's source URL goes through the same identity and alias
         -- rules as an http one. An unchanged, absent or redirected-out
         -- entry settles here; a converted one stays in progress until the
-        -- mirror answers with PageStored or CandidateDuplicate.
+        -- mirror answers with PageStored, CandidateDuplicate or, when no
+        -- path is free for it, CandidateDiscarded.
 }
 
 rule EntryFails {
@@ -1649,13 +1650,13 @@ rule SettleDuplicateEntry {
 }
 
 rule FailDiscardedEntry {
-    when: mirror/CandidateDiscarded(candidate)
+    when: mirror/CandidateDiscarded(candidate, reason)
     let frontier = Frontier{mirror: candidate.mirror}
     let entry = FrontierEntry{frontier: frontier, identity: candidate.requested_identity}
     requires: exists entry and entry.status = in_progress
     let run = Run{target: candidate.mirror, status: running}
     requires: exists run
-    ensures: EntryFailed(run: run, entry: entry, error: "no page to confirm", attempts: entry.attempts)
+    ensures: EntryFailed(run: run, entry: entry, error: reason, attempts: entry.attempts)
 }
 
 -- Default stated here (veto at review): navigation links seed discovery
