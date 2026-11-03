@@ -62,7 +62,11 @@ use "./convert.allium" as convert
 -- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
 -- layers winning key by key. Invalid when the file is unreadable, a key is
 -- unknown or a value is bad, a profile name the catalogue lacks included;
--- problems names every bad key path.
+-- problems names every bad key path. The mirror's layout is fixed
+-- (mirror.allium: pages under pages/<host>/, the template
+-- "pages/{host}/{path}"), so path_template is not a key and a layer that
+-- sets it names an unknown key; max_path_chars is the mirror's own
+-- parameter, not a key, and lies within [128, 240] (MaxPathCharsInRange).
 value Configuration {
     valid: Boolean
     problems: List<String>
@@ -97,7 +101,7 @@ value SyncOptions {
     interactive: Boolean                -- a person is at the terminal
     json_events: Boolean                -- progress as JSON lines on stdout
     urls: List<String>                  -- operator-named URLs; empty for a full run
-    paths: List<String>                 -- operator-named page paths; empty for a full run
+    paths: List<String>                 -- operator-named mirror-relative page paths (pages/<host>/...); empty for a full run
     owner_test: crawl/OwnerTestOptions?
 
     targeted: urls.count > 0 or paths.count > 0
@@ -130,7 +134,9 @@ value QualitySummary {
 }
 
 -- One row of the report's changes: a page path and its URL, or a URL alone
--- for a failure. A move carries both paths.
+-- for a failure. A move carries both paths. Every path the report names,
+-- here, in the low-confidence rows and in the broken links, is
+-- mirror-relative, so a page's path starts with pages/<host>/.
 value Change {
     kind: ChangeKind
     url: String
@@ -354,8 +360,8 @@ rule RefuseUnknownTargetPath {
     ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "unknown target path")
 
     @guidance
-        -- A named path must be a written page's relative .md path; a
-        -- removed page's path is refused.
+        -- A named path must be a written page's mirror-relative .md path,
+        -- pages/<host>/ included; a removed page's path is refused.
 }
 
 rule RefuseMissingEngine {

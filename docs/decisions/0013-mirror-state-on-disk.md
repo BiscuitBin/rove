@@ -17,18 +17,22 @@ discovered" (line 40), with the URLs it has observed (`ObservedUrl`, line 348); 
 sitemap snapshots (`SitemapSnapshot`, line 357); the learned tiers; and the history of
 runs that owner testing looks back on. The specifications say what
 that state holds and never how it is stored: `mirror.allium` names "storage mechanics
-(the manifest's format, atomic writes)" among its Excludes (lines 22 to 26), and
+(the manifest's format, atomic writes)" among its Excludes (lines 25 to 29), and
 [decision 0009](0009-specs-are-the-source-of-truth.md) keeps behaviour in the
 specifications, so the how is a decision record's to fix.
 
-The specifications fix three facts any storage must agree with. `.rovo/` is a reserved
-name in the mirror: path assignment never gives a page a path inside it (`mirror.allium`,
-the reserved list at lines 623 and 624, and the invariant `PagePathsAvoidManagedNames`
-at line 1201). Fetch times live in the manifest and never in a page file (the comment
-above `value Frontmatter`, lines 139 to 141, and the frontmatter contract at line 1272).
-No index and no generated file carries wall-clock time (line 1100 and the guarantee
-`UnchangedRunIsStable` at line 1285). The crawl report, `crawl-report.json`, sits at the
-mirror's root, where `rovo.allium` (line 182) and the reserved list put it.
+The specifications fix three facts any storage must agree with. `.rovo/` is a managed
+directory at the mirror's root, and no page can have a path inside it: the mirror's
+layout keeps every collected page under `pages/<host>/`, beside the managed files,
+`_removed/` and `_indexes/` and never among them (`mirror.allium`, the layout in the
+Vocabulary at lines 49 to 53, the guidance of `MovePage` at lines 693 to 695, and the
+invariant `PagePathsAvoidManagedNames` at line 1307), and a page directory named `.rovo`
+is written as `-rovo` so that no page is hidden (line 679). Fetch times live in the
+manifest and never in a page file (the comment above `value Frontmatter`, lines 155 to
+157, and the frontmatter contract at line 1401). No index and no generated file carries
+wall-clock time (line 1188 and the guarantee `UnchangedRunIsStable` at line 1417). The
+crawl report, `crawl-report.json`, sits at the mirror's root, where `rovo.allium`
+(line 189) and the layout put it.
 
 Three formats were weighed. SQLite answers concurrent writers and partial updates, and
 neither is needed here: one run writes a mirror at a time. TOML has no writer in the
