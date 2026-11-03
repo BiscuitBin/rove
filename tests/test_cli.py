@@ -110,3 +110,26 @@ def test_python_m_rovo_prints_the_version() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == version_line()
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [("init", ("SITE_URL", "OUT_DIR", "--profile")), ("sync", ("OUT_DIR",))],
+)
+def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> None:
+    """`rovo init --help` and `rovo sync --help` name their arguments and exit 0."""
+    result = runner().invoke(app, [command, "--help"], prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    assert f"Usage: rovo {command}" in result.stdout
+    for argument in arguments:
+        assert argument in result.stdout
+
+
+@pytest.mark.parametrize("command", ["init", "sync"])
+def test_mirror_commands_without_arguments_are_usage_errors(command: str) -> None:
+    """`rovo init` and `rovo sync` with no arguments exit 2 with the usage on stderr."""
+    result = runner().invoke(app, [command], prog_name="rovo")
+
+    assert result.exit_code == USAGE_ERROR, result.output
+    assert "Missing argument" in result.stderr

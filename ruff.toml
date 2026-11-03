@@ -28,6 +28,7 @@ ban-relative-imports = "all"
   "S101",   # Assertions are how pytest states the contract.
   "INP001", # Tests are discovered without an importable test package.
   "S603",   # The tests run sys.executable and the rovo script, fixed arguments, no shell.
+  "N802",   # A test is named after its specification obligation id, whose rule and entity names are CamelCase.
 ]
 "scripts/**" = [
   "INP001", # Repository scripts are standalone, not an importable package.

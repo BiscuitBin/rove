@@ -10,18 +10,21 @@ requires: []
 
 One import package, `rovo`, carries two interfaces: the Python API and the `rovo`
 command. The architecture is one rule about which way imports run between them. The
-product is specified under `docs/specs/` and not yet implemented, so what sits on each
-side today is a placeholder; the rule is what the implementation tickets inherit.
+product is specified under `docs/specs/` and implemented slice by slice: the command
+side runs `rovo init` and `rovo sync` through private modules, and the API side is still
+the placeholder `__version__`; the rule is what every implementation ticket inherits.
 
 ## The modules
 
 | Module | Responsibility |
 | --- | --- |
 | `rovo` (`src/rovo/__init__.py`) | The public API: exactly the names in `__all__`. Today that is `__version__`, read from the installed metadata. It imports only the standard library. |
-| `rovo.cli` (`src/rovo/cli.py`) | The Typer application `app`: the root callback with the eager `--version` option, and the `version` command. It imports `rovo` and presents it. |
+| `rovo.cli` (`src/rovo/cli.py`) | The Typer application `app`: the root callback with the eager `--version` option, and the `version`, `init` and `sync` commands. It imports `rovo` and presents it. |
 | `rovo.__main__` (`src/rovo/__main__.py`) | `python -m rovo`: imports `app` and runs it under the program name `rovo`, so it and the console script print the same usage line. |
+| `rovo._commands` | The root's rules, `init` and `sync`: they compose configuration, crawl, mirror and report, and take the `Fetcher` and `Clock` seams so tests run them in process. `rovo.cli` imports it inside each command's body, so `rovo --version` loads no runtime dependency. |
+| `rovo._unfinished` | `NotInThisSlice`, the exception a branch a later slice implements raises; a leaf that imports no rovo module, so every layer may raise it. |
 | `py.typed` | Marks the package as typed, so type checkers read its annotations. |
-| `rovo._convert`, `rovo._mirror`, `rovo._crawl`, `rovo._config`, `rovo._report` | Private modules, empty until the implementation tickets fill them. The first three follow the specification's direction ([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)): `_convert` imports nothing of rovo's, `_mirror` may import `_convert`, and `_crawl` may import both; none imports `rovo.cli`. `_config` and `_report` serve the command and the root. `import rovo` loads none of them. |
+| `rovo._convert`, `rovo._mirror`, `rovo._crawl`, `rovo._config`, `rovo._report` | Private modules that realise the specification, one slice at a time: `_convert` the pure conversion, `_mirror` the mirror's state and page files, `_crawl` one sync run behind the `Fetcher` seam (httpx in use, a fake in tests), `_config` `rovo.toml`, `_report` `crawl-report.json`. The first three follow the specification's direction ([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)): `_convert` imports nothing of rovo's, `_mirror` may import `_convert`, and `_crawl` may import both; none imports `rovo.cli`. `_config` and `_report` serve the command and the root. `import rovo` loads none of them. |
 
 The console script `rovo` is `rovo.cli:app`, declared in `[project.scripts]`.
 

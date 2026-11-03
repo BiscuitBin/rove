@@ -32,6 +32,7 @@ snapshot.
 | T06 | Renovate over every pin, behind an authorised app install | `T06-renovate.md` | T05 | none | open |
 | T07 | Allium gate: the placeholder module, the spec recipes, the Allium skills, the specification workflow | `T07-allium-gate.md` | T05 | none | done |
 | T08 | Product foundation: the state-on-disk decision, the runtime dependencies, the private package skeleton, the end-to-end harness | `T08-foundation.md` | T07 | none | done |
+| T09 | Tracer bullet: rovo init creates a mirror, rovo sync mirrors its seed page | `T09-tracer-init-sync-one-page.md` | T08 | none | open |
 
 ## Dependency graph
 
@@ -39,7 +40,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -58,6 +59,11 @@ T00 ─┬─ T01 ─┐
   `full-final-prototype`): decision 0013 on the mirror's state on disk, the runtime
   dependencies, the private package skeleton with its import-direction test, and the
   end-to-end harness. It implements no specification behaviour.
+- **T09** is slice 1, the tracer bullet: `rovo init` creates a mirror and `rovo sync`
+  fetches the seed page over HTTP, converts it with the generic profile, publishes it
+  with its frontmatter and writes `crawl-report.json`. It fixes the patterns later
+  slices follow: the module layout, the seams, the state files, configuration
+  resolution, and the obligation-named and end-to-end tests.
 
 ## How to pick up a ticket
 

@@ -10,8 +10,9 @@ requires: []
 
 The Allium specifications under `docs/specs/` decide what rovo does. Four modules
 specify the product, a documentation mirror
-([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)); none of it is
-implemented yet, and the placeholder API and command stand outside them. This page is
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)); it is
+implemented slice by slice, `rovo init` and the seed-page path of `rovo sync` first, and
+the placeholder API and `version` command stand outside them. This page is
 the procedure; [Specifications](../explanation/specifications.md) is the reasoning.
 
 ## Find the module that owns the behaviour

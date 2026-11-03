@@ -27,3 +27,19 @@ policy.
   `_report` with a test holding their import direction; the end-to-end harness serving
   fixture sites on `127.0.0.1`, the `browser` marker and `just e2e-browser`; and decision
   0013, the mirror's state as JSON under `.rovo/`, written atomically.
+- The first slice of the specification: `rovo init SITE_URL OUT_DIR [--profile NAME]`
+  writes `rovo.toml` and an empty manifest, and `rovo sync OUT_DIR` reads each allowed
+  host's robots.txt, fetches the seed pages it allows over HTTP, converts each to
+  Markdown with the generic profile, publishes it as a page file with sorted frontmatter
+  and writes `crawl-report.json`. Branches later slices implement stop the sync with
+  exit 1; the mirror's files are described in `docs/reference/mirror.md`.
+  When a page's path and its short-digest fallback are both held, the page takes the
+  full-digest path; when that is held too, the page is refused and reported as a failed
+  URL (`no free path`), and the sync exits 1. A page path is never percent-decoded.
+  Page files live under `pages/<host>/`, the host segment sanitised (lower case, trailing
+  dot dropped, `[a-z0-9.-]`, device names suffixed `-`, a non-default port as
+  `_<port>`); hidden, device-named and root-file-named segments are rewritten, `.md` is
+  not doubled only for an exact lower-case `.md`, and the 200-character limit counts the
+  whole path. A host's trailing dot no longer makes a separate identity. A last URL
+  segment that is only a dropped `.html`, `.htm` or `.aspx` (`/guide/.html`) is named
+  `index`, as a directory URL is, where `rovo sync` used to crash.

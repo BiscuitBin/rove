@@ -25,11 +25,24 @@ PACKAGE_FILES = frozenset(
         "rovo/__main__.py",
         "rovo/cli.py",
         "rovo/py.typed",
+        "rovo/_commands.py",
         "rovo/_config.py",
         "rovo/_report.py",
+        "rovo/_unfinished.py",
         "rovo/_convert/__init__.py",
+        "rovo/_convert/fidelity.py",
+        "rovo/_convert/model.py",
+        "rovo/_convert/profiles.py",
         "rovo/_mirror/__init__.py",
+        "rovo/_mirror/finalise.py",
+        "rovo/_mirror/intake.py",
+        "rovo/_mirror/model.py",
+        "rovo/_mirror/state.py",
+        "rovo/_mirror/urls.py",
         "rovo/_crawl/__init__.py",
+        "rovo/_crawl/fetch.py",
+        "rovo/_crawl/model.py",
+        "rovo/_crawl/run.py",
     }
 )
 # The one console script the installer generates and records, relative to site-packages.
@@ -80,7 +93,7 @@ def _api() -> int:
         return _fail(reason)
     print(
         f"wheel_smoke api: rovo {rovo.__version__}, no CLI module imported,"
-        " exactly the nine package files and the expected metadata"
+        " exactly the twenty-two package files and the expected metadata"
     )
     return 0
 

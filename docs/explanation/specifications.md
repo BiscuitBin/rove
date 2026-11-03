@@ -44,7 +44,8 @@ states its Scope, Includes, Excludes, Dependencies and Vocabulary, and
 The placeholder API, `rovo.__version__`, and the placeholder command, `rovo --version`
 and `rovo version`, stand outside the modules: they hold the product's place and no
 clause describes them. Empty diagnostics and findings say the modules are valid, not
-that the package does anything: nothing in the specification is implemented yet.
+that the package does anything: the specification is implemented slice by slice, and
+each ticket names the rules it realises.
 `just plan-spec <module>` lists the obligations each module owes a test; the
 implementation tickets derive those tests, confirm they fail, and build until they
 pass.

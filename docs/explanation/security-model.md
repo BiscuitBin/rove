@@ -10,9 +10,10 @@ requires: []
 
 The important boundaries are the supply chain that builds and checks the package, and
 untrusted material reaching a contributor or an agent. The product is specified under
-`docs/specs/` and not yet implemented: its inputs, fetched documentation pages above
-all, are untrusted data by the rule below, and the implementation tickets add what
-each one needs to this page.
+`docs/specs/` and its implementation is under way: `rovo sync` already fetches
+documentation pages, and its inputs, fetched pages and `robots.txt` above all, are
+untrusted data by the rule below; a page path never leaves the mirror directory, and the
+implementation tickets add what each one needs to this page.
 
 ## Untrusted input
 

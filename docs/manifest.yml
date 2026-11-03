@@ -249,6 +249,21 @@
       "requires": []
     },
     {
+      "path": "reference/mirror.md",
+      "title": "The mirror on disk",
+      "kind": "reference",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "mirror_files_reference"
+      ],
+      "requires": []
+    },
+    {
       "path": "reference/api.md",
       "title": "API reference",
       "kind": "reference",

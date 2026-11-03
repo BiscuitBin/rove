@@ -42,13 +42,19 @@ public name changes the second test, deliberately.
 `tests/test_import_direction.py` reads every module under `src/rovo/` with `ast`,
 without importing any of it, and collects each `import`, each `from ... import` (as the
 module and as the module plus each name) and each `importlib.import_module` or
-`__import__` call with a literal name. One test per rule: nothing under `rovo._convert`
-imports `rovo._mirror`, `rovo._crawl` or `rovo.cli`; nothing under `rovo._mirror`
-imports `rovo._crawl` or `rovo.cli`; nothing under `rovo._crawl` imports `rovo.cli`; and
+`__import__` call with a literal name, a relative `import_module` name resolved against
+its package argument or the importing module's package. One test per rule: nothing
+under `rovo._convert` imports `rovo._mirror`, `rovo._crawl` or `rovo.cli`; nothing under
+`rovo._mirror` imports `rovo._crawl` or `rovo.cli`; nothing under `rovo._crawl` imports
+`rovo.cli`, `rovo._config`, `rovo._report` or `rovo._commands`; `_config` and `_report`
+import neither `_commands` nor `rovo.cli`; `rovo._unfinished` imports no rovo module;
 `src/rovo/__init__.py` imports no private module, not `rovo.cli`, and nothing whose first
-component is `httpx`, `bs4`, `lxml`, `markdownify`, `playwright` or `typer`. A further
-test requires the scan to have found the root and all five private modules, so an
-emptied walk cannot pass. A name computed at run time escapes it; the API probe and the
+component is `httpx`, `bs4`, `lxml`, `markdownify`, `playwright` or `typer`; and no
+statement of `cli.py` that runs on import (inside `if`, `try`, `with`, a loop or a class
+body included; a function body or an `if TYPE_CHECKING:` body excluded) imports a
+private module or a dependency. A further test requires the scan to have found the root
+and all seven private modules, so an emptied walk cannot pass, and positive controls feed
+the helpers synthetic sources that each form must catch. A name computed at run time escapes it; the API probe and the
 wheel smoke still catch what `import rovo` actually loads.
 
 ## The command line
@@ -57,9 +63,29 @@ wheel smoke still catch what `import rovo` actually loads.
 through `typer.testing.CliRunner`, with `prog_name="rovo"` and a 200-column terminal so
 that rich's output does not wrap, and asserts the exit code, standard output and
 standard error separately: `--version` and `version` (one parametrized test), `--help`,
-no arguments (help on stdout, exit 2) and an unknown command (stderr, exit 2). Out of
+no arguments (help on stdout, exit 2), an unknown command (stderr, exit 2), and `init`
+and `sync`: their help and their usage exits. Out of
 process, it runs the `rovo` console script installed beside the test interpreter and
 `python -I -m rovo`, each with `--version`, and asserts the version line.
+
+## The specification's tests
+
+The tests for the Allium specifications are named after the obligation they discharge:
+`just plan-spec <module>` lists each obligation's id, such as `rule-success.StoreNewPage`,
+and its test is `test_rule_success_StoreNewPage`, one test or one parametrised case per
+obligation, in `tests/test_convert.py`, `test_mirror.py`, `test_crawl.py`,
+`test_config.py`, `test_report.py` and `test_commands.py` (ruff's N802 is off for tests
+so the CamelCase rule name survives). A `config` default is never restated: a test reads
+it from the committed `.allium` file through `tests/spec_values.py`. The loop ledger
+under `.allium-loop/` pins each generated test file's hash; a later change adds tests
+beside them rather than editing them. `tests/test_regressions.py` pins each divergence a
+weed or review found, `tests/test_slice_boundaries.py` the points where a slice stops
+with `NotInThisSlice`.
+
+`tests/fakes.py` holds the seams' doubles: `FakeFetcher`, a URL-to-`SiteResponse` map
+that records every request and answers 404 for any other URL, `FixedClock`, a clock that
+stands still, and `html_response` and `text_response` to build answers. No test sleeps
+or reaches the network.
 
 ## The wheel smoke
 
@@ -69,7 +95,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the nine package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-two package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -89,8 +115,11 @@ and closed, and its threads are joined (the server joins its request threads too
 `filterwarnings = error` sees no unclosed socket. Nothing reaches the network.
 
 `tests/fixtures/sites/<name>/` holds the fixture sites, one directory each; `basic` is a
-single `index.html`. `tests/e2e/test_harness.py` proves the harness: the basic site
-answers 200 with its heading. The suite and `just coverage` run the end-to-end tests
+single `index.html`, `one-page` a single documentation page at `guide/start.html`, and
+`robots-disallow` the same page under a `robots.txt` that disallows `/guide/`.
+`tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
+heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
+fixture sites, as the installed command would. The suite and `just coverage` run the end-to-end tests
 with everything else.
 
 The `browser` marker is for tests that need playwright and a browser. Without the

@@ -11,8 +11,9 @@ requires: []
 Nothing is on PyPI yet, and nothing can be: the licence is undecided and the package
 carries a classifier that makes PyPI refuse an upload
 ([decision 0006](../decisions/0006-licence-deferred.md)). Today the only way to run
-`rovo` is from a checkout. What `rovo` does today is a placeholder: the package exports
-its version, and the command prints it.
+`rovo` is from a checkout. What `rovo` does today is the first slice of the product:
+`rovo init` creates a mirror and `rovo sync` mirrors its seed pages as Markdown (the
+[command reference](../reference/cli.md) has both); the package exports its version.
 
 ## Run from a checkout
 
