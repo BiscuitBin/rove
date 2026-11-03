@@ -25,12 +25,12 @@ The specifications fix three facts any storage must agree with. `.rovo/` is a ma
 directory at the mirror's root, and no page can have a path inside it: the mirror's
 layout keeps every collected page under `pages/<host>/`, beside the managed files,
 `_removed/` and `_indexes/` and never among them (`mirror.allium`, the layout in the
-Vocabulary at lines 49 to 53, the guidance of `MovePage` at lines 693 to 695, and the
-invariant `PagePathsAvoidManagedNames` at line 1307), and a page directory named `.rovo`
-is written as `-rovo` so that no page is hidden (line 679). Fetch times live in the
+Vocabulary at lines 49 to 53, the guidance of `MovePage` at lines 697 to 699, and the
+invariant `PagePathsAvoidManagedNames` at line 1311), and a page directory named `.rovo`
+is written as `-rovo` so that no page is hidden (line 683). Fetch times live in the
 manifest and never in a page file (the comment above `value Frontmatter`, lines 155 to
-157, and the frontmatter contract at line 1401). No index and no generated file carries
-wall-clock time (line 1188 and the guarantee `UnchangedRunIsStable` at line 1417). The
+157, and the frontmatter contract at line 1405). No index and no generated file carries
+wall-clock time (line 1192 and the guarantee `UnchangedRunIsStable` at line 1421). The
 crawl report, `crawl-report.json`, sits at the mirror's root, where `rovo.allium`
 (line 189) and the layout put it.
 

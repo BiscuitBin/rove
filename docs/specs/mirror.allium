@@ -53,7 +53,7 @@
 --   file at the root, such as .git/, is the operator's and is left alone.
 --   host segment: the directory under pages/ that holds one host's pages,
 --   named from the identity's host as the guidance of MovePage states
---   ([::1]:8080 gives --1-_8080).
+--   (the bracketed IPv6 form as written: [::1]:8080 gives ---1-_8080).
 --   device name: CON, PRN, AUX, NUL, COM1 to COM9 or LPT1 to LPT9,
 --   matched ignoring case on the part of a segment before its first ".".
 --   docs/project/terminology.md is the glossary.
@@ -650,7 +650,8 @@ rule MovePage {
         -- port appended as "_<port>" (":" is illegal on Windows, and "_"
         -- appears in no sanitised host): example.com. gives example.com,
         -- con gives con-, con:8080 gives con-_8080 (the device rule runs
-        -- before the port is appended), and [::1]:8080 gives --1-_8080. A
+        -- before the port is appended), and [::1]:8080 gives ---1-_8080 (the
+        -- rule reads an IPv6 host in its bracketed form, as written). A
         -- host too long to leave room for a page within max_path_chars has
         -- its pages refused (RefuseUnplaceableCandidate). Two hosts that
         -- sanitise alike share a host segment, and the collision step below
@@ -658,8 +659,11 @@ rule MovePage {
         -- prefix, names a directory URL "index" (so the scope root is
         -- pages/<host>/index.md; the root index.md is outside pages/ and
         -- never collides with it), drops a trailing .html, .htm or .aspx
-        -- (ignoring case), appends the version label the profile maps, keeps
-        -- [A-Za-z0-9._-] in each segment and replaces the rest with "-",
+        -- (ignoring case), names a last segment that drop leaves empty
+        -- "index" as for a directory URL (under the prefix "/", /guide/.html
+        -- gives pages/<host>/guide/index.md and /.html gives
+        -- pages/<host>/index.md), appends the version label the profile maps,
+        -- keeps [A-Za-z0-9._-] in each segment and replaces the rest with "-",
         -- drops empty segments (so "//" collapses), applies the segment
         -- rewrites below, and last appends ".md" unless the rewritten last
         -- segment already ends in ".md" exactly, in lower case, so an
