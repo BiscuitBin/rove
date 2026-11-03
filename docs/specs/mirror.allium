@@ -615,7 +615,10 @@ rule MovePage {
         -- "index", drops .html, .htm and .aspx, appends the version label
         -- the profile maps, keeps [A-Za-z0-9._-] in each segment and replaces the rest with "-",
         -- replaces the leading "_" or "." of a directory segment equal to _removed or .rovo (ignoring
-        -- case) with "-" (so -removed/, -rovo/), avoids reserved device names, and applies
+        -- case) with "-" (so -removed/, -rovo/), replaces the final "." of a directory segment ending
+        -- in .md (ignoring case) with "-" (so a.md/x gives a-md/x.md and A.MD/x gives A-MD/x.md), since
+        -- a page file is never also a directory; each rewrite reads one segment alone, so their order
+        -- does not matter. It then avoids reserved device names, and applies
         -- path_template. A candidate path held by another page (compared case-insensitively), reserved (index.md, index.jsonl,
         -- links.jsonl, llms.txt, crawl-report.json, rovo.toml, _index.md,
         -- _removed/, .rovo/) or longer than max_path_chars becomes a stem
