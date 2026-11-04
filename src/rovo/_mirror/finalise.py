@@ -1,4 +1,4 @@
-"""The finalise pass (mirror.allium 525, 1022 to 1210): bodies, frontmatter, page files.
+"""The finalise pass (mirror.allium 528, 1025 to 1223): bodies, frontmatter, page files.
 
 A page file is `---`, the frontmatter as YAML with its keys sorted and absent values
 omitted, `---`, then the body. Strings and string lists are JSON-quoted, which YAML
@@ -12,10 +12,14 @@ from collections import Counter
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from rovo._convert.fidelity import link_destinations, prose_lines
+from rovo._convert.fidelity import prose_lines
+from rovo._convert.model import CONFIG as CONVERT
+from rovo._convert.model import QualityFlag
+from rovo._mirror.links import finish_link_pass, resolve_mirror_links, rewrite_destinations
 from rovo._mirror.model import (
     CONFIG,
     Frontmatter,
+    LinksRewritten,
     Mirror,
     MirrorPass,
     Operator,
@@ -148,6 +152,8 @@ class Finalisation:
 
     pass_: MirrorPass
     finalised: tuple[PageFinalised, ...]
+    # FinishLinkPass's LinksRewritten; the pass is pending then, so it always fires.
+    rewritten: LinksRewritten | None
 
 
 def request_pass(
@@ -166,18 +172,27 @@ def request_pass(
 
 
 def finalise_page_body(pass_: MirrorPass, page: Page) -> None:
-    """Realises mirror.allium FinalisePageBody, over a body with no links.
+    """Realises mirror.allium FinalisePageBody.
 
-    The body is the converted body, since there is nothing to rewrite; no link flag is
-    raised; keywords and the low-confidence verdict are recomputed.
+    The body is the converted body with its destinations rewritten; the link flags, the
+    low-confidence verdict and the keywords are recomputed from scratch.
     """
     del pass_  # The pass only orders the rule after PageLinksResolved.
-    if link_destinations(page.converted_body):
-        raise NotInThisSlice(rule="ResolveMirrorLinks")
-    page.body = page.converted_body
+    page.body = rewrite_destinations(page.converted_body, page)
+    link_flags = {
+        flag
+        for flag, raised in (
+            (QualityFlag.uncrawled_internal, page.has_uncrawled_link),
+            (QualityFlag.unresolved_fragment, page.has_unresolved_fragment),
+            (QualityFlag.dangling_inbound, page.has_dangling_link),
+        )
+        if raised
+    }
     page.content_digest = digest(page.body)
-    page.flags = page.quality.flags
-    page.low_confidence = page.quality.low_confidence
+    page.flags = page.quality.flags | link_flags
+    page.low_confidence = page.quality.low_confidence or not link_flags.isdisjoint(
+        CONVERT.incomplete_flags
+    )
     page.keywords = keywords_of(page.body, CONFIG.keywords_per_page, CONFIG.keywords_min)
 
 
@@ -213,8 +228,9 @@ def finalise(operator: Operator, mirror: Mirror, run_id: int, clock: Clock) -> F
     """Run one finalise pass, RequestPass to IndexesWritten.
 
     RetireOutOfScopePages retires nothing in this slice: a page it would retire stops the
-    pass. Every written page's body is finalised and published in path order. The index
-    files are the indexes slice's: BuildIndexes completes the pass without writing them.
+    pass. ResolveMirrorLinks resolves every written page's links; then every body is
+    finalised and published in path order, and FinishLinkPass reads the files back. The
+    index files are the indexes slice's: BuildIndexes completes the pass without them.
     """
     pass_ = request_pass(operator, mirror, PassKind.finalise, run_id)
     pages = sorted(mirror.written_pages, key=lambda page: page.path)
@@ -223,11 +239,13 @@ def finalise(operator: Operator, mirror: Mirror, run_id: int, clock: Clock) -> F
         for page in pages
     ):
         raise NotInThisSlice(rule="RetireOutOfScopePages")
+    resolve_mirror_links(pass_)
     for page in pages:
         finalise_page_body(pass_, page)
     finalised = tuple(publish_page(pass_, page, clock) for page in pages)
+    rewritten = finish_link_pass(pass_)
     pass_.status = PassStatus.completed
-    return Finalisation(pass_=pass_, finalised=finalised)
+    return Finalisation(pass_=pass_, finalised=finalised, rewritten=rewritten)
 
 
 def frontmatter_of(page: Page) -> Frontmatter:

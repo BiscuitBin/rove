@@ -27,6 +27,8 @@ from rovo._crawl.model import (
     UrlFailed,
 )
 from rovo._mirror.model import (
+    BrokenLink,
+    LinksRewritten,
     Mirror,
     MirrorPass,
     Operator,
@@ -209,6 +211,7 @@ class CrawlReport:
     skipped_urls: list[str] = field(default_factory=list)
     discovery_problems: list[DiscoveryProblemRow] = field(default_factory=list)
     low_confidence_pages: list[LowConfidencePage] = field(default_factory=list)
+    # The pass's BrokenLink rows (TakeBrokenLinks); crawl-report.json writes only those.
     broken_links: list[object] = field(default_factory=list)
     changes: list[Change] = field(default_factory=list)
     finished_at: datetime | None = None
@@ -287,6 +290,14 @@ def tally_failed_url(report: CrawlReport, failed: UrlFailed) -> bool:
     report.changes.append(
         Change(kind=ChangeKind.failed, url=failed.url, path=None, moved_from=None)
     )
+    return True
+
+
+def take_broken_links(report: CrawlReport, rewritten: LinksRewritten) -> bool:
+    """Realises rovo.allium TakeBrokenLinks; False when its guards do not hold."""
+    if not report.is_open_for(rewritten.mirror, rewritten.pass_.run_id):
+        return False
+    report.broken_links = list(rewritten.broken)
     return True
 
 
@@ -472,7 +483,13 @@ def encode_report(report: CrawlReport) -> dict[str, object]:
             }
             for row in sorted(report.low_confidence_pages, key=lambda row: row.path)
         ],
-        "broken_links": list(report.broken_links),
+        "broken_links": [
+            {"from_path": row.from_path, "href": row.href, "reason": row.reason.value}
+            for row in sorted(
+                (row for row in report.broken_links if isinstance(row, BrokenLink)),
+                key=lambda row: (row.from_path, row.href),
+            )
+        ],
         "changes": [
             {
                 "kind": row.kind.value,

@@ -21,7 +21,13 @@ from rovo import _commands
 from rovo._config import SyncOptions, resolve_config
 from rovo._convert import profiles
 from rovo._convert.fidelity import convert, converted_content, extract, measure, normalize, restore
-from rovo._convert.model import ExtractionMethod, HeadingAnchorStyle, Island, QualityFlag
+from rovo._convert.model import (
+    ConvertedContent,
+    ExtractionMethod,
+    HeadingAnchorStyle,
+    Island,
+    QualityFlag,
+)
 from rovo._crawl.fetch import HttpxFetcher, Validators
 from rovo._crawl.model import CONFIG as CRAWL
 from rovo._crawl.model import (
@@ -43,6 +49,7 @@ from rovo._crawl.run import (
     classify_block,
     create_frontier,
     discover,
+    enqueue_page_links,
     fetch_entry,
     load_frontier,
     prepare_run,
@@ -57,6 +64,7 @@ from rovo._mirror.model import (
     CandidateDelivered,
     CandidateOutcome,
     CrawlScope,
+    LinksFound,
     Mirror,
     Operator,
     PageStatus,
@@ -267,7 +275,7 @@ def test_a_second_sync_of_a_known_page_stops(tmp_path: Path) -> None:
 
 
 def test_mirror_branches_of_later_slices_stop(tmp_path: Path) -> None:
-    """A page with links, a page to retire and a candidate StoreNewPage does not take."""
+    """A page to retire and a candidate StoreNewPage does not take (links are T10's)."""
     mirror = new_mirror(tmp_path)
     linked = extract(
         PAGE.replace("</main>", '<p><a href="/guide/b.html">B</a></p></main>'),
@@ -291,13 +299,56 @@ def test_mirror_branches_of_later_slices_stop(tmp_path: Path) -> None:
     )
     page = take_candidate(admit_candidate(delivered), FixedClock())
     assert page is not None
-    with pytest.raises(NotInThisSlice):
-        finalise(Operator(), mirror, 1, FixedClock())
+    # T10 realises ResolveMirrorLinks: a page with links no longer stops the pass.
     with pytest.raises(NotInThisSlice):
         take_candidate(admit_candidate(delivered), FixedClock())
     page.source_url = f"{SITE}/elsewhere/page.html"
     with pytest.raises(NotInThisSlice):
         finalise(Operator(), mirror, 2, FixedClock())
+
+
+def page_content(html: str) -> ConvertedContent:
+    """The seed's markup converted with the generic profile, as ConvertFetched does."""
+    extracted = extract(html, SEED, profiles.GENERIC)
+    normalized = normalize(extracted, profiles.GENERIC)
+    body = restore(convert(normalized.fragment), normalized.islands)
+    return converted_content(extracted, normalized, body, measure(extracted, normalized, body))
+
+
+def test_enqueue_page_links_owner_branch_stops(tmp_path: Path) -> None:
+    """EnqueuePageLinks' owner-testing branch (owner_link_needed) is a later slice's."""
+    mirror = new_mirror(tmp_path)
+    run = start_run(request(mirror), FixedClock())
+    assert run is not None
+    frontier = create_frontier(run, None)
+    assert frontier is not None
+    candidate = admit_candidate(
+        CandidateDelivered(
+            run_id=run.id,
+            mirror=mirror,
+            requested_identity=SEED,
+            source_url=SEED,
+            redirect_hops=(),
+            depth=0,
+            outcome=CandidateOutcome.converted,
+            tier=Tier.http,
+            raw_digest="0" * 64,
+            content=page_content(PAGE),
+        )
+    )
+    page = take_candidate(candidate, FixedClock())
+    assert page is not None
+    found = LinksFound(
+        candidate=candidate,
+        page=page,
+        depth=0,
+        targets=(f"{SITE}/guide/b.html",),
+        navigation_targets=(),
+    )
+    run.mode = RunMode.owner_testing
+    with pytest.raises(NotInThisSlice):
+        enqueue_page_links(run, frontier, found)
+    assert frontier.entries == []
 
 
 def test_convert_branches_of_later_slices_stop() -> None:

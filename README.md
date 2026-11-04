@@ -5,8 +5,9 @@ distribution for Python 3.13 and newer. The product is specified under `docs/spe
 and its implementation is under way: rovo turns a product's documentation website into
 a local, self-linking Markdown mirror that re-syncs with one command. Today
 `rovo init SITE_URL OUT_DIR` creates a mirror and `rovo sync OUT_DIR` fetches its seed
-pages over HTTP, publishes each as a Markdown page file and writes `crawl-report.json`;
-links, discovery, indexes and the other branches arrive slice by slice. The public API
+pages and the pages they link to within the scope over HTTP, publishes each as a
+Markdown page file with relative links between mirrored pages and writes
+`crawl-report.json`; sitemaps, indexes and the other branches arrive slice by slice. The public API
 is still only `rovo.__version__`, and the command also answers `rovo --version` and
 `rovo version`. The repository runs the whole quality gate on every change, so each
 slice lands on a gate that proves everything around it. Behaviour is specified in Allium before it is built; four modules

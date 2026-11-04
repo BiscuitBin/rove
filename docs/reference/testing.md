@@ -95,7 +95,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the twenty-two package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-three package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -110,16 +110,24 @@ A build on every gate is the cost of testing the artefact that will ship.
 serves `tests/fixtures/sites/basic/` with the standard library's `ThreadingHTTPServer`
 and `SimpleHTTPRequestHandler`, request logging silenced, bound to an ephemeral port on
 `127.0.0.1` in a background thread, and returns the base URL
-(`http://127.0.0.1:<port>/`). When the test ends, every server it started is shut down
+(`http://127.0.0.1:<port>/`); given a `Path`, it serves that directory instead, such as
+a templated copy in `tmp_path`. When the test ends, every server it started is shut down
 and closed, and its threads are joined (the server joins its request threads too), so
 `filterwarnings = error` sees no unclosed socket. Nothing reaches the network.
 
 `tests/fixtures/sites/<name>/` holds the fixture sites, one directory each; `basic` is a
 single `index.html`, `one-page` a single documentation page at `guide/start.html`, and
-`robots-disallow` the same page under a `robots.txt` that disallows `/guide/`.
+`robots-disallow` the same page under a `robots.txt` that disallows `/guide/`. `links`
+is a small linked site (a seed, pages one and two links deep, a robots-disallowed page
+and a page off the path prefix), and `cross-target` with `cross-host` are two sites whose
+pages link across servers; `cross-host` holds the placeholder `@TARGET_BASE@`, which the
+test replaces with the other server's base URL.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
-fixture sites, as the installed command would. The suite and `just coverage` run the end-to-end tests
+fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`
+syncs the linked sites. `tests/test_links.py` holds the hand-written link tests: the
+`RelativeLinksOnly` and `CodeSamplesNeverRewritten` guarantees, broken-link detection
+and a whole sync over the links site through `FakeFetcher`. The suite and `just coverage` run the end-to-end tests
 with everything else.
 
 The `browser` marker is for tests that need playwright and a browser. Without the

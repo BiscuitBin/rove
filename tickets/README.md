@@ -33,6 +33,7 @@ snapshot.
 | T07 | Allium gate: the placeholder module, the spec recipes, the Allium skills, the specification workflow | `T07-allium-gate.md` | T05 | none | done |
 | T08 | Product foundation: the state-on-disk decision, the runtime dependencies, the private package skeleton, the end-to-end harness | `T08-foundation.md` | T07 | none | done |
 | T09 | Tracer bullet: rovo init creates a mirror, rovo sync mirrors its seed page | `T09-tracer-init-sync-one-page.md` | T08 | none | open |
+| T10 | Links and scope: rovo sync follows links within the crawl scope and rewrites them between page files | `T10-links-and-scope.md` | T09 | none | open |
 
 ## Dependency graph
 
@@ -40,7 +41,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -64,6 +65,10 @@ T00 ─┬─ T01 ─┐
   with its frontmatter and writes `crawl-report.json`. It fixes the patterns later
   slices follow: the module layout, the seams, the state files, configuration
   resolution, and the obligation-named and end-to-end tests.
+- **T10** is slice 2: `rovo sync` follows links. Each stored page's links are enqueued
+  within the crawl scope and fetched in later batches, and every finalisation rewrites
+  a link to a written page as a relative path between page files, across hosts under
+  `pages/<host>/` too; every other link stays absolute.
 
 ## How to pick up a ticket
 

@@ -43,3 +43,17 @@ policy.
   whole path. A host's trailing dot no longer makes a separate identity. A last URL
   segment that is only a dropped `.html`, `.htm` or `.aspx` (`/guide/.html`) is named
   `index`, as a directory URL is, where `rovo sync` used to crash.
+- `rovo sync` follows links: each stored page's content and navigation links that the
+  crawl scope allows one level deeper (`max_depth`, `include`, `exclude`, the path
+  prefixes, the allowed hosts) are queued and fetched in later batches, each URL once.
+  Every finalisation resolves every page's links against the whole mirror: a link to a
+  mirrored page is written as a relative path between page files (a link between hosts
+  climbs to `pages/`), every other link stays absolute, code is never rewritten, the
+  `uncrawled_internal`, `unresolved_fragment` and `dangling_inbound` flags follow the
+  links, the manifest keeps the links, and `crawl-report.json` lists any broken
+  relative link under `broken_links`. A link to a URL that cannot be parsed (a port out
+  of range) is out of bounds: it is never queued, records no link and stays as written,
+  where `rovo sync` used to crash. A destination with balanced parentheses
+  (`x_(y).html`) is read whole, where it was cut at its first `)`, left absolute and
+  recorded as an uncrawled link. Link text is read the same way: text holding
+  brackets (`see [1]`) or an image no longer hides the link, or swaps in the image.

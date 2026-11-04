@@ -1,4 +1,4 @@
-"""Page intake (mirror.allium 514 to 887): candidates become pages and aliases.
+"""Page intake (mirror.allium 517 to 890): candidates become pages and aliases.
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
 `settle_candidate` fires the one whose guards hold. This slice implements StoreNewPage,
@@ -12,6 +12,7 @@ from rovo._mirror.model import (
     CandidateDiscarded,
     CandidateOutcome,
     CandidateStatus,
+    LinksFound,
     Mirror,
     Page,
     PageCandidate,
@@ -134,16 +135,17 @@ def refuse_unplaceable_candidate(candidate: PageCandidate) -> CandidateDiscarded
     return CandidateDiscarded(candidate=candidate, reason=_NO_FREE_PATH)
 
 
-def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> bool:
-    """Realises mirror.allium RefreshPage; False when its guards do not hold.
+def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> LinksFound | None:
+    """Realises mirror.allium RefreshPage; None when its guards do not hold.
 
     No file is written. Every URL on the way to the page that is not its identity (each
     redirect hop, the source URL, the requested identity) is raised as AliasRecorded.
-    The page's links are dropped and re-resolved at finalisation; this slice has none.
+    The page's links are dropped and re-resolved at finalisation; the LinksFound it
+    raises carries the content's targets for the crawl.
     """
     content = candidate.content
     if candidate.status is not CandidateStatus.pending or content is None:
-        return False
+        return None
     mirror = candidate.mirror
     now = clock.now()
     page.canonical_url = content.canonical_url
@@ -170,6 +172,7 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> bool:
     page.last_stored_run = candidate.run_id
     page.fetched_at = now
     page.last_seen = now
+    mirror.links = [link for link in mirror.links if link.source is not page]
     passed = [
         *(mirror.scope.identity_of(hop) for hop in candidate.redirect_hops),
         mirror.scope.identity_of(candidate.source_url),
@@ -179,7 +182,19 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> bool:
         if url != page.identity:
             _alias_recorded(mirror, url, page)
     candidate.status = CandidateStatus.accepted
-    return True
+    return links_found(candidate, page)
+
+
+def links_found(candidate: PageCandidate, page: Page) -> LinksFound:
+    """The LinksFound RefreshPage raises for the stored page (mirror.allium 856)."""
+    content = candidate.content
+    return LinksFound(
+        candidate=candidate,
+        page=page,
+        depth=candidate.depth,
+        targets=() if content is None else content.link_targets,
+        navigation_targets=() if content is None else content.navigation_targets,
+    )
 
 
 def record_alias(mirror: Mirror, url: str, page: Page) -> Alias | None:

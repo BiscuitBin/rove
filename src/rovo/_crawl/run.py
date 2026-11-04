@@ -55,13 +55,15 @@ from rovo._crawl.model import (
     UrlFailed,
     WalkStatus,
 )
-from rovo._mirror.intake import admit_candidate, settle_candidate
+from rovo._mirror.intake import admit_candidate, links_found, settle_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
     CandidateDiscarded,
     CandidateOutcome,
     CrawlScope,
+    LinksFound,
     Mirror,
+    Page,
     PageCandidate,
     Tier,
 )
@@ -384,6 +386,45 @@ def enqueue(  # noqa: PLR0913  The UrlDiscovered trigger's parameters.
     if existing.status is FrontierStatus.pending and existing.is_deferred:
         existing.priority = priority
     return existing
+
+
+def enqueue_page_links(
+    run: Run | None, frontier: Frontier, found: LinksFound
+) -> list[FrontierEntry] | None:
+    """Realises crawl.allium EnqueuePageLinks; None when its guard does not hold.
+
+    Each content, then navigation, target that is not the page itself and that the scope
+    allows at depth + 1 is raised as UrlDiscovered with the link priority, from the page.
+    The owner-testing branch (owner_link_needed) is a later slice's.
+    """
+    if run is None or run.status is not RunStatus.running:
+        return None
+    if run.mode is not RunMode.standard:
+        raise NotInThisSlice(rule="EnqueuePageLinks")
+    scope = found.candidate.mirror.scope
+    depth = found.depth + 1
+    discovered: list[FrontierEntry] = []
+    for via, targets in (
+        (DiscoverySource.link, found.targets),
+        (DiscoverySource.navigation, found.navigation_targets),
+    ):
+        for url in targets:
+            if not scope.allows(url, depth):
+                continue  # Tested first: a malformed URL is out of bounds, with no identity.
+            identity = scope.identity_of(url)
+            if identity != found.page.identity:
+                discovered.append(
+                    enqueue(
+                        run,
+                        frontier,
+                        identity,
+                        depth=depth,
+                        via=via,
+                        priority=CONFIG.link_priority,
+                        from_url=found.page.identity,
+                    )
+                )
+    return discovered
 
 
 def drop_stale_observations(run: Run, frontier: Frontier) -> bool:
@@ -835,6 +876,8 @@ def _store(run: Run, frontier: Frontier, walk: LadderWalk, clock: Clock) -> UrlF
         return None
     candidate = admit_candidate(delivered)
     settled = settle_candidate(candidate, clock)
+    if isinstance(settled, Page):
+        enqueue_page_links(run, frontier, links_found(candidate, settled))
     if not isinstance(settled, CandidateDiscarded):
         settle_stored_entry(frontier, candidate)
         return None

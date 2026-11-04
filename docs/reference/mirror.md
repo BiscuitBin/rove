@@ -72,7 +72,13 @@ locale), `declared_owned_hosts`, `recorded_root_url` (the root URL the last run 
 path, source and canonical URLs, title, description, extraction method, tier, quality
 result, flags, keywords, digests, validators, both bodies, frontmatter, the runs that
 last saw and stored it, and its fetch times. An alias row is a URL and the identity of
-the page it resolves to. `rovo init` refuses a directory whose manifest exists, even
+the page it resolves to. A link row is one link of a page as the last finalisation
+resolved it: `source` (the linking page's identity), `target_identity` (the
+destination's identity, before alias resolution), `fragment` (`null` when there is
+none), `kind` (`internal`, `uncrawled`, `dangling` or `external`), `target` (the
+identity of the page that holds it, set only when the kind is `internal`) and
+`fragment_resolved`. Link rows are sorted by source, then target identity, then
+fragment. `rovo init` refuses a directory whose manifest exists, even
 one that does not parse; `rovo sync` refuses one that is missing or does not parse.
 
 ## `.rovo/frontier.json` and `.rovo/runs.json`
@@ -167,6 +173,49 @@ inside braces, written as the page records it, and fenced code holds the code te
 unchanged, each `<br>` in it a line break. `content_digest` covers the body only. A page file is written only when its text would
 change.
 
+## Links
+
+Every sync's finalisation resolves the links of every page in the mirror, not only the
+pages it fetched. Each link destination of a page's converted body is made absolute
+against the page's source URL and turned into an identity. Destinations in frontmatter,
+fenced code and inline code, images, empty destinations and `mailto:`, `tel:`,
+`javascript:` and `data:` destinations are never links and stay as written. A
+destination is read as CommonMark reads it: balanced parentheses belong to it, so a
+destination `x_(y).html` is read whole, and so is link text holding balanced brackets
+or an image, whose own source is no link. A link is:
+
+- `internal` when a page in the mirror holds the identity, directly or through an
+  alias; its fragment is resolved when the page records that heading anchor;
+- `dangling` when the identity is a removed page's;
+- `uncrawled` when no page holds it but the scope's bounds, without regard to depth,
+  include it, such as a page robots.txt disallows or one past `max_depth`;
+- `external` otherwise.
+
+A destination that cannot be parsed as a URL, such as one whose port is out of range,
+is out of the scope's bounds: it is never queued, records no link and stays as written.
+
+In the page file an internal destination becomes the relative path from the linking
+file to the target file, plus its fragment, and a link from a page to its own heading
+becomes the bare fragment (`#intro`). Between hosts the path climbs to `pages/` and
+descends again: `pages/127.0.0.1_8001/start.md` links `pages/127.0.0.1_8002/y.md` as
+`../127.0.0.1_8002/y.md`. An autolink (`<http://...>`) to a mirrored page becomes an
+inline link whose text is the URL. Every other destination stays absolute, and every
+other byte of the body is the converted body's. Rewriting always starts from the
+converted body, so it gives the same file every time.
+
+The page's link flags follow its links: `uncrawled_internal` when a link is
+`uncrawled`, `unresolved_fragment` when an internal link names an anchor the target
+does not have, and `dangling_inbound` when a link is `dangling`. By default none of
+them makes the page low confidence.
+
+After the page files are written, the pass reads each one back and lists every
+relative destination outside code that leads out of the mirror (`outside_mirror`),
+reaches no file (`missing_file`) or names an anchor that the target file has no
+heading id for and that the page's links do not already flag as unresolved
+(`fragment_not_found`); a missing page file is one `missing_file` row with an empty
+`href`. After a complete pass the list is empty. It becomes the report's
+`broken_links`.
+
 ## `crawl-report.json`
 
 The report of the last sync: every `CrawlReport` field of `rovo.allium` but the mirror,
@@ -174,7 +223,8 @@ the operator and the open or written status. It names the run (`run_id`, `kind`,
 `mode`), how it ended (`report_status`, `exit_code`, `error`), the configuration and
 options it used, the tallies (`discovered`, `fetched`, `converted`, `bytes_fetched`
 and the rest), one row per host, the quality summary and scores, the low-confidence
-pages and one row per change (`kind`, `url`, `path`, `moved_from`). Every list is
+pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` then
+`href`) and one row per change (`kind`, `url`, `path`, `moved_from`). Every list is
 sorted by URL or path, durations are seconds, and `started_at` and `finished_at` are
 the only times. `rovo sync` writes it once, when the report is ranked; a refused sync
 writes none yet.

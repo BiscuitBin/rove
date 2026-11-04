@@ -31,7 +31,17 @@ from rovo._crawl.model import (
 )
 from rovo._crawl.run import CrawlResult, run_crawl
 from rovo._mirror.finalise import Finalisation, finalise, request_pass
-from rovo._mirror.model import CrawlScope, Mirror, Operator, PassKind, StoreOutcome, Tier
+from rovo._mirror.model import (
+    BrokenLink,
+    BrokenLinkReason,
+    CrawlScope,
+    LinksRewritten,
+    Mirror,
+    Operator,
+    PassKind,
+    StoreOutcome,
+    Tier,
+)
 from rovo._mirror.state import save_mirror
 from rovo._report import (
     BlockedUrl,
@@ -54,6 +64,7 @@ from rovo._report import (
     rank_and_write_report,
     report_path,
     summarise,
+    take_broken_links,
     tally_finalised_page,
 )
 from spec_values import spec_enum, spec_float
@@ -374,6 +385,67 @@ def test_rule_failure_RankAndWriteReport_1(tmp_path: Path) -> None:
     assert rank_and_write_report(report, run, FixedClock()) is None
     assert not report_path(tmp_path).exists()
     assert report.finished_at is None
+
+
+# --- TakeBrokenLinks (T10) ------------------------------------------------------------
+
+# Two broken links, out of order: the report keeps them and writes them sorted.
+BROKEN = (
+    BrokenLink(
+        from_path=START_PATH, href="other.md#nope", reason=BrokenLinkReason.fragment_not_found
+    ),
+    BrokenLink(from_path=START_PATH, href="gone.md", reason=BrokenLinkReason.missing_file),
+)
+
+
+def links_rewritten(finalised: Finalisation) -> LinksRewritten:
+    """The LinksRewritten FinishLinkPass raises for the pass, carrying BROKEN."""
+    pass_ = finalised.pass_
+    return LinksRewritten(mirror=pass_.mirror, pass_=pass_, operator=pass_.operator, broken=BROKEN)
+
+
+def test_rule_success_TakeBrokenLinks(tmp_path: Path) -> None:
+    """Verify rule TakeBrokenLinks succeeds when all preconditions are met.
+
+    The report takes the pass's broken links; crawl-report.json lists them as rows sorted
+    by from_path then href.
+    """
+    report, run, finalised = tallied(tmp_path)
+    assert take_broken_links(report, links_rewritten(finalised))
+    assert report.broken_links == list(BROKEN)
+    assert report.quality_failed
+    rank_and_write_report(report, run, FixedClock(LATER))
+    assert written(tmp_path)["broken_links"] == [
+        {"from_path": START_PATH, "href": "gone.md", "reason": "missing_file"},
+        {"from_path": START_PATH, "href": "other.md#nope", "reason": "fragment_not_found"},
+    ]
+
+
+def test_rule_failure_TakeBrokenLinks_1(tmp_path: Path) -> None:
+    """Verify rule TakeBrokenLinks is rejected when requires clause fails.
+
+    requires: pass.run_id != null.
+    """
+    report, run, finalised = tallied(tmp_path)
+    command_pass = request_pass(run.operator, run.target, PassKind.finalise, None)
+    rewritten = dataclasses.replace(links_rewritten(finalised), pass_=command_pass)
+    assert not take_broken_links(report, rewritten)
+    assert report.broken_links == []
+
+
+def test_rule_failure_TakeBrokenLinks_2(tmp_path: Path) -> None:
+    """Verify rule TakeBrokenLinks is rejected when requires clause fails.
+
+    requires: exists report and report.status = open.
+    """
+    report, run, finalised = tallied(tmp_path)
+    other = opened(run)
+    other.run_id = run.id + 1
+    assert not take_broken_links(other, links_rewritten(finalised))
+    assert other.broken_links == []
+    report.status = CrawlReportStatus.written
+    assert not take_broken_links(report, links_rewritten(finalised))
+    assert report.broken_links == []
 
 
 def test_transition_edge_CrawlReport_open_written(tmp_path: Path) -> None:

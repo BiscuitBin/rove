@@ -62,6 +62,26 @@ class StoreOutcome(enum.Enum):
     moved = "moved"
 
 
+class LinkKind(enum.Enum):
+    """internal: a written page holds the target; uncrawled: in bounds, no page.
+
+    dangling: the target is a removed page; external: anything else.
+    """
+
+    internal = "internal"
+    uncrawled = "uncrawled"
+    dangling = "dangling"
+    external = "external"
+
+
+class BrokenLinkReason(enum.Enum):
+    """Why a relative link in a page file is broken."""
+
+    missing_file = "missing_file"
+    outside_mirror = "outside_mirror"
+    fragment_not_found = "fragment_not_found"
+
+
 class PassKind(enum.Enum):
     """The kinds of job over the mirror."""
 
@@ -110,7 +130,7 @@ class MirrorConfig:
     prune: bool
 
 
-# mirror.allium's config block (mirror.allium 486 to 494), the one copy in code.
+# mirror.allium's config block (mirror.allium 489 to 497), the one copy in code.
 CONFIG = MirrorConfig(
     max_path_chars=200,
     collision_hash_chars=6,
@@ -125,7 +145,7 @@ _WEB_SCHEMES = frozenset({"http", "https"})
 
 @dataclass(frozen=True, kw_only=True)
 class CrawlScope:
-    """The one URL scope of a mirror (mirror.allium 100)."""
+    """The one URL scope of a mirror (mirror.allium 101)."""
 
     root_url: str | None
     start_urls: tuple[str, ...]
@@ -164,10 +184,13 @@ class CrawlScope:
         return any(self.identity_of(seed) == identity for seed in self.seeds)
 
     def within_bounds(self, url: str) -> bool:
-        """In bounds without regard to depth."""
+        """In bounds without regard to depth; a malformed URL is out of bounds."""
+        try:
+            identity = self.identity_of(url)
+        except ValueError:  # normalise_url cannot parse it (a port out of range).
+            return False
         if self.is_seed(url):
             return True
-        identity = self.identity_of(url)
         return (
             scheme_of(identity) in _WEB_SCHEMES
             and self.host_allowed(url)
@@ -212,6 +235,15 @@ class Frontmatter:
     locale: str | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class BrokenLink:
+    """A relative link in a page file that reaches no file or no anchor."""
+
+    from_path: str
+    href: str
+    reason: BrokenLinkReason
+
+
 @dataclass(kw_only=True, eq=False)
 class Mirror:
     """An output directory and its manifest."""
@@ -224,6 +256,7 @@ class Mirror:
     recorded_root_url: str | None = None
     pages: list["Page"] = field(default_factory=list)
     aliases: list["Alias"] = field(default_factory=list)
+    links: list["Link"] = field(default_factory=list)
     index: None = None
 
     @property
@@ -316,14 +349,14 @@ class Page:
     redirect_target: str | None = None
 
     @property
-    def outbound_links(self) -> tuple[object, ...]:
-        """The page's links; none in this slice."""
-        return ()
+    def outbound_links(self) -> tuple["Link", ...]:
+        """The links whose source is this page."""
+        return tuple(link for link in self.mirror.links if link.source is self)
 
     @property
-    def inbound_links(self) -> tuple[object, ...]:
-        """Links to the page; none in this slice."""
-        return ()
+    def inbound_links(self) -> tuple["Link", ...]:
+        """The links whose target is this page."""
+        return tuple(link for link in self.mirror.links if link.target is self)
 
     @property
     def aliases(self) -> list["Alias"]:
@@ -331,14 +364,14 @@ class Page:
         return [alias for alias in self.mirror.aliases if alias.target is self]
 
     @property
-    def internal_outbound(self) -> tuple[object, ...]:
+    def internal_outbound(self) -> tuple["Link", ...]:
         """Outbound links of kind internal."""
-        return self.outbound_links
+        return tuple(link for link in self.outbound_links if link.kind is LinkKind.internal)
 
     @property
-    def internal_inbound(self) -> tuple[object, ...]:
+    def internal_inbound(self) -> tuple["Link", ...]:
         """Inbound links of kind internal."""
-        return self.inbound_links
+        return tuple(link for link in self.inbound_links if link.kind is LinkKind.internal)
 
     @property
     def outbound_internal(self) -> int:
@@ -353,17 +386,17 @@ class Page:
     @property
     def has_uncrawled_link(self) -> bool:
         """An outbound link is uncrawled."""
-        return False
+        return any(link.kind is LinkKind.uncrawled for link in self.outbound_links)
 
     @property
     def has_dangling_link(self) -> bool:
         """An outbound link is dangling."""
-        return False
+        return any(link.kind is LinkKind.dangling for link in self.outbound_links)
 
     @property
     def has_unresolved_fragment(self) -> bool:
         """An outbound link's fragment is unresolved."""
-        return False
+        return any(not link.fragment_resolved for link in self.outbound_links)
 
     @property
     def is_new_this_run(self) -> bool:
@@ -385,9 +418,21 @@ class Alias:
     target: Page
 
 
+@dataclass(kw_only=True, eq=False)
+class Link:
+    """One outbound link of a page, as resolved at the last finalisation."""
+
+    source: Page
+    target_identity: str
+    fragment: str | None
+    kind: LinkKind
+    target: Page | None
+    fragment_resolved: bool
+
+
 @dataclass(frozen=True, kw_only=True)
 class CandidateDelivered:
-    """The trigger the crawl raises through PageIntake (mirror.allium 1468)."""
+    """The trigger the crawl raises through PageIntake (mirror.allium 1481)."""
 
     run_id: int
     mirror: Mirror
@@ -443,13 +488,34 @@ class MirrorPass:
     kind: PassKind
     run_id: int | None
     failures: list[object]
-    broken_links: list[object]
+    broken_links: list[BrokenLink]
     status: PassStatus
 
 
 @dataclass(frozen=True, kw_only=True)
+class LinksFound:
+    """The trigger RefreshPage raises (mirror.allium 856): the stored page's targets."""
+
+    candidate: PageCandidate
+    page: Page
+    depth: int
+    targets: tuple[str, ...]
+    navigation_targets: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class LinksRewritten:
+    """The trigger FinishLinkPass raises (mirror.allium 1182)."""
+
+    mirror: Mirror
+    pass_: MirrorPass
+    operator: Operator
+    broken: tuple[BrokenLink, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
 class PageFinalised:
-    """The trigger PublishPage raises (mirror.allium 1147)."""
+    """The trigger PublishPage raises (mirror.allium 1156)."""
 
     pass_: MirrorPass
     page: Page

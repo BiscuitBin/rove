@@ -15,7 +15,15 @@ from pathlib import Path
 
 import httpx
 
-from fakes import START, FakeFetcher, FixedClock, html_response, not_found, text_response
+from fakes import (
+    START,
+    FakeFetcher,
+    FixedClock,
+    fixture_site,
+    html_response,
+    not_found,
+    text_response,
+)
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag
 from rovo._crawl import model
@@ -59,6 +67,7 @@ from rovo._crawl.run import (
     drop_stale_observations,
     end_run,
     enqueue,
+    enqueue_page_links,
     fetch_entry,
     fetch_robots,
     finish_run,
@@ -85,6 +94,7 @@ from rovo._mirror.intake import admit_candidate, take_candidate
 from rovo._mirror.model import (
     CandidateOutcome,
     CrawlScope,
+    LinksFound,
     Mirror,
     Operator,
     Tier,
@@ -120,6 +130,12 @@ FORBIDDEN = 403
 MOVED = 301
 SECOND_RUN = 2
 THIRD_RUN = 3
+# The links fixture site served from SITE (tests/fixtures/sites/links, T10).
+B_PAGE = f"{SITE}/guide/b.html"
+C_PAGE = f"{SITE}/guide/deep/c.html"
+D_PAGE = f"{SITE}/guide/deep/d.html"
+SECRET_PAGE = f"{SITE}/guide/private/secret.html"
+OUTSIDE_PAGE = f"{SITE}/outside/x.html"
 
 
 def new_mirror(out_dir: Path, **changes: object) -> Mirror:
@@ -277,6 +293,32 @@ def walk_with(
     )
     walk.attempts.append(attempt)
     return attempt
+
+
+def links_site() -> FakeFetcher:
+    """The links fixture site, robots.txt included, served from SITE."""
+    return FakeFetcher(fixture_site("links", f"{SITE}/"))
+
+
+def stored_seed(out_dir: Path, fetcher: FakeFetcher) -> tuple[Run, Frontier, LinksFound]:
+    """The seed fetched, converted, stored and settled; the LinksFound its storing raises."""
+    run, frontier, walk = settled(out_dir, fetcher)
+    assert dispose_fetch(walk)
+    delivered = convert_fetched(run, walk.entry, walk)
+    assert delivered is not None
+    assert delivered.content is not None
+    candidate = admit_candidate(delivered)
+    page = take_candidate(candidate, FixedClock())
+    assert page is not None
+    assert settle_stored_entry(frontier, candidate)
+    found = LinksFound(
+        candidate=candidate,
+        page=page,
+        depth=walk.entry.depth,
+        targets=delivered.content.link_targets,
+        navigation_targets=delivered.content.navigation_targets,
+    )
+    return run, frontier, found
 
 
 def assert_fields(value: object, names: tuple[str, ...]) -> None:
@@ -721,7 +763,8 @@ def test_rule_success_Enqueue(tmp_path: Path) -> None:
     """Verify rule Enqueue succeeds when all preconditions are met.
 
     A new identity gets a pending row; rediscovery lowers the depth, takes a newer
-    lastmod and promotes a deferred row, and never changes the status.
+    lastmod and promotes a deferred row, and never changes the status, also when the
+    rediscovery comes from a stored page's links (T10).
     """
     run, frontier = started(tmp_path)
     entry = enqueue(
@@ -753,6 +796,30 @@ def test_rule_success_Enqueue(tmp_path: Path) -> None:
     assert (entry.depth, entry.sitemap_lastmod, entry.priority) == (1, "2026-10-01", 1)
     assert entry.discovered_via is DiscoverySource.link
     assert entry.status is FrontierStatus.pending
+
+    # T10: a page's links rediscover rows through EnqueuePageLinks. A deeper deferred
+    # pending row takes the shorter route's depth and the link priority; a settled row
+    # keeps its status and its discovery; no identity gets a second row.
+    run, frontier, found = stored_seed(tmp_path / "links", links_site())
+    deferred = enqueue(
+        run,
+        frontier,
+        C_PAGE,
+        depth=THIRD_RUN,
+        via=DiscoverySource.recheck,
+        priority=model.CONFIG.deferred_priority,
+    )
+    settled_row = enqueue(run, frontier, B_PAGE, depth=1, via=DiscoverySource.sitemap, priority=0)
+    settled_row.status = FrontierStatus.done
+    assert enqueue_page_links(run, frontier, found) is not None
+    assert (deferred.depth, deferred.priority) == (1, model.CONFIG.link_priority)
+    assert deferred.status is FrontierStatus.pending
+    assert deferred.discovered_via is DiscoverySource.recheck
+    assert settled_row.status is FrontierStatus.done
+    assert settled_row.discovered_via is DiscoverySource.sitemap
+    identities = [entry.identity for entry in frontier.entries]
+    assert len(identities) == len(set(identities))
+    assert SECRET_PAGE in identities
 
 
 def test_rule_success_DropStaleObservations(tmp_path: Path) -> None:
@@ -825,12 +892,24 @@ def test_rule_failure_SelectBatch_1(tmp_path: Path) -> None:
 def test_rule_success_NextBatch(tmp_path: Path) -> None:
     """Verify rule NextBatch succeeds when all preconditions are met.
 
-    When no row is in progress, a crawling run asks for another batch.
+    When no row is in progress, a crawling run asks for another batch; over the links
+    site a second and a third batch fetch the pages the first one's links reached.
     """
     run, frontier = crawling(tmp_path, site())
     assert next_batch(run, frontier)
     select_batch(run, frontier)
     assert not next_batch(run, frontier)
+
+    # T10: the links one batch stores are fetched in later batches, never twice: the
+    # depth-0 batch, then depth 1 (the robots-disallowed row skipped unrequested), then 2.
+    fetcher = links_site()
+    result = crawl_once(tmp_path / "links", fetcher)
+    assert fetcher.requests == [ROBOTS, SEED, B_PAGE, C_PAGE, D_PAGE]
+    assert sorted(page.identity for page in result.run.target.pages) == sorted(
+        [SEED, B_PAGE, C_PAGE, D_PAGE]
+    )
+    depths = {entry.identity: entry.depth for entry in result.frontier.entries}
+    assert depths == {SEED: 0, B_PAGE: 1, C_PAGE: 1, SECRET_PAGE: 1, D_PAGE: 2}
 
 
 def test_rule_success_SkipRobotsDisallowed(tmp_path: Path) -> None:
@@ -1806,6 +1885,14 @@ def test_derived_Frontier_batch_idle(tmp_path: Path) -> None:
     assert idle_before is True
     assert frontier.batch_idle is False
 
+    # T10: idle again between batches, once the seed is stored and its links queued.
+    run, frontier, found = stored_seed(tmp_path / "links", links_site())
+    assert enqueue_page_links(run, frontier, found) is not None
+    assert frontier.batch_idle is True
+    assert next_batch(run, frontier)
+    assert select_batch(run, frontier)
+    assert frontier.batch_idle is False
+
 
 def test_derived_FrontierEntry_is_deferred(tmp_path: Path) -> None:
     """Verify derived value FrontierEntry.is_deferred computes correctly."""
@@ -1952,3 +2039,102 @@ def test_config_default_observed_url_retention_syncs() -> None:
     """Verify config parameter observed_url_retention_syncs has its declared default."""
     expected = spec_int("crawl", "observed_url_retention_syncs")
     assert model.CONFIG.observed_url_retention_syncs == expected
+
+
+# --- Following links (T10) ----------------------------------------------------------
+
+
+def test_rule_success_EnqueuePageLinks(tmp_path: Path) -> None:
+    """Verify rule EnqueuePageLinks succeeds when all preconditions are met.
+
+    Each content then navigation target the scope allows at depth + 1 is discovered at
+    depth + 1 with the link priority, from the page; the self-link, the off-prefix page
+    and the foreign host are not. Robots is the fetch's business, not discovery's.
+    """
+    run, frontier, found = stored_seed(tmp_path, links_site())
+    assert found.targets
+    assert found.navigation_targets == (B_PAGE,)
+    enqueued = enqueue_page_links(run, frontier, found)
+    assert enqueued is not None
+    added = frontier.entries[1:]
+    assert [entry.identity for entry in added] == [B_PAGE, C_PAGE, SECRET_PAGE]
+    for entry in added:
+        assert entry.depth == 1
+        assert entry.discovered_via is DiscoverySource.link
+        assert entry.discovered_from == SEED
+        assert entry.priority == model.CONFIG.link_priority
+        assert entry.status is FrontierStatus.pending
+        assert entry.identity in run.active_urls
+    assert {entry.identity for entry in enqueued} == {B_PAGE, C_PAGE, SECRET_PAGE}
+    identities = {entry.identity for entry in frontier.entries}
+    assert OUTSIDE_PAGE not in identities
+    assert not any("example.invalid" in identity for identity in identities)
+    assert frontier.entry(SEED) is not None
+    assert len(frontier.entries) == len([SEED, B_PAGE, C_PAGE, SECRET_PAGE])
+
+
+def test_EnqueuePageLinks_navigation_only_and_depth_bound(tmp_path: Path) -> None:
+    """A navigation-only target is discovered via navigation; past max_depth, none is."""
+    run, frontier, found = stored_seed(tmp_path, links_site())
+    navigation = dataclasses.replace(found, targets=(), navigation_targets=(C_PAGE,))
+    enqueue_page_links(run, frontier, navigation)
+    row = frontier.entry(C_PAGE)
+    assert row is not None
+    assert row.discovered_via is DiscoverySource.navigation
+    assert row.depth == 1
+
+    deep = dataclasses.replace(
+        found, depth=run.target.scope.max_depth, targets=(D_PAGE,), navigation_targets=()
+    )
+    enqueue_page_links(run, frontier, deep)
+    assert frontier.entry(D_PAGE) is None
+
+
+def test_rule_failure_EnqueuePageLinks_1(tmp_path: Path) -> None:
+    """Verify rule EnqueuePageLinks is rejected when requires clause fails.
+
+    requires: exists run and run.status = running.
+    """
+    run, frontier, found = stored_seed(tmp_path, links_site())
+    before = list(frontier.entries)
+    assert enqueue_page_links(None, frontier, found) is None
+    run.status = RunStatus.finished
+    assert enqueue_page_links(run, frontier, found) is None
+    assert frontier.entries == before
+
+
+def test_config_default_link_priority() -> None:
+    """Verify config parameter link_priority has its declared default."""
+    assert model.CONFIG.link_priority == spec_int("crawl", "link_priority")
+
+
+def test_projection_Frontier_pending_entries(tmp_path: Path) -> None:
+    """Verify projection Frontier.pending_entries filters correctly.
+
+    After the seed's batch, the rows its links queued are the pending ones.
+    """
+    run, frontier, found = stored_seed(tmp_path, links_site())
+    assert frontier.pending_entries == []
+    enqueue_page_links(run, frontier, found)
+    pending = frontier.pending_entries
+    assert [entry.identity for entry in pending] == [B_PAGE, C_PAGE, SECRET_PAGE]
+    assert all(entry.status is FrontierStatus.pending for entry in pending)
+    seed = frontier.entry(SEED)
+    assert seed is not None
+    assert seed.status is FrontierStatus.done
+    assert seed not in pending
+
+
+def test_projection_Frontier_in_progress_entries(tmp_path: Path) -> None:
+    """Verify projection Frontier.in_progress_entries filters correctly.
+
+    The second batch puts the depth-1 rows in progress; the settled seed is not among them.
+    """
+    run, frontier, found = stored_seed(tmp_path, links_site())
+    assert frontier.in_progress_entries == []
+    enqueue_page_links(run, frontier, found)
+    batch = select_batch(run, frontier)
+    assert batch
+    assert frontier.in_progress_entries == batch
+    assert {entry.identity for entry in batch} <= {B_PAGE, C_PAGE, SECRET_PAGE}
+    assert all(entry.status is FrontierStatus.in_progress for entry in batch)

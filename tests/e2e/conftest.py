@@ -1,7 +1,8 @@
 """The end-to-end harness: static fixture sites served on 127.0.0.1, without the network.
 
 `serve_site(name)` serves `tests/fixtures/sites/<name>/` over the standard library's
-`http.server` on an ephemeral port, in a background thread, and returns the base URL.
+`http.server` on an ephemeral port, in a background thread, and returns the base URL;
+given a `Path`, it serves that directory instead, such as a templated copy in tmp_path.
 Every server the test started is shut down, closed and joined when the test ends.
 """
 
@@ -49,14 +50,17 @@ def _serve(directory: Path) -> Iterator[str]:
 
 
 @pytest.fixture
-def serve_site() -> Iterator[Callable[[str], str]]:
-    """A factory: `serve_site("basic")` serves that fixture site and returns its base URL."""
+def serve_site() -> Iterator[Callable[[str | Path], str]]:
+    """A factory: `serve_site("basic")` serves that fixture site and returns its base URL.
+
+    A `Path` names a directory to serve as it is.
+    """
     with ExitStack() as stack:
 
-        def serve(name: str) -> str:
-            directory = SITES / name
+        def serve(site: str | Path) -> str:
+            directory = site if isinstance(site, Path) else SITES / site
             if not directory.is_dir():
-                msg = f"no fixture site {name!r} under {SITES}"
+                msg = f"no fixture site {site!r} under {SITES}"
                 raise FileNotFoundError(msg)
             return stack.enter_context(_serve(directory))
 

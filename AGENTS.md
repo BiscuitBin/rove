@@ -7,7 +7,7 @@ This file is the single source of truth for the whole repository. The provider f
 rovo is a Python API and a Typer command, `rovo`, in one distribution. The product is
 a documentation mirror, specified under `docs/specs/` and implemented slice by slice
 (decision 0012, tickets T09 onward); nothing may invent beyond the specification:
-today `rovo init` and `rovo sync` mirror the seed pages, the public API is still only the
+today `rovo init` and `rovo sync` mirror the pages linked from the seeds, the public API is still only the
 placeholder `rovo.__version__`, and `rovo --version` and `rovo version` print it.
 New behaviour arrives only through a ticket or a decision record, and is stated in an
 Allium specification under `docs/specs/` before it is built: the specifications decide

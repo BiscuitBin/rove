@@ -16,7 +16,7 @@ This repository builds one pure-Python distribution, `rovo`: an importable packa
 `rovo`, which is the Python API, and a Typer command of the same name. Its behaviour is
 specified in Allium under `docs/specs/` before it is built: four modules specify a
 documentation mirror, implemented slice by slice: today `rovo init` creates a mirror and
-`rovo sync` mirrors its seed pages.
+`rovo sync` mirrors its seed pages and the pages they link to within the scope.
 
 ## Start here
 

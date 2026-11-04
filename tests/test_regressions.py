@@ -6,7 +6,9 @@ mark, code with leading blank lines, trailing whitespace or `<br>` line breaks, 
 IPv6 literal host (weed); a percent-encoded dot segment, a reserved file name in another
 case, a malformed URL or configuration value, a password input quoted another way, and a
 non-heading source id (review 2, ai_tmp/review/T09-2/); an IPv6 host init writes and a
-huge integer max_age (review 2, round 4).
+huge integer max_age (review 2, round 4). T10 (implement): an autolink to a written page
+and a destination that reaches into inline code; a destination with parentheses (weed 2);
+link text holding brackets or an image (weed 3).
 """
 
 import json
@@ -19,7 +21,7 @@ from fakes import FakeFetcher, FixedClock, html_response
 from rovo import _commands
 from rovo._config import initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
-from rovo._convert.fidelity import convert, extract, normalize
+from rovo._convert.fidelity import convert, extract, link_destinations, map_destinations, normalize
 from rovo._crawl.model import FrontierStatus, RunStatus
 from rovo._crawl.run import (
     classify_block,
@@ -357,7 +359,7 @@ def test_tally_failed_url_needs_an_open_report(tmp_path: Path) -> None:
 def test_segment_rewrites_each_read_the_sanitised_segment(
     tmp_path: Path, path: str, expected: str
 ) -> None:
-    """mirror.allium MovePage guidance 674 to 691: each rewrite reads one segment alone.
+    """mirror.allium MovePage guidance 677 to 694: each rewrite reads one segment alone.
 
     "They apply together, so neither the crawl order nor their own order matters": the
     device rule reads the part before the first "." of the sanitised segment, not of the
@@ -367,7 +369,7 @@ def test_segment_rewrites_each_read_the_sanitised_segment(
 
 
 def test_a_cut_may_leave_exactly_the_host_root(tmp_path: Path) -> None:
-    """mirror.allium MovePage guidance 699 to 712: "a cut never shortens pages/<host>/".
+    """mirror.allium MovePage guidance 702 to 715: "a cut never shortens pages/<host>/".
 
     A stem cut to max_path_chars - 10 that is exactly pages/<host>/ shortens nothing, so
     the short-digest path is usable when it fits (weed, resume tick 1: off by one).
@@ -384,7 +386,7 @@ def test_a_cut_may_leave_exactly_the_host_root(tmp_path: Path) -> None:
 
 
 def test_a_trailing_dot_host_is_allowed_by_its_own_scope() -> None:
-    """mirror.allium CrawlScope: example.com. and example.com are one identity (112 to 118).
+    """mirror.allium CrawlScope: example.com. and example.com are one identity (113 to 120).
 
     host_allowed reads hostname_of(identity_of(url)), so the scope init derives from a
     site URL named with a trailing "." allows that URL (weed, resume tick 1).
@@ -421,3 +423,165 @@ def test_an_ipv6_allowed_host_resolves_bare_or_bracketed(tmp_path: Path, host: s
     settings = resolve_config(tmp_path)
     assert settings.valid, settings.problems
     assert settings.allowed_hosts == frozenset({"::1"})
+
+
+def test_an_autolink_rewritten_becomes_an_inline_link() -> None:
+    """mirror.allium RelativeLinksOnly: `<b.md>` is no link, so the URL becomes its text.
+
+    An autolink left unchanged keeps its bytes, and a destination that runs into inline
+    code is code, never a destination (CodeSamplesNeverRewritten).
+    """
+    url = "http://docs.example/guide/b.html"
+    body = f"See <{url}> and <http://docs.example/x.html>, and [c](`{url}`).\n"
+    rewritten = map_destinations(body, lambda target: "b.md" if target == url else target)
+    assert rewritten == f"See [{url}](b.md) and <http://docs.example/x.html>, and [c](`{url}`).\n"
+    assert link_destinations(body) == (url, "http://docs.example/x.html")
+
+
+MALFORMED = "http://localhost:99999/x"
+MALFORMED_LINK = f"""<!doctype html><html><head><title>Start</title></head><body><main>
+<h1>Getting started</h1><p>See <a href="{MALFORMED}">the other port</a> for more.</p>
+</main></body></html>"""
+
+
+def test_a_malformed_url_is_out_of_bounds() -> None:
+    """mirror.allium CrawlScope.within_bounds: a malformed URL is out of bounds (137).
+
+    A port out of range made identity_of raise instead (weed, T10 tick 1).
+    """
+    scope = initial_scope(SEED, profiles.GENERIC)
+    assert not scope.within_bounds(MALFORMED)
+    assert not scope.allows(MALFORMED, 1)
+
+
+def test_a_link_to_a_malformed_url_is_left_as_written(tmp_path: Path) -> None:
+    """crawl.allium EnqueuePageLinks and mirror.allium FinalisePageBody: no crash.
+
+    The link is never enqueued (scope.allows is false) and its destination stays as
+    written. Whether it records an external Link, and with which target_identity, is the
+    batched needs-user question; meanwhile it records none (weed, T10 tick 1).
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    assert sync(out_dir, MALFORMED_LINK) is ExitCode.ok
+    mirror = load_mirror(out_dir)
+    (page,) = mirror.pages
+    assert f"]({MALFORMED})" in (out_dir / page.path).read_text(encoding="utf-8")
+    assert all(link.target_identity != MALFORMED for link in mirror.links)
+    frontier = json.loads((out_dir / ".rovo" / "frontier.json").read_text(encoding="utf-8"))
+    assert len(frontier["entries"]) == 1
+
+
+PAREN = f"{SITE}/guide/x_(y).html"
+PAREN_LINK = """<!doctype html><html><head><title>Start</title></head><body><main>
+<h1>Getting started</h1><p>Read <a href="x_(y).html">the paren page</a> next.</p>
+</main></body></html>"""
+PAREN_PAGE = """<!doctype html><html><head><title>Paren</title></head><body><main>
+<h1>The paren page</h1><p>A page whose name holds parentheses.</p>
+</main></body></html>"""
+
+
+def test_a_destination_keeps_its_balanced_parentheses() -> None:
+    """mirror.allium link_destinations lists each target as written (1041 to 1048).
+
+    `[a](x_(y).html)` is one CommonMark link whose destination holds balanced
+    parentheses; the first `)` cut it at `x_(y` (weed, T10 tick 2). An escaped parenthesis
+    belongs to the destination, a title is passed over, and a destination whose
+    parentheses close no link keeps the old reading.
+    """
+    body = (
+        f'See [a]({PAREN}) and [b]({PAREN} "T (t)") and [c](x\\)y.html).\n'
+        "Then [e](f((g)).html) and [d](u(v.html)\n"
+    )
+    assert link_destinations(body) == (
+        PAREN,
+        PAREN,
+        "x\\)y.html",
+        "f((g)).html",
+        "u(v.html",
+    )
+    assert map_destinations(body, lambda target: target) == body
+    rewritten = map_destinations(body, lambda target: "p.md" if target == PAREN else target)
+    assert rewritten.startswith('See [a](p.md) and [b](p.md "T (t)") and')
+
+
+def test_a_link_to_a_parenthesised_page_becomes_relative(tmp_path: Path) -> None:
+    """mirror.allium LinkToPage and RelativeLinksOnly (1054 to 1064, 1420 to 1428).
+
+    The page `x_(y).html` is written, so the link to it is internal and relative, and no
+    uncrawled Link to `x_(y` is recorded (weed, T10 tick 2).
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, PAREN_LINK), PAREN: html_response(PAREN, PAREN_PAGE)}
+    )
+    synced = _commands.sync(
+        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+    )
+    assert synced is ExitCode.ok
+    mirror = load_mirror(out_dir)
+    pages = {page.source_url: page for page in mirror.pages}
+    assert set(pages) == {SEED, PAREN}
+    start = (out_dir / pages[SEED].path).read_text(encoding="utf-8")
+    assert PAREN not in start
+    assert "](x_-y-.md)" in start
+    assert all(link.target_identity.startswith(PAREN) for link in mirror.links), mirror.links
+
+
+BRACKETED = f"{SITE}/guide/b.html"
+LOGO = f"{SITE}/guide/i.png"
+BRACKETED_LINK = """<!doctype html><html><head><title>Start</title></head><body><main>
+<h1>Getting started</h1><p>Read <a href="b.html">see [1]</a> and
+<a href="b.html"><img src="i.png" alt="logo"></a> next.</p>
+</main></body></html>"""
+BRACKETED_PAGE = """<!doctype html><html><head><title>Bee</title></head><body><main>
+<h1>The bee page</h1><p>A page linked through bracketed text and an image.</p>
+</main></body></html>"""
+
+
+def test_link_text_keeps_its_brackets_and_images() -> None:
+    """mirror.allium link_destinations lists each target as written (1041 to 1048).
+
+    Link text runs to the `]` balancing its `[`, as CommonMark reads it: `[see [1]](b)`
+    names `b`, and `[![logo](i.png)](b)` names `b`, not the image's `i.png`; the first
+    `]` hid one and swapped the other (weed, T10 tick 3). An escaped bracket, a bracket
+    in a code span and an image on its own name no link; a link inside link text wins.
+    """
+    body = (
+        "See [see [1]](b.html) and [![logo](i.png)](c.html).\n"
+        "Then [a \\] b](d.html), [`]`](e.html), ![alone](f.png) and \\[g](h.html).\n"
+        "Inner [x [y](i.html) z](j.html) and [open [k](l.html)\n"
+    )
+    assert link_destinations(body) == ("b.html", "c.html", "d.html", "e.html", "i.html", "l.html")
+    assert map_destinations(body, lambda target: target) == body
+    rewritten = map_destinations(body, lambda target: "p.md" if target == "c.html" else target)
+    assert "[![logo](i.png)](p.md)" in rewritten
+
+
+def test_a_link_with_bracketed_text_or_an_image_becomes_relative(tmp_path: Path) -> None:
+    """mirror.allium LinkToPage and RelativeLinksOnly (1054 to 1064, 1420 to 1428).
+
+    Both links to the written page `b.html` become relative, and the image `i.png` is
+    recorded as no Link (weed, T10 tick 3).
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    fetcher = FakeFetcher(
+        {
+            SEED: html_response(SEED, BRACKETED_LINK),
+            BRACKETED: html_response(BRACKETED, BRACKETED_PAGE),
+        }
+    )
+    synced = _commands.sync(
+        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+    )
+    assert synced is ExitCode.ok
+    mirror = load_mirror(out_dir)
+    pages = {page.source_url: page for page in mirror.pages}
+    assert set(pages) == {SEED, BRACKETED}
+    start = (out_dir / pages[SEED].path).read_text(encoding="utf-8")
+    assert BRACKETED not in start
+    assert "[see [1]](b.md)" in start
+    assert f"[![logo]({LOGO})](b.md)" in start
+    assert all(link.target_identity != LOGO for link in mirror.links), mirror.links

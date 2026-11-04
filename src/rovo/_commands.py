@@ -46,6 +46,7 @@ from rovo._report import (
     close_run,
     finalise_run_report,
     rank_and_write_report,
+    take_broken_links,
     tally_failed_url,
     tally_finalised_page,
 )
@@ -203,6 +204,8 @@ def _start_sync(
     finalised = finalise(operator, mirror, result.run.id, clock)
     for event in finalised.finalised:
         tally_finalised_page(report, event)
+    if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.
+        take_broken_links(report, finalised.rewritten)
     save_mirror(mirror)
     save_run(result)  # Only now: a done frontier row must have its page saved.
     finalise_run_report(finalised.pass_, result.run)

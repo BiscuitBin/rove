@@ -44,13 +44,26 @@ from rovo._mirror.intake import (
     store_new_page,
     take_candidate,
 )
+from rovo._mirror.links import (
+    find_broken_links,
+    finish_link_pass,
+    link_to_external_page,
+    link_to_page,
+    link_to_removed_page,
+    link_to_uncrawled_page,
+    resolve_mirror_links,
+)
 from rovo._mirror.model import (
     Alias,
+    BrokenLink,
+    BrokenLinkReason,
     CandidateDelivered,
     CandidateOutcome,
     CandidateStatus,
     CrawlScope,
     Frontmatter,
+    Link,
+    LinksFound,
     Mirror,
     MirrorPass,
     Operator,
@@ -59,12 +72,13 @@ from rovo._mirror.model import (
     PageStatus,
     PassKind,
     PassStatus,
+    RemovalReason,
     StoreOutcome,
     Tier,
 )
 from rovo._mirror.state import load_mirror, save_mirror, write_json
 from rovo._mirror.urls import assign_path
-from spec_values import spec_int
+from spec_values import spec_enum, spec_int
 
 SITE = "http://docs.example"
 # page_root of the fixture host: every page path lies under pages/<host>/ (mirror.allium,
@@ -179,8 +193,14 @@ def quality(
     )
 
 
-def content(
-    *, body: str = BODY, canonical_url: str | None = None, measured: QualityResult | None = None
+def content(  # noqa: PLR0913  One keyword per content field a test varies.
+    *,
+    body: str = BODY,
+    canonical_url: str | None = None,
+    measured: QualityResult | None = None,
+    link_targets: tuple[str, ...] = (),
+    navigation_targets: tuple[str, ...] = (),
+    anchors: frozenset[str] = frozenset(),
 ) -> ConvertedContent:
     """Converted content for the fixture page, as the crawl hands it over."""
     return ConvertedContent(
@@ -190,11 +210,11 @@ def content(
         canonical_url=canonical_url,
         declared_locale="en",
         breadcrumbs=(),
-        navigation_targets=(),
+        navigation_targets=navigation_targets,
         method=ExtractionMethod.profile,
-        anchors=frozenset(),
+        anchors=anchors,
         headings=HEADINGS,
-        link_targets=(),
+        link_targets=link_targets,
         quality=measured or quality(),
         is_empty=False,
     )
@@ -209,6 +229,7 @@ def delivered(  # noqa: PLR0913  One keyword per candidate field a test varies.
     outcome: CandidateOutcome = CandidateOutcome.converted,
     converted: ConvertedContent | None = None,
     without_content: bool = False,
+    depth: int = 0,
 ) -> CandidateDelivered:
     """A CandidateDelivered for one settled http fetch of `requested`."""
     return CandidateDelivered(
@@ -217,7 +238,7 @@ def delivered(  # noqa: PLR0913  One keyword per candidate field a test varies.
         requested_identity=requested,
         source_url=source or requested,
         redirect_hops=(),
-        depth=0,
+        depth=depth,
         outcome=outcome,
         tier=Tier.http,
         raw_digest=RAW_DIGEST,
@@ -420,7 +441,11 @@ def test_rule_entity_creation_StoreNewPage_1(tmp_path: Path) -> None:
 
 
 def test_rule_success_RefreshPage(tmp_path: Path) -> None:
-    """Verify rule RefreshPage succeeds when all preconditions are met."""
+    """Verify rule RefreshPage succeeds when all preconditions are met.
+
+    The content fields are refreshed; T10: the page's outbound links are dropped and
+    LinksFound carries the content's targets at the candidate's depth.
+    """
     mirror = new_mirror(tmp_path)
     page = stored(mirror)
     changed_body = BODY.replace("once", "twice")
@@ -436,6 +461,35 @@ def test_rule_success_RefreshPage(tmp_path: Path) -> None:
     assert page.first_seen == START
     assert later.status is CandidateStatus.accepted
     assert mirror.aliases == []
+
+    # T10: the page's previous links are dropped, and LinksFound carries the content's
+    # link and navigation targets at the candidate's depth.
+    stale = Link(
+        source=page,
+        target_identity=NEW,
+        fragment=None,
+        kind=model.LinkKind.uncrawled,
+        target=None,
+        fragment_resolved=True,
+    )
+    mirror.links.append(stale)
+    linked = content(
+        body=LINKED_BODY,
+        link_targets=(OTHER, f"{OTHER}#setup", NEW),
+        navigation_targets=(TOPIC,),
+    )
+    third = admit_candidate(
+        delivered(mirror, run_id=SECOND_RUN + 1, converted=linked, depth=SECOND_RUN)
+    )
+    found = links_found(refresh_page(third, page, FixedClock(LATER)))
+    assert found.candidate is third
+    assert found.page is page
+    assert found.depth == SECOND_RUN
+    assert found.targets == linked.link_targets
+    assert found.navigation_targets == linked.navigation_targets
+    assert stale not in mirror.links
+    assert page.outbound_links == ()
+    assert page.converted_body == LINKED_BODY
 
 
 def test_rule_failure_RefreshPage_1(tmp_path: Path) -> None:
@@ -579,7 +633,8 @@ def test_rule_success_FinalisePageBody(tmp_path: Path) -> None:
     """Verify rule FinalisePageBody succeeds when all preconditions are met.
 
     Over a body with no links: the body is the converted body, no link flag is added,
-    and keywords are recomputed from the body.
+    and keywords are recomputed from the body. Over a body with links (T10): the body is
+    rewritten, its digest, link flags, low-confidence verdict and keywords recomputed.
     """
     mirror = new_mirror(tmp_path)
     page = stored(mirror)
@@ -593,6 +648,26 @@ def test_rule_success_FinalisePageBody(tmp_path: Path) -> None:
         BODY, model.CONFIG.keywords_per_page, model.CONFIG.keywords_min
     )
     assert page.keywords
+
+    # T10: over a body with links, each internal destination becomes a relative path
+    # between page files (a self-link a bare fragment), every other destination and
+    # every code sample stays as written, and the link flags are recomputed.
+    linked, start, _ = linked_mirror(tmp_path / "linked")
+    linked_pass = resolved(linked)
+    finalise_page_body(linked_pass, start)
+    assert start.converted_body == LINKED_BODY
+    assert start.body == REWRITTEN_BODY
+    assert start.content_digest == hashlib.sha256(REWRITTEN_BODY.encode()).hexdigest()
+    link_flags = {QualityFlag.uncrawled_internal, QualityFlag.unresolved_fragment}
+    assert start.flags == start.quality.flags | link_flags
+    assert QualityFlag.dangling_inbound not in start.flags
+    incomplete = profiles.CONFIG.incomplete_flags
+    assert start.low_confidence is (
+        start.quality.low_confidence or any(flag in incomplete for flag in link_flags)
+    )
+    assert start.keywords == keywords_of(
+        REWRITTEN_BODY, model.CONFIG.keywords_per_page, model.CONFIG.keywords_min
+    )
 
 
 def test_rule_success_PublishPage(tmp_path: Path) -> None:
@@ -1182,3 +1257,638 @@ def test_config_default_keywords_per_page() -> None:
 def test_config_default_keywords_min() -> None:
     """Verify config parameter keywords_min has its declared default."""
     assert model.CONFIG.keywords_min == spec_int("mirror", "keywords_min")
+
+
+# --- Links (T10): resolution, rewriting and the link pass -----------------------------
+
+NEW = f"{SITE}/guide/new.html"
+OUTSIDE = f"{SITE}/outside/x.html"
+OLD = f"{SITE}/guide/old.html"
+OLD_OUTSIDE = f"{SITE}/outside/old.html"
+ALIAS_URL = f"{SITE}/guide/other-alias.html"
+UNIDENTIFIABLE = f"{SITE}:99999/guide/x.html"  # a port out of range: no identity
+LINKED_BODY = (
+    "# Getting started\n"
+    "\n"
+    "## Introduction {#intro}\n"
+    "\n"
+    f"Read the [other page]({OTHER}), its [setup step]({OTHER}#setup) and a\n"
+    f"[missing step]({OTHER}#missing).\n"
+    "\n"
+    f"Back to the [introduction]({SEED}#intro), on to a [new page]({NEW}) or out to\n"
+    f"the [outside page]({OUTSIDE}).\n"
+    "\n"
+    f"Write to [us](mailto:docs@example.invalid) and see ![a diagram]({SITE}/guide/d.png).\n"
+    "\n"
+    f"Inline code `[other]({OTHER})` stays as written.\n"
+    "\n"
+    "```markdown\n"
+    f"[other]({OTHER})\n"
+    "```\n"
+)
+REWRITTEN_BODY = (
+    "# Getting started\n"
+    "\n"
+    "## Introduction {#intro}\n"
+    "\n"
+    "Read the [other page](other.md), its [setup step](other.md#setup) and a\n"
+    "[missing step](other.md#missing).\n"
+    "\n"
+    f"Back to the [introduction](#intro), on to a [new page]({NEW}) or out to\n"
+    f"the [outside page]({OUTSIDE}).\n"
+    "\n"
+    f"Write to [us](mailto:docs@example.invalid) and see ![a diagram]({SITE}/guide/d.png).\n"
+    "\n"
+    f"Inline code `[other]({OTHER})` stays as written.\n"
+    "\n"
+    "```markdown\n"
+    f"[other]({OTHER})\n"
+    "```\n"
+)
+OTHER_BODY = (
+    "# Other page\n"
+    "\n"
+    "The other page explains the example product's configuration.\n"
+    "\n"
+    "## Setup {#setup}\n"
+    "\n"
+    "Run the installer and follow the prompts.\n"
+)
+# What LINKED_BODY resolves to: (target identity, fragment, kind, fragment resolved).
+LINKED_ROWS = {
+    (OTHER, None, model.LinkKind.internal, True),
+    (OTHER, "setup", model.LinkKind.internal, True),
+    (OTHER, "missing", model.LinkKind.internal, False),
+    (SEED, "intro", model.LinkKind.internal, True),
+    (NEW, None, model.LinkKind.uncrawled, True),
+    (OUTSIDE, None, model.LinkKind.external, True),
+}
+
+
+def linked_mirror(out_dir: Path, **changes: object) -> tuple[Mirror, Page, Page]:
+    """Two written pages: the seed, whose body links widely, and the page it links to."""
+    mirror = new_mirror(out_dir, **changes)
+    start = stored(
+        mirror,
+        converted=content(
+            body=LINKED_BODY,
+            anchors=frozenset({"intro"}),
+            link_targets=(OTHER, f"{OTHER}#setup", f"{OTHER}#missing", NEW, OUTSIDE),
+        ),
+    )
+    other = stored(
+        mirror,
+        requested=OTHER,
+        converted=content(body=OTHER_BODY, anchors=frozenset({"setup"})),
+    )
+    return mirror, start, other
+
+
+def removed(mirror: Mirror, url: str) -> Page:
+    """A page record for `url` whose status is removed (constructed: no run removes one)."""
+    page = stored(mirror, requested=url)
+    page.status = PageStatus.removed
+    page.removed_at = START
+    page.removal_reason = RemovalReason.absent
+    return page
+
+
+def link_pass(mirror: Mirror) -> MirrorPass:
+    """A pending finalise pass over the mirror."""
+    return request_pass(Operator(), mirror, PassKind.finalise, FIRST_RUN)
+
+
+def resolved(mirror: Mirror) -> MirrorPass:
+    """A finalise pass that has resolved every written page's links."""
+    pass_ = link_pass(mirror)
+    assert resolve_mirror_links(pass_)
+    return pass_
+
+
+def finalised_pass(mirror: Mirror) -> MirrorPass:
+    """ResolveMirrorLinks, then FinalisePageBody and PublishPage for each page by path."""
+    pass_ = resolved(mirror)
+    pages = sorted(mirror.written_pages, key=lambda page: page.path)
+    for page in pages:
+        finalise_page_body(pass_, page)
+    for page in pages:
+        publish_page(pass_, page, FixedClock())
+    return pass_
+
+
+def rows(links: Iterable[Link]) -> set[tuple[str, str | None, model.LinkKind, bool]]:
+    """Each link as (target identity, fragment, kind, fragment resolved)."""
+    return {
+        (link.target_identity, link.fragment, link.kind, link.fragment_resolved) for link in links
+    }
+
+
+def links_found(result: object) -> LinksFound:
+    """RefreshPage's LinksFound, whatever the function's declared return type."""
+    assert isinstance(result, LinksFound), result
+    return result
+
+
+def test_rule_success_ResolveMirrorLinks(tmp_path: Path) -> None:
+    """Verify rule ResolveMirrorLinks succeeds when all preconditions are met.
+
+    Every written page's previous links are dropped and its destinations resolved:
+    images, mailto: targets, inline code and fenced code never become links.
+    """
+    mirror, start, other = linked_mirror(tmp_path)
+    stale = Link(
+        source=start,
+        target_identity=TOPIC,
+        fragment=None,
+        kind=model.LinkKind.uncrawled,
+        target=None,
+        fragment_resolved=True,
+    )
+    mirror.links.append(stale)
+    pass_ = link_pass(mirror)
+    assert resolve_mirror_links(pass_)
+    assert stale not in mirror.links
+    assert rows(start.outbound_links) == LINKED_ROWS
+    assert len(start.outbound_links) == len(LINKED_ROWS)
+    assert other.outbound_links == ()
+    assert all(link.source is start for link in mirror.links)
+    assert pass_.status is PassStatus.pending
+
+
+def test_rule_failure_ResolveMirrorLinks_1(tmp_path: Path) -> None:
+    """Verify rule ResolveMirrorLinks is rejected when requires clause fails.
+
+    requires: pass.status = pending.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    stale = Link(
+        source=start,
+        target_identity=TOPIC,
+        fragment=None,
+        kind=model.LinkKind.uncrawled,
+        target=None,
+        fragment_resolved=True,
+    )
+    mirror.links.append(stale)
+    pass_ = link_pass(mirror)
+    pass_.status = PassStatus.completed
+    assert not resolve_mirror_links(pass_)
+    assert mirror.links == [stale]
+
+
+def test_rule_success_LinkToPage(tmp_path: Path) -> None:
+    """Verify rule LinkToPage succeeds when all preconditions are met.
+
+    A destination made absolute against the source URL, held by a written page directly
+    or through an alias, is an internal link to that page.
+    """
+    mirror, start, other = linked_mirror(tmp_path)
+    record_alias(mirror, ALIAS_URL, other)
+    pass_ = link_pass(mirror)
+    direct = link_to_page(pass_, start, "other.html", None)
+    aliased = link_to_page(pass_, start, ALIAS_URL, "setup")
+    assert direct is not None
+    assert aliased is not None
+    assert (direct.kind, direct.target, direct.target_identity) == (
+        model.LinkKind.internal,
+        other,
+        OTHER,
+    )
+    assert (aliased.kind, aliased.target, aliased.target_identity) == (
+        model.LinkKind.internal,
+        other,
+        ALIAS_URL,
+    )
+    assert mirror.links == [direct, aliased]
+
+
+def test_rule_failure_LinkToPage_1(tmp_path: Path) -> None:
+    """Verify rule LinkToPage is rejected when requires clause fails.
+
+    requires: exists holder.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_page(link_pass(mirror), start, NEW, None) is None
+    assert mirror.links == []
+
+
+def test_rule_entity_creation_LinkToPage_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule LinkToPage ensures clause produces the specified fields."""
+    mirror, start, other = linked_mirror(tmp_path)
+    pass_ = link_pass(mirror)
+    found = link_to_page(pass_, start, OTHER, "setup")
+    missing = link_to_page(pass_, start, OTHER, "missing")
+    bare = link_to_page(pass_, start, OTHER, None)
+    assert found is not None
+    assert missing is not None
+    assert bare is not None
+    assert found.source is start
+    assert found.target_identity == OTHER
+    assert found.fragment == "setup"
+    assert found.kind is model.LinkKind.internal
+    assert found.target is other
+    assert found.fragment_resolved is True
+    assert (missing.fragment, missing.fragment_resolved) == ("missing", False)
+    assert (bare.fragment, bare.fragment_resolved) == (None, True)
+
+
+def test_rule_success_LinkToRemovedPage(tmp_path: Path) -> None:
+    """Verify rule LinkToRemovedPage succeeds when all preconditions are met."""
+    mirror, start, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    link = link_to_removed_page(link_pass(mirror), start, OLD, "gone")
+    assert link is not None
+    assert link.kind is model.LinkKind.dangling
+    assert mirror.links == [link]
+
+
+def test_rule_failure_LinkToRemovedPage_1(tmp_path: Path) -> None:
+    """Verify rule LinkToRemovedPage is rejected when requires clause fails.
+
+    requires: not exists known_page(page.mirror, identity).
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_removed_page(link_pass(mirror), start, OTHER, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToRemovedPage_2(tmp_path: Path) -> None:
+    """Verify rule LinkToRemovedPage is rejected when requires clause fails.
+
+    requires: exists holder and holder.status = removed.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_removed_page(link_pass(mirror), start, NEW, None) is None
+    assert mirror.links == []
+
+
+def test_rule_entity_creation_LinkToRemovedPage_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule LinkToRemovedPage ensures clause produces the specified fields."""  # noqa: E501  The obligation's description, quoted.
+    mirror, start, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    link = link_to_removed_page(link_pass(mirror), start, "old.html", "gone")
+    assert link is not None
+    assert link.source is start
+    assert link.target_identity == OLD
+    assert link.fragment == "gone"
+    assert link.kind is model.LinkKind.dangling
+    assert link.target is None
+    assert link.fragment_resolved is True
+
+
+def test_rule_success_LinkToUncrawledPage(tmp_path: Path) -> None:
+    """Verify rule LinkToUncrawledPage succeeds when all preconditions are met."""
+    mirror, start, _ = linked_mirror(tmp_path)
+    link = link_to_uncrawled_page(link_pass(mirror), start, NEW, None)
+    assert link is not None
+    assert link.kind is model.LinkKind.uncrawled
+    assert mirror.links == [link]
+
+
+def test_rule_failure_LinkToUncrawledPage_1(tmp_path: Path) -> None:
+    """Verify rule LinkToUncrawledPage is rejected when requires clause fails.
+
+    requires: not exists known_page(page.mirror, identity).
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_uncrawled_page(link_pass(mirror), start, OTHER, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToUncrawledPage_2(tmp_path: Path) -> None:
+    """Verify rule LinkToUncrawledPage is rejected when requires clause fails.
+
+    requires: not exists Page{mirror: page.mirror, identity: identity}.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    assert link_to_uncrawled_page(link_pass(mirror), start, OLD, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToUncrawledPage_3(tmp_path: Path) -> None:
+    """Verify rule LinkToUncrawledPage is rejected when requires clause fails.
+
+    requires: page.mirror.scope.within_bounds(identity).
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_uncrawled_page(link_pass(mirror), start, OUTSIDE, None) is None
+    assert mirror.links == []
+
+
+def test_rule_entity_creation_LinkToUncrawledPage_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule LinkToUncrawledPage ensures clause produces the specified fields."""  # noqa: E501  The obligation's description, quoted.
+    mirror, start, _ = linked_mirror(tmp_path)
+    link = link_to_uncrawled_page(link_pass(mirror), start, "new.html", "part")
+    assert link is not None
+    assert link.source is start
+    assert link.target_identity == NEW
+    assert link.fragment == "part"
+    assert link.kind is model.LinkKind.uncrawled
+    assert link.target is None
+    assert link.fragment_resolved is True
+
+
+def test_rule_success_LinkToExternalPage(tmp_path: Path) -> None:
+    """Verify rule LinkToExternalPage succeeds when all preconditions are met.
+
+    Off the path prefixes, off the allowed hosts, or excluded: each is external.
+    """
+    mirror, start, _ = linked_mirror(tmp_path, exclude=("*/guide/excluded*",))
+    pass_ = link_pass(mirror)
+    targets = [OUTSIDE, "https://elsewhere.example/guide/page.html", f"{SITE}/guide/excluded.html"]
+    links = [link_to_external_page(pass_, start, target, None) for target in targets]
+    assert all(link is not None and link.kind is model.LinkKind.external for link in links)
+    assert mirror.links == links
+
+
+def test_rule_failure_LinkToExternalPage_1(tmp_path: Path) -> None:
+    """Verify rule LinkToExternalPage is rejected when requires clause fails.
+
+    requires: identity != null. The port is out of range on an allowed host and prefix,
+    so only the missing identity keeps the destination from being a link (32f2210).
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    in_bounds = f"{SITE}:8080/guide/x.html"
+    assert link_to_external_page(link_pass(mirror), start, in_bounds, None) is None
+    assert mirror.links == []  # within bounds: the guard below is the null identity alone
+    assert link_to_external_page(link_pass(mirror), start, UNIDENTIFIABLE, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToExternalPage_2(tmp_path: Path) -> None:
+    """Verify rule LinkToExternalPage is rejected when requires clause fails.
+
+    requires: not exists known_page(page.mirror, identity).
+    """
+    mirror, start, other = linked_mirror(tmp_path)
+    other.source_url = OUTSIDE  # the holder is known by its identity, wherever it came from
+    record_alias(mirror, OUTSIDE, other)
+    assert link_to_external_page(link_pass(mirror), start, OUTSIDE, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToExternalPage_3(tmp_path: Path) -> None:
+    """Verify rule LinkToExternalPage is rejected when requires clause fails.
+
+    requires: not exists Page{mirror: page.mirror, identity: identity}.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD_OUTSIDE)
+    assert link_to_external_page(link_pass(mirror), start, OLD_OUTSIDE, None) is None
+    assert mirror.links == []
+
+
+def test_rule_failure_LinkToExternalPage_4(tmp_path: Path) -> None:
+    """Verify rule LinkToExternalPage is rejected when requires clause fails.
+
+    requires: not page.mirror.scope.within_bounds(identity).
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    assert link_to_external_page(link_pass(mirror), start, NEW, None) is None
+    assert mirror.links == []
+
+
+def test_rule_entity_creation_LinkToExternalPage_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule LinkToExternalPage ensures clause produces the specified fields."""  # noqa: E501  The obligation's description, quoted.
+    mirror, start, _ = linked_mirror(tmp_path)
+    link = link_to_external_page(link_pass(mirror), start, "/outside/x.html", "top")
+    assert link is not None
+    assert link.source is start
+    assert link.target_identity == OUTSIDE
+    assert link.fragment == "top"
+    assert link.kind is model.LinkKind.external
+    assert link.target is None
+    assert link.fragment_resolved is True
+
+
+def test_rule_success_FinishLinkPass(tmp_path: Path) -> None:
+    """Verify rule FinishLinkPass succeeds when all preconditions are met.
+
+    After a complete finalisation no relative link is broken; when a page file is gone
+    the pass's broken links name it.
+    """
+    mirror, start, other = linked_mirror(tmp_path)
+    pass_ = finalised_pass(mirror)
+    rewritten = finish_link_pass(pass_)
+    assert rewritten is not None
+    assert rewritten.mirror is mirror
+    assert rewritten.pass_ is pass_
+    assert rewritten.operator is pass_.operator
+    assert list(rewritten.broken) == pass_.broken_links == []
+
+    again = finalised_pass(mirror)
+    (tmp_path / other.path).unlink()
+    found = finish_link_pass(again)
+    assert found is not None
+    missing = BrokenLink(
+        from_path=start.path, href="other.md", reason=BrokenLinkReason.missing_file
+    )
+    assert missing in found.broken
+    assert missing in again.broken_links
+
+
+def test_rule_failure_FinishLinkPass_1(tmp_path: Path) -> None:
+    """Verify rule FinishLinkPass is rejected when requires clause fails.
+
+    requires: pass.status = pending.
+    """
+    mirror, _, other = linked_mirror(tmp_path)
+    pass_ = finalised_pass(mirror)
+    (tmp_path / other.path).unlink()
+    pass_.status = PassStatus.completed
+    assert finish_link_pass(pass_) is None
+    assert pass_.broken_links == []
+
+
+def broken_files(out_dir: Path) -> tuple[Mirror, Page]:
+    """A finalised mirror whose seed file gains one link of each broken kind."""
+    mirror, start, _ = linked_mirror(out_dir)
+    finalised_pass(mirror)
+    path = out_dir / start.path
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\n[gone](gone.md) [up](../../../x.md) [nowhere](other.md#nope)\n",
+        encoding="utf-8",
+    )
+    return mirror, start
+
+
+def test_value_equality_BrokenLink(tmp_path: Path) -> None:
+    """Verify value type BrokenLink has structural equality."""
+    mirror, start = broken_files(tmp_path)
+    found = find_broken_links(mirror)
+    expected = BrokenLink(
+        from_path=start.path, href="gone.md", reason=BrokenLinkReason.missing_file
+    )
+    same = BrokenLink(from_path=start.path, href="gone.md", reason=BrokenLinkReason.missing_file)
+    assert expected == same
+    assert expected is not same
+    assert expected in found
+    assert dataclasses.replace(expected, href="other.md") != expected
+
+
+def test_entity_fields_BrokenLink(tmp_path: Path) -> None:
+    """Verify all declared fields on BrokenLink are present with correct types."""
+    mirror, start = broken_files(tmp_path)
+    found = find_broken_links(mirror)
+    assert found
+    for row in found:
+        assert_fields(row, ("from_path", "href", "reason"))
+        assert row.from_path == start.path
+        assert isinstance(row.href, str)
+        assert isinstance(row.reason, BrokenLinkReason)
+
+
+def test_enum_comparable_BrokenLinkReason(tmp_path: Path) -> None:
+    """Verify fields typed with enum BrokenLinkReason are comparable."""
+    mirror, _ = broken_files(tmp_path)
+    reasons = {row.href: row.reason for row in find_broken_links(mirror)}
+    assert reasons == {
+        "gone.md": BrokenLinkReason.missing_file,
+        "../../../x.md": BrokenLinkReason.outside_mirror,
+        "other.md#nope": BrokenLinkReason.fragment_not_found,
+    }
+    assert {reason.value for reason in BrokenLinkReason} == set(
+        spec_enum("mirror", "BrokenLinkReason")
+    )
+
+
+def test_enum_comparable_LinkKind(tmp_path: Path) -> None:
+    """Verify fields typed with enum LinkKind are comparable."""
+    mirror, start, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    pass_ = link_pass(mirror)
+    kinds = [
+        link.kind
+        for link in (
+            link_to_page(pass_, start, OTHER, None),
+            link_to_uncrawled_page(pass_, start, NEW, None),
+            link_to_removed_page(pass_, start, OLD, None),
+            link_to_external_page(pass_, start, OUTSIDE, None),
+        )
+        if link is not None
+    ]
+    assert kinds == [
+        model.LinkKind.internal,
+        model.LinkKind.uncrawled,
+        model.LinkKind.dangling,
+        model.LinkKind.external,
+    ]
+    assert kinds[0] == model.LinkKind.internal
+    assert kinds[0] != kinds[1]
+    assert {kind.value for kind in model.LinkKind} == set(spec_enum("mirror", "LinkKind"))
+
+
+def test_invariant_Page_LinkFlagsAgreeWithLinks(tmp_path: Path) -> None:
+    """Verify invariant LinkFlagsAgreeWithLinks holds after any field mutation on Page."""
+    mirror, start, other = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    start.converted_body += f"\nAn [archived page]({OLD}).\n"
+    finalised_pass(mirror)
+    for page in mirror.written_pages:
+        assert (QualityFlag.uncrawled_internal in page.flags) is page.has_uncrawled_link
+        assert (QualityFlag.dangling_inbound in page.flags) is page.has_dangling_link
+        assert (QualityFlag.unresolved_fragment in page.flags) is page.has_unresolved_fragment
+    assert (start.has_uncrawled_link, start.has_dangling_link, start.has_unresolved_fragment) == (
+        True,
+        True,
+        True,
+    )
+    assert (other.has_uncrawled_link, other.has_dangling_link, other.has_unresolved_fragment) == (
+        False,
+        False,
+        False,
+    )
+
+
+def test_invariant_Link_OnlyInternalLinksHaveTargets(tmp_path: Path) -> None:
+    """Verify invariant OnlyInternalLinksHaveTargets holds after any field mutation on Link."""
+    mirror, _, _ = linked_mirror(tmp_path)
+    removed(mirror, OLD)
+    resolved(mirror)
+    assert {link.kind for link in mirror.links} >= {
+        model.LinkKind.internal,
+        model.LinkKind.uncrawled,
+        model.LinkKind.external,
+    }
+    for link in mirror.links:
+        assert (link.kind is model.LinkKind.internal) == (link.target is not None)
+
+
+def test_entity_fields_Link(tmp_path: Path) -> None:
+    """Verify all declared fields on Link are present with correct types."""
+    mirror, start, other = linked_mirror(tmp_path)
+    resolved(mirror)
+    assert mirror.links
+    for link in mirror.links:
+        assert_fields(
+            link, ("source", "target_identity", "fragment", "kind", "target", "fragment_resolved")
+        )
+        assert link.source is start
+        assert isinstance(link.target_identity, str)
+        assert link.fragment is None or isinstance(link.fragment, str)
+        assert isinstance(link.kind, model.LinkKind)
+        assert link.target in {None, start, other}
+        assert isinstance(link.fragment_resolved, bool)
+
+
+def test_entity_optional_Link_fragment(tmp_path: Path) -> None:
+    """Verify optional field Link.fragment accepts null and non-null values."""
+    mirror, start, _ = linked_mirror(tmp_path)
+    resolved(mirror)
+    fragments = {link.fragment for link in start.outbound_links}
+    assert None in fragments
+    assert {"setup", "missing", "intro"} <= fragments
+
+
+def test_entity_optional_Link_target(tmp_path: Path) -> None:
+    """Verify optional field Link.target accepts null and non-null values."""
+    mirror, start, other = linked_mirror(tmp_path)
+    resolved(mirror)
+    targets = {link.target_identity: link.target for link in start.outbound_links}
+    assert targets[OTHER] is other
+    assert targets[SEED] is start
+    assert targets[NEW] is None
+    assert targets[OUTSIDE] is None
+
+
+def test_entity_relationship_Page_outbound_links(tmp_path: Path) -> None:
+    """Verify relationship Page.outbound_links navigates to the correct related entities."""
+    mirror, start, other = linked_mirror(tmp_path)
+    other.converted_body += f"\nBack to the [start]({SEED}).\n"
+    resolved(mirror)
+    assert set(start.outbound_links) == {link for link in mirror.links if link.source is start}
+    assert len(start.outbound_links) == len(LINKED_ROWS)
+    assert rows(other.outbound_links) == {(SEED, None, model.LinkKind.internal, True)}
+
+
+def test_entity_relationship_Page_inbound_links(tmp_path: Path) -> None:
+    """Verify relationship Page.inbound_links navigates to the correct related entities."""
+    mirror, start, other = linked_mirror(tmp_path)
+    resolved(mirror)
+    assert set(other.inbound_links) == {link for link in mirror.links if link.target is other}
+    assert len(other.inbound_links) == len(("", "setup", "missing"))
+    assert all(link.source is start for link in other.inbound_links)
+    assert rows(start.inbound_links) == {(SEED, "intro", model.LinkKind.internal, True)}
+
+
+def test_projection_Page_internal_outbound(tmp_path: Path) -> None:
+    """Verify projection Page.internal_outbound filters correctly."""
+    mirror, start, _ = linked_mirror(tmp_path)
+    resolved(mirror)
+    internal = [link for link in start.outbound_links if link.kind is model.LinkKind.internal]
+    assert list(start.internal_outbound) == internal
+    assert start.outbound_internal == len(internal) == len(("", "setup", "missing", "intro"))
+    assert len(start.outbound_links) > len(internal)
+
+
+def test_projection_Page_internal_inbound(tmp_path: Path) -> None:
+    """Verify projection Page.internal_inbound filters correctly."""
+    mirror, start, other = linked_mirror(tmp_path)
+    other.converted_body += f"\nBack to the [start]({SEED}) and [new]({NEW}).\n"
+    resolved(mirror)
+    assert {link.source for link in start.internal_inbound} == {start, other}
+    assert all(link.kind is model.LinkKind.internal for link in start.internal_inbound)
+    assert start.inbound_internal == len(start.internal_inbound) == len(("self", "other"))
+    assert other.inbound_internal == len(("", "setup", "missing"))

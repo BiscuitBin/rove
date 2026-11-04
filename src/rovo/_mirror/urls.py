@@ -35,7 +35,7 @@ _REGEX_PREFIX = "re:"
 
 
 def normalise_url(url: str, meaningful_query_params: tuple[str, ...]) -> str:
-    """The URL's identity, per the identity comment (mirror.allium 112 to 116).
+    """The URL's identity, per the identity comment (mirror.allium 113 to 118).
 
     Lower-case scheme and host, a host's trailing "." dropped, default port dropped, dot
     segments resolved, a trailing index.html folded into "/", only meaningful query
@@ -78,7 +78,7 @@ def is_http_url(url: str) -> bool:
 def hostname_of(url: str) -> str:
     """The URL's host name, lower-cased, port and a trailing "." dropped.
 
-    The trailing "." goes as it does from an identity (mirror.allium 112 to 118), so a
+    The trailing "." goes as it does from an identity (mirror.allium 113 to 120), so a
     host named with one is allowed by the scope its own identity is checked against.
     """
     return (urlsplit(url).hostname or "").lower().removesuffix(".")
@@ -128,7 +128,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def assign_path(mirror: "Mirror", identity: str) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 646 to 712).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 649 to 715).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or
@@ -175,7 +175,7 @@ def page_root(identity: str) -> str:
 
 
 def host_segment(identity: str) -> str:
-    """The directory under pages/ for the identity's host (MovePage guidance, 646 to 657).
+    """The directory under pages/ for the identity's host (MovePage guidance, 649 to 660).
 
     The host lower-cased, a trailing "." dropped, every character outside [a-z0-9.-]
     replaced with "-", the device-name rewrite applied, then a non-default port appended
@@ -222,7 +222,7 @@ def _relative_path(mirror: "Mirror", identity: str) -> str:
 
 
 def _rewrite_segment(segment: str, *, directory: bool) -> str:
-    """The segment rewrites inside pages/<host>/ (MovePage guidance, 674 to 691).
+    """The segment rewrites inside pages/<host>/ (MovePage guidance, 677 to 694).
 
     Each reads the sanitised segment alone and they apply together, agreeing where they
     overlap: a trailing run of "." and a leading "." become "-"; a directory named,

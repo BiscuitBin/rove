@@ -9,7 +9,7 @@ fences themselves, and inline code is skipped for links, images and words.
 import dataclasses
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from urllib.parse import urljoin, urlsplit
 
 from bs4 import BeautifulSoup, CData, Comment, Doctype, Tag
@@ -57,8 +57,11 @@ _TABLE_SEPARATOR = re.compile(r"^\|?(?:\s*:?-{3,}:?\s*\|)*\s*:?-{3,}:?\s*\|?$")
 _CELL_BORDER = re.compile(r"(?<!\\)\|")
 _INLINE_CODE = re.compile(r"(`+).+?\1")
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_LINK = re.compile(r"(?<!!)\[[^\]]*\]\((?P<target>[^)\s]*)[^)]*\)")
+# A destination read up to its first `)` or whitespace, when nesting closes no link.
+_FIRST_CLOSE = re.compile(r"[^)\s]*")
 _AUTOLINK = re.compile(r"<(?P<target>https?://[^>\s]+)>")
+# Stands in for inline code while destinations are found, so code keeps its positions.
+_CODE_MASK = "\x00"
 _LANGUAGE_CLASS = re.compile(r"^(?:language|lang)-(?P<name>.+)$")
 _BACKTICKS = re.compile(r"`+")
 # The attribute normalize marks a heading with when its id is written as a suffix.
@@ -263,11 +266,163 @@ def with_fetch_flags(content: ConvertedContent, flags: Iterable[QualityFlag]) ->
 def link_destinations(body: str) -> tuple[str, ...]:
     """Every link target of a Markdown body outside code, images excluded, in order."""
     targets: list[str] = []
-    for line in _outside_fences(body)[0]:
-        text = _INLINE_CODE.sub("", line)
-        targets.extend(match["target"] for match in _LINK.finditer(text))
-        targets.extend(match["target"] for match in _AUTOLINK.finditer(text))
+
+    def record(target: str) -> str:
+        targets.append(target)
+        return target
+
+    map_destinations(body, record)
     return tuple(targets)
+
+
+def map_destinations(body: str, rewrite: Callable[[str], str]) -> str:
+    """The body with `rewrite` applied to each link destination outside code.
+
+    Fenced code and inline code are left as they are, and so is every byte around a
+    destination: the identity mapping returns the body unchanged. Each line's inline
+    links are visited before its autolinks. An autolink whose destination changes
+    becomes an inline link whose text is the URL, since `<b.md>` is no autolink.
+    """
+    lines: list[str] = []
+    fence: str | None = None
+    for line in body.split("\n"):
+        match = _FENCE.match(line)
+        if fence is None and match:
+            fence = match["mark"]
+        elif fence is not None and _closes(line, fence):
+            fence = None
+        elif fence is None:
+            line = _map_line(line, rewrite)  # noqa: PLW2901  The line, rewritten in place.
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _map_line(line: str, rewrite: Callable[[str], str]) -> str:
+    """One line outside fences with its destinations outside inline code rewritten."""
+    code = [match.span() for match in _INLINE_CODE.finditer(line)]
+    masked = list(line)
+    for start, end in code:
+        masked[start:end] = _CODE_MASK * (end - start)
+    text = "".join(masked)
+    edits: list[tuple[int, int, str]] = []
+    for start, end in _link_targets(text):
+        if _CODE_MASK not in text[start:end]:
+            edits.append((start, end, rewrite(line[start:end])))
+    for match in _AUTOLINK.finditer(text):
+        start, end = match.span("target")
+        if _CODE_MASK not in text[start:end]:
+            target = line[start:end]
+            mapped = rewrite(target)
+            if mapped != target:
+                edits.append((start - 1, end + 1, f"[{target}]({mapped})"))
+    out: list[str] = []
+    position = 0
+    for start, end, replacement in sorted(edits):
+        if start < position:
+            continue
+        out.extend((line[position:start], replacement))
+        position = end
+    out.append(line[position:])
+    return "".join(out)
+
+
+def _link_targets(line: str) -> Iterator[tuple[int, int]]:
+    """The span of each inline link's destination in a line, images excluded, in order.
+
+    Link text runs to the `]` that balances its `[`, as CommonMark reads it: a backslash
+    escapes the next character, so `[see [1]](b)` names `b`; an image inside the text,
+    as in `[![logo](i.png)](b)`, is part of the text, and an image on its own is passed
+    over whole. Link text holding a link is no link: the inner one is.
+
+    A destination runs to whitespace or to the `)` that closes the link: as CommonMark
+    reads it, a backslash escapes the next character and parentheses inside it nest, so
+    `[a](x_(y).html)` names `x_(y).html`. When that reading closes no link, the
+    destination stops at its first `)` or whitespace instead. Whatever follows the
+    destination, a title, runs to the next `)`.
+    """
+    search = 0
+    while (opening := _next_opening(line, search)) >= 0:
+        link = _inline_link(line, opening)
+        image = opening > 0 and line[opening - 1] == "!" and not _escaped(line, opening - 1)
+        text = line[opening + 1 : link[0]] if link else ""
+        if link is None or (not image and any(_link_targets(text))):
+            search = opening + 1
+            continue
+        _, start, end, close = link
+        if not image:
+            yield start, end
+        search = close + 1
+
+
+def _next_opening(line: str, search: int) -> int:
+    """Where the next `[` not escaped by a backslash is, else -1."""
+    opening = line.find("[", search)
+    while opening >= 0 and _escaped(line, opening):
+        opening = line.find("[", opening + 1)
+    return opening
+
+
+def _escaped(line: str, position: int) -> bool:
+    """Whether an odd run of backslashes stands just before `position`."""
+    run = len(line[:position]) - len(line[:position].rstrip("\\"))
+    return run % 2 == 1
+
+
+def _inline_link(line: str, opening: int) -> tuple[int, int, int, int] | None:
+    """The `]` ending the text, the destination's span and the closing `)`, else None."""
+    text_end = _text_end(line, opening + 1)
+    if text_end is None or not line.startswith("(", text_end + 1):
+        return None
+    start = text_end + 2
+    for end in (_balanced_end(line, start), _first_close_end(line, start)):
+        close = -1 if end is None else line.find(")", end)
+        if end is not None and close >= 0:
+            return text_end, start, end, close
+    return None
+
+
+def _text_end(line: str, start: int) -> int | None:
+    """Where the `]` balancing a link text's `[` is, else None when none balances it."""
+    depth = 0
+    position = start
+    while position < len(line):
+        character = line[position]
+        if character == "\\":
+            position += 2
+            continue
+        if character == "]":
+            if not depth:
+                return position
+            depth -= 1
+        elif character == "[":
+            depth += 1
+        position += 1
+    return None
+
+
+def _first_close_end(line: str, start: int) -> int:
+    """Where a destination read up to its first `)` or whitespace ends."""
+    match = _FIRST_CLOSE.match(line, start)
+    return match.end() if match else start
+
+
+def _balanced_end(line: str, start: int) -> int | None:
+    """Where a destination with nested parentheses ends, else None when they never close."""
+    depth = 0
+    position = start
+    while position < len(line) and not line[position].isspace():
+        character = line[position]
+        if character == "\\":
+            position += 2
+            continue
+        if character == ")":
+            if not depth:
+                break
+            depth -= 1
+        elif character == "(":
+            depth += 1
+        position += 1
+    return None if depth else min(position, len(line))
 
 
 def prose_lines(body: str) -> list[str]:
@@ -526,7 +681,7 @@ def _measure_body(body: str, expected_words: Sequence[str]) -> OutputMeasurement
         tables=tables,
         table_cells=cells,
         headings=sum(1 for line in outside if _ATX_HEADING.match(line)),
-        links=sum(len(_LINK.findall(line)) + len(_AUTOLINK.findall(line)) for line in prose),
+        links=sum(len(list(_link_targets(line))) + len(_AUTOLINK.findall(line)) for line in prose),
         images=sum(len(_IMAGE.findall(line)) for line in prose),
         list_items=sum(1 for line in outside if _LIST_ITEM.match(line)),
         words=tuple(words),

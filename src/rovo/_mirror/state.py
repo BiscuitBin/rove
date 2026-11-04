@@ -27,6 +27,8 @@ from rovo._mirror.model import (
     Alias,
     CrawlScope,
     Frontmatter,
+    Link,
+    LinkKind,
     Mirror,
     Page,
     PageStatus,
@@ -165,7 +167,24 @@ def _encode_mirror(mirror: Mirror) -> dict[str, object]:
         "aliases": [
             {"url": alias.url, "target": alias.target.identity} for alias in mirror.aliases
         ],
-        "links": [],
+        "links": [
+            _encode_link(link)
+            for link in sorted(
+                mirror.links,
+                key=lambda link: (link.source.identity, link.target_identity, link.fragment or ""),
+            )
+        ],
+    }
+
+
+def _encode_link(link: Link) -> dict[str, object]:
+    return {
+        "source": link.source.identity,
+        "target_identity": link.target_identity,
+        "fragment": link.fragment,
+        "kind": link.kind.value,
+        "target": None if link.target is None else link.target.identity,
+        "fragment_resolved": link.fragment_resolved,
     }
 
 
@@ -275,7 +294,28 @@ def _decode_mirror(out_dir: Path, data: dict[str, Any]) -> Mirror:
             message = f"alias {row['url']!r} names no page"
             raise ValueError(message)
         mirror.aliases.append(Alias(mirror=mirror, url=row["url"], target=target))
+    mirror.links = [_decode_link(mirror, row) for row in data["links"]]
     return mirror
+
+
+def _decode_link(mirror: Mirror, row: dict[str, Any]) -> Link:
+    target = None if row["target"] is None else _linked_page(mirror, row["target"])
+    return Link(
+        source=_linked_page(mirror, row["source"]),
+        target_identity=row["target_identity"],
+        fragment=row["fragment"],
+        kind=LinkKind(row["kind"]),
+        target=target,
+        fragment_resolved=row["fragment_resolved"],
+    )
+
+
+def _linked_page(mirror: Mirror, identity: str) -> Page:
+    page = mirror.page(identity)
+    if page is None:
+        message = f"a link names no page {identity!r}"
+        raise ValueError(message)
+    return page
 
 
 def _optional_time(value: str | None) -> datetime | None:

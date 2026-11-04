@@ -6,12 +6,15 @@ when; a URL it has no answer for comes back 404, as the fixture server would ans
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from pathlib import Path
 
 from rovo._crawl.fetch import Validators
 from rovo._crawl.model import SiteResponse
 
 # The instant every FixedClock reads unless told otherwise: timezone-aware UTC.
 START = datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC)
+
+SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 
 HTML = "text/html; charset=utf-8"
 TEXT = "text/plain; charset=utf-8"
@@ -39,6 +42,25 @@ def text_response(url: str, text: str, *, status: int = 200) -> SiteResponse:
 def not_found(url: str) -> SiteResponse:
     """A 404 with an empty body."""
     return SiteResponse(status=NOT_FOUND, source_url=url, markup="", size=0, content_type=HTML)
+
+
+def fixture_site(name: str, base: str) -> dict[str, SiteResponse]:
+    """Every file of tests/fixtures/sites/<name>/ as an answer from `base` (ending in /).
+
+    An `.html` file is an HTML answer; any other file, such as robots.txt, a plain-text
+    answer. A FakeFetcher over the map serves the site as the end-to-end server would.
+    """
+    root = SITES / name
+    responses: dict[str, SiteResponse] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        url = base + path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        responses[url] = (
+            html_response(url, text) if path.suffix == ".html" else text_response(url, text)
+        )
+    return responses
 
 
 class FakeFetcher:

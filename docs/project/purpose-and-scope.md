@@ -19,11 +19,12 @@ The product is specified under `docs/specs/` and its implementation is under way
 turns a product's documentation website into a local, self-linking Markdown mirror that
 re-syncs with one command and reports how well every page converted
 ([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). What works
-today is the thinnest path: `rovo init` creates a mirror, and `rovo sync` fetches the
-seed pages robots.txt allows over HTTP, converts each to Markdown with the generic
-profile, publishes it as a page file and writes `crawl-report.json`. A branch a later
-slice implements (links, discovery, redirects, blocks, retries, indexes) stops the sync
-with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
+today is a thin path: `rovo init` creates a mirror, and `rovo sync` fetches the
+seed pages robots.txt allows over HTTP, then the pages they link to within the crawl
+scope, converts each to Markdown with the generic profile, publishes it as a page file
+whose links to other mirrored pages are relative, and writes `crawl-report.json`. A
+branch a later slice implements (sitemaps, redirects, missing pages, blocks, retries,
+indexes) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
 product the repository runs everything a change needs: lint and type gates with
 positive controls, a coverage floor, a wheel built and smoke-installed offline on every
 `just check`, the documentation and agent contracts, and CI. Each implementation ticket

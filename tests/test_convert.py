@@ -15,6 +15,8 @@ from rovo._convert.fidelity import (
     convert,
     converted_content,
     extract,
+    link_destinations,
+    map_destinations,
     measure,
     normalize,
     restore,
@@ -679,3 +681,32 @@ def test_surface_exposure_PageConversion() -> None:
     )
     for profile in profiles.CATALOGUE:
         assert_fields(profile, exposed)
+
+
+def test_map_destinations_rewrites_only_destinations_outside_code() -> None:
+    """map_destinations (T10): identity returns the body byte for byte; code is untouched.
+
+    link_destinations, rebuilt on it, lists the same destinations as before.
+    """
+    body = (
+        "# Links\n"
+        "\n"
+        "See [b](http://docs.example/guide/b.html#x), <http://docs.example/guide/c.html> and\n"
+        "![a picture](http://docs.example/guide/p.png).\n"
+        "\n"
+        "Inline `[b](http://docs.example/guide/b.html)` stays.\n"
+        "\n"
+        "```markdown\n"
+        "[b](http://docs.example/guide/b.html)\n"
+        "```\n"
+    )
+    assert map_destinations(body, lambda target: target) == body
+    rewritten = map_destinations(body, lambda target: target.replace(".html", ".md"))
+    assert "[b](http://docs.example/guide/b.md#x)" in rewritten
+    assert "Inline `[b](http://docs.example/guide/b.html)` stays.\n" in rewritten
+    assert "```markdown\n[b](http://docs.example/guide/b.html)\n```\n" in rewritten
+    assert "![a picture](http://docs.example/guide/p.png)" in rewritten
+    assert link_destinations(body) == (
+        "http://docs.example/guide/b.html#x",
+        "http://docs.example/guide/c.html",
+    )
