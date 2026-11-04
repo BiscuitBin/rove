@@ -48,7 +48,8 @@
 -- mirror defines it), fetch_resource, fetch_or_render, is_sitemap_document,
 -- sitemap_is_index, sitemap_entries, resolve_url, well_known_sitemaps,
 -- sitemap_admitted, llms_txt_url, llms_txt_targets, robots_allows,
--- robots_crawl_delay, robots_sitemaps, next_pending, choose_batch,
+-- robots_crawl_delay, robots_crawl_delay_exceeds, robots_sitemaps,
+-- next_pending, choose_batch,
 -- start_from, next_tier, path_pattern, classify_block, render_reason_of,
 -- retry_wait, last_n, append, blocked_share, median, status_text,
 -- with_fetch_flags, unresolved_urls, followup_targets, owner_link_needed,
@@ -560,7 +561,7 @@ config {
     backoff_base: Duration = 1.second           -- doubles per try
     max_backoff: Duration = 16.seconds
     backoff_jitter: Decimal = 0.25
-    retry_after_cap: Duration = 120.seconds     -- a longer Retry-After retires the host for the run
+    retry_after_cap: Duration = 120.seconds     -- a longer Retry-After or honoured Crawl-delay retires the host for the run
     owner_challenge_timeout: Duration = 5.minutes
     min_host_rate: Decimal = 0.05               -- per second; halving never goes below
 
@@ -809,17 +810,19 @@ rule FetchRobots {
 rule AdoptRobotsRules {
     when: RobotsAnswered(run, host, origin, response)
     requires: response.ok
+    let past_cap = robots_crawl_delay_exceeds(response, run.policy.retry_after_cap)
+    let declared_delay = if past_cap: null else: robots_crawl_delay(response)
     ensures:
         RobotsPolicy.created(
             run: run, origin: origin, stance: rules,
-            crawl_delay: robots_crawl_delay(response), declared_sitemaps: robots_sitemaps(response, host.name),
+            crawl_delay: declared_delay, declared_sitemaps: robots_sitemaps(response, host.name),
             problem: null
         )
-        if run.policy.honor_crawl_delay and robots_crawl_delay(response) != null:
-            host.crawl_delay = max(host.crawl_delay, robots_crawl_delay(response) ?? 0.seconds)
+        if run.policy.honor_crawl_delay and declared_delay != null:
+            host.crawl_delay = max(host.crawl_delay, declared_delay ?? 0.seconds)
             host.rate =
-                if host.rate != null and robots_crawl_delay(response) > 0.seconds:
-                    min(host.rate, 1 / robots_crawl_delay(response))
+                if host.rate != null and declared_delay > 0.seconds:
+                    min(host.rate, 1 / declared_delay)
                 else: host.rate
 
     @guidance
@@ -830,11 +833,46 @@ rule AdoptRobotsRules {
         -- Crawl-delay of the group that applies to the user agent rovo as
         -- a decimal number of seconds (0.5 is half a second), and is null
         -- when the group declares none or its value is not a number.
+        -- robots_crawl_delay_exceeds(response, cap) is true when that group
+        -- declares a Crawl-delay whose number is greater than cap, however
+        -- large the number ('Crawl-delay: 1e15' included): it compares the
+        -- number as written and never builds a Duration from it. It is
+        -- tested first, whatever honor_crawl_delay says, and
+        -- robots_crawl_delay is read only when it is false, so no rule
+        -- ever needs a Duration too large to represent. A delay past the
+        -- cap is never adopted: the policy records no crawl_delay, the
+        -- host's crawl_delay and rate are unchanged, and
+        -- RetireHostOnLongCrawlDelay retires the host when Crawl-delay is
+        -- honoured. A delay equal to the cap is adopted.
         -- Crawl-delay stays keyed by host name: when several origins of one
         -- host declare it, the longest delay and the lowest rate win. If the rate
         -- control is disabled but Crawl-delay remains honoured, Crawl-delay
         -- still spaces requests: disabling one control never disables
         -- another.
+}
+
+-- A Crawl-delay beyond retry_after_cap retires the host for the run, as a
+-- Retry-After beyond it does (RetireHostOnLongRetryAfter): the breaker
+-- trips without a pause, and the delay is never adopted (AdoptRobotsRules).
+rule RetireHostOnLongCrawlDelay {
+    when: RobotsAnswered(run, host, origin, response)
+    requires: response.ok
+    requires: run.policy.honor_crawl_delay
+    requires: robots_crawl_delay_exceeds(response, run.policy.retry_after_cap)
+    let breaker = host.breaker
+    ensures:
+        if exists breaker and breaker.status = watching:
+            breaker.status = tripped
+            BreakerTripped(host: host)
+
+    @guidance
+        -- The test is AdoptRobotsRules' robots_crawl_delay_exceeds, so a
+        -- value too large to represent retires the host too. Any origin of
+        -- the host retires the whole host, since Crawl-delay is keyed by
+        -- host name. When honor_crawl_delay is false, Crawl-delay is
+        -- ignored entirely, however large: the host is not retired.
+        -- The run's report and exit follow BreakerTripped, as for a long
+        -- Retry-After.
 }
 
 rule DenyAllWhenRobotsRefused {
@@ -1413,8 +1451,9 @@ rule HttpRetry {
     @guidance
         -- The wait is min(backoff_base * 2^(try - 1), max_backoff) with
         -- backoff_jitter either way when retry_backoff is enabled, else
-        -- nothing; a Retry-After on 429 or 503 lengthens it when
-        -- honor_retry_after is enabled. A retry never shortens a required
+        -- nothing; a Retry-After on any retryable answer (a 429, any 5xx
+        -- such as a 500, 502 or 503) lengthens it when honor_retry_after
+        -- is enabled. A retry never shortens a required
         -- host pause and never raises a host's rate. Retry counts and
         -- request timeouts stay finite. A robots.txt try through
         -- fetch_resource is retried the same way (FetchRobots).
