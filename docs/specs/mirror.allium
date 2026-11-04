@@ -92,8 +92,9 @@ external entity SyncRun {
 ------------------------------------------------------------
 
 -- The one URL scope of a mirror. It serves the crawl, path assignment and
--- link classification alike, so a link is uncrawled exactly when the crawl
--- would fetch its target. The root builds it from the resolved
+-- link classification alike: a link is uncrawled when its target is within
+-- the crawl's bounds, whether or not depth or robots let the crawl fetch
+-- it. The root builds it from the resolved
 -- configuration and the profile at run start; start URLs are always in
 -- scope and define the default hosts and prefixes. It carries the root and
 -- start URLs so that the crawl seeds discovery from the scope it was given.
@@ -113,7 +114,8 @@ value CrawlScope {
     -- (example.com. and example.com are one identity), default port
     -- dropped, dot segments resolved, a trailing index.html folded into "/", only
     -- meaningful (never tracking) query parameters kept and sorted, the
-    -- fragment dropped, a trailing slash kept.
+    -- fragment dropped, a trailing slash kept. A URL normalise_url cannot
+    -- normalise (a port out of range, say) has no identity: null.
     identity_of(url): normalise_url(url, meaningful_query_params)
 
     host_allowed(url): hostname_of(identity_of(url)) in allowed_hosts
@@ -222,7 +224,8 @@ value DirectoryIndex {
     entries: List<IndexEntry>
 }
 
--- A relative link in a page file that reaches no file or no anchor.
+-- A relative link in a page file that reaches no file or no anchor, or a
+-- page file that is missing (href "", reason missing_file).
 value BrokenLink {
     from_path: String
     href: String
@@ -1087,6 +1090,7 @@ rule LinkToUncrawledPage {
 rule LinkToExternalPage {
     when: DestinationFound(pass, page, target, fragment?)
     let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    requires: identity != null
     requires: not exists known_page(page.mirror, identity)
     requires: not exists Page{mirror: page.mirror, identity: identity}
     requires: not page.mirror.scope.within_bounds(identity)
@@ -1095,6 +1099,11 @@ rule LinkToExternalPage {
         kind: external, target: null, fragment_resolved: true
     )
 }
+
+-- A destination whose identity identity_of cannot compute (a port out of
+-- range, say) satisfies none of the four rules above: it records no Link,
+-- feeds no link flag, and rewrite_destinations leaves it as written, byte
+-- for byte.
 
 -- The body is the converted body with each internal destination replaced
 -- by a relative path plus its fragment (a self-link with a fragment becomes
@@ -1175,8 +1184,12 @@ rule FinishLinkPass {
     @guidance
         -- find_broken_links lists every relative destination in a page
         -- file that leaves the mirror, reaches no file, or names a
-        -- fragment absent from the target file; a missing page file is
-        -- itself broken. After a complete finalisation it is empty; a
+        -- fragment absent from the target file, unless the page's internal
+        -- Link to that file records the fragment unresolved
+        -- (fragment_resolved false: the anchor is absent upstream, and
+        -- unresolved_fragment already reports it). A missing page file is
+        -- one BrokenLink: from_path the page's path, href "" and reason
+        -- missing_file. After a complete finalisation it is empty; a
         -- non-empty list means a file could not be written.
 }
 
