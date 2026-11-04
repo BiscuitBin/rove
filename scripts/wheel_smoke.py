@@ -27,6 +27,7 @@ PACKAGE_FILES = frozenset(
         "rovo/py.typed",
         "rovo/_commands.py",
         "rovo/_config.py",
+        "rovo/_exit.py",
         "rovo/_report.py",
         "rovo/_unfinished.py",
         "rovo/_convert/__init__.py",
@@ -35,6 +36,7 @@ PACKAGE_FILES = frozenset(
         "rovo/_convert/profiles.py",
         "rovo/_mirror/__init__.py",
         "rovo/_mirror/finalise.py",
+        "rovo/_mirror/indexes.py",
         "rovo/_mirror/intake.py",
         "rovo/_mirror/links.py",
         "rovo/_mirror/model.py",
@@ -94,7 +96,7 @@ def _api() -> int:
         return _fail(reason)
     print(
         f"wheel_smoke api: rovo {rovo.__version__}, no CLI module imported,"
-        " exactly the twenty-three package files and the expected metadata"
+        " exactly the twenty-five package files and the expected metadata"
     )
     return 0
 

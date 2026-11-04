@@ -10,9 +10,10 @@ requires: []
 
 The `rovo` command is the Typer application `rovo.cli:app`. `python -m rovo` runs the
 same application under the same program name. The implementation of the specification
-under `docs/specs/` is under way: `rovo init` creates a mirror and `rovo sync` mirrors
-its seed pages and the pages they link to over HTTP; the later commands (`verify`, `index`, `report`, `fetch`)
-arrive with their slices. Every example on this page was run from a checkout as
+under `docs/specs/` is under way: `rovo init` creates a mirror, `rovo sync` mirrors
+its seed pages and the pages they link to over HTTP and writes the mirror's indexes, and
+`rovo index` rebuilds the indexes offline; the later commands (`verify`, `report`,
+`fetch`) arrive with their slices. Every example on this page was run from a checkout as
 `uv run --frozen rovo ...`; an installed command behaves the same.
 
 ## `rovo`
@@ -84,7 +85,9 @@ shallowest first, each URL once. In every page file a link to a mirrored page is
 rewritten as a relative path between page files, across hosts too, and every other link
 stays absolute; links in code are never touched (the
 [mirror reference](mirror.md#links) has the rules). It then saves the manifest, the frontier and the run
-history under `OUT_DIR/.rovo/`, writes `OUT_DIR/crawl-report.json` and exits with the
+history under `OUT_DIR/.rovo/`, writes the indexes (`index.md`, `index.jsonl`,
+`links.jsonl`, `llms.txt` and `_indexes/`, as [`rovo index`](#rovo-index) does), writes
+`OUT_DIR/crawl-report.json` and exits with the
 report's exit code. A page robots.txt disallows is skipped, not fetched. A page the
 mirror has no free path for is refused: its URL is reported as failed with the error
 `no free path` and the sync exits 1 (the [mirror reference](mirror.md#page-files) says
@@ -103,13 +106,33 @@ with a redirect or a non-HTML file, a profile other
 than `generic`, a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.
 
+## `rovo index`
+
+```text
+Usage: rovo index [OPTIONS] OUT_DIR
+
+Rebuild index.md, index.jsonl, links.jsonl, llms.txt and _indexes/ offline.
+```
+
+`rovo index OUT_DIR` rebuilds the mirror's indexes from its manifest and exits 0. It
+makes no request, re-resolves no link and reads nothing from the page files but that
+each exists and is UTF-8: every index entry comes from the manifest. It writes each
+index file only when its text differs, deletes every file under `_indexes/` the indexes
+no longer hold, and writes no manifest, frontier, run or report. Run over an unchanged
+mirror, it changes no file. The [mirror reference](mirror.md#indexes) gives each file's
+text.
+
+It exits 2, writing nothing, when `OUT_DIR` is not a directory, holds no manifest or
+holds one that does not parse, or when a written page's file is missing or is not
+UTF-8; standard error names the problem, and the page file's path.
+
 ## Exit codes
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Success: a version line or help was printed, a mirror was created, or a sync finished with nothing to report. |
+| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, or the indexes were rebuilt. |
 | 1 | Partial: a sync recorded a failure, or stopped at a branch a later slice implements. |
-| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, or a refused `init` or `sync`; for the parser's errors, the usage line and the error go to standard error. |
+| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, or a refused `init`, `sync` or `index`; for the parser's errors, the usage line and the error go to standard error. |
 | 3 | Blocked: a host's breaker tripped (reached by a later slice). |
 | 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken. |
 

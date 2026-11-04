@@ -8,7 +8,8 @@ requires: []
 
 # The mirror on disk
 
-A mirror is one output directory. `rovo init` creates it and `rovo sync` fills it; the
+A mirror is one output directory. `rovo init` creates it, `rovo sync` fills it and
+`rovo index` rebuilds its indexes; the
 [command-line reference](cli.md) says when each command writes what. This page
 describes every file a mirror holds, as the implementation writes it today. The
 specification is `docs/specs/mirror.allium`; decision 0013
@@ -19,6 +20,13 @@ encoding.
 OUT_DIR/
 ├── rovo.toml              the configuration
 ├── crawl-report.json      the last sync's report
+├── index.md               the index for people: every page and directory index
+├── index.jsonl            one IndexEntry per written page
+├── links.jsonl            one LinkIndexEntry per URL a page cites
+├── llms.txt               the index for agents
+├── _indexes/              a directory index per large directory, only when one exists
+│   └── 127.0.0.1_8000/
+│       └── big.md
 ├── pages/
 │   └── 127.0.0.1_8000/    one directory per host: its host segment
 │       └── start.md       one page file per written page, at its assigned path
@@ -215,6 +223,81 @@ heading id for and that the page's links do not already flag as unresolved
 (`fragment_not_found`); a missing page file is one `missing_file` row with an empty
 `href`. After a complete pass the list is empty. It becomes the report's
 `broken_links`.
+
+## Indexes
+
+Every finalisation, after the page files are written and read back, builds the indexes
+from the written pages and their links and writes them at the mirror's root;
+`rovo index` builds them the same way from the manifest alone, re-resolving no link and
+reading no page body. They are regenerated from scratch each time and held nowhere
+else: the manifest does not record them. Each is a pure function of the manifest's
+pages and links and of two `mirror.allium` config values, `hierarchical_index_threshold`
+(200) and `llms_txt_cap` (2000), and none carries a time, so a rebuild over an unchanged
+mirror gives the same bytes. Every file is UTF-8 with LF line ends and ends in a line
+feed. A file is written, atomically, only when its bytes differ; every file under
+`_indexes/` the build does not write is deleted, and a directory there left empty is
+removed, `_indexes/` itself included.
+
+Every path an index records is mirror-relative (`pages/<host>/...`), and every link is
+relative to the index file: `index.md` and `llms.txt` link down into `pages/` and
+`_indexes/`, and `_indexes/<host>/api.md` links its pages as
+`../../pages/<host>/api/ref.md`. The exact text of `index.md`, the directory indexes
+and `llms.txt`, the encoding of the two JSON Lines files and `word_count` are interim
+values the specification leaves open; they change only through the maintainer's
+answer (ticket T11, Open points).
+
+A page line is a Markdown list item: a hyphen, a space, then a link whose text is the page's title
+and whose destination is the relative path; a low-confidence page's line goes on with a
+space and `(low confidence)`. A directory-index line is the same with `<host>/<dir>` as
+the link's text. Blocks of lines are separated by one blank line.
+
+### `index.md`
+
+`# Index`, then for each host in name order `## <host segment>`, the host's top-level
+pages (those directly under `pages/<host>/`) in path order, then for each top-level
+directory in name order `### <directory>`: the directory indexes at or below it,
+shallowest first, then every page below it in path order. Top-level directories that
+differ only in case share one heading, in lower case. A mirror with no page writes
+`# Index` alone.
+
+### `_indexes/<host>/<dir>.md`
+
+A directory below a host's top level that holds more than `hierarchical_index_threshold`
+pages directly (not counting its subdirectories; directories that differ only in case
+count as one) gets a directory index at `_indexes/<host>/<dir>.md`, lower-cased:
+`pages/<host>/API` and `pages/<host>/api` share `_indexes/<host>/api.md`. A host's top
+level never gets one. The file is `# <host>/<dir>`, then a line for each nearest indexed
+descendant (the directory indexes below its own with no other directory index between,
+so `api.md` links `api/v2/ref.md` when `api/v2` has no index), then a line for each of
+its own pages in path order.
+
+### `llms.txt`
+
+`# <host segment>` of the first page by path (`# Index` for an empty mirror), then
+`> <summary>` unless the summary is empty, then one page line per page in path order,
+linked from the mirror's root. The summary is the description of the page whose
+identity, or one of whose aliases, is a start URL's identity, else of the first page by
+path. When the written pages number more than `llms_txt_cap`, a directory with its own
+directory index is listed as one directory-index line in place of its pages; a host's
+top-level pages and the pages of a directory without an index are still listed.
+
+### `index.jsonl` and `links.jsonl`
+
+One JSON object per line, keys sorted, compact separators (`,` and `:`), non-ASCII
+characters written as themselves, a set as a sorted list, an absent value as `null`,
+and a line feed after every line, so an empty mirror writes an empty file.
+
+`index.jsonl` holds one `IndexEntry` per written page, sorted by `path`: `path`,
+`identity`, `source_url`, `title`, `description`, `keywords`, `headings`,
+`quality_score`, `low_confidence`, `quality_flags`, `content_digest`, `last_modified`,
+`version`, `locale`, `word_count` (the number of words the quality measurement counted
+outside code), and `outbound_internal` and `inbound_internal`, the page's counts of
+internal links out and in.
+
+`links.jsonl` holds one `LinkIndexEntry` per identity a written page links to, without
+its fragment, sorted by `url`: `url`, `kind` (as [Links](#links) defines it), `path`
+(the holding page's path when the kind is `internal`, else `null`) and `cited_by`, the
+sorted paths of the pages that link to it.
 
 ## `crawl-report.json`
 

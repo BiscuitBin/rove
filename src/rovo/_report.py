@@ -26,6 +26,7 @@ from rovo._crawl.model import (
     RunStatus,
     UrlFailed,
 )
+from rovo._exit import ExitCode as ExitCode  # noqa: PLC0414  An explicit re-export: callers import it from here.
 from rovo._mirror.model import (
     BrokenLink,
     LinksRewritten,
@@ -42,21 +43,6 @@ from rovo._unfinished import NotInThisSlice
 
 _SCORE_PLACES = 4
 _REPORT_FILE = "crawl-report.json"
-
-
-class ExitCode(enum.Enum):
-    """Severity rises in declaration order; the process exits with `number`."""
-
-    ok = "ok"
-    partial = "partial"
-    usage = "usage"
-    blocked = "blocked"
-    quality = "quality"
-
-    @property
-    def number(self) -> int:
-        """The process exit status: ok 0, partial 1, usage 2, blocked 3, quality 4."""
-        return list(ExitCode).index(self)
 
 
 class ChangeKind(enum.Enum):

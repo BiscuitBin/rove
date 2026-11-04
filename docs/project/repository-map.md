@@ -25,7 +25,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── py.typed               Marks the package as typed
 │   ├── _convert/ _mirror/ _crawl/  Private modules, in that import direction
 │   ├── _config.py  _report.py  Private modules for the command
-│   └── _commands.py  _unfinished.py  init and sync; the later-slice guard
+│   └── _commands.py  _exit.py  _unfinished.py  init, sync, index; exit codes; the guard
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
 │   ├── fakes.py  spec_values.py  The seams' doubles; config defaults read from the specs
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)

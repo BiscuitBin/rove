@@ -95,7 +95,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the twenty-three package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-five package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline

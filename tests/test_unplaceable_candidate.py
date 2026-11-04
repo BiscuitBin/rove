@@ -221,8 +221,8 @@ def load(path: Path) -> dict[str, object]:
 
 
 def page_files(out_dir: Path) -> list[str]:
-    """Every Markdown file in the mirror, mirror-relative: none beside the managed root files."""
-    return sorted(path.relative_to(out_dir).as_posix() for path in out_dir.rglob("*.md"))
+    """Every page file under pages/, mirror-relative (the root indexes are not pages)."""
+    return sorted(path.relative_to(out_dir).as_posix() for path in out_dir.glob("pages/**/*.md"))
 
 
 def frontier_rows(out_dir: Path) -> dict[str, str]:

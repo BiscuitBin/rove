@@ -57,3 +57,11 @@ policy.
   (`x_(y).html`) is read whole, where it was cut at its first `)`, left absolute and
   recorded as an uncrawled link. Link text is read the same way: text holding
   brackets (`see [1]`) or an image no longer hides the link, or swaps in the image.
+- The mirror's indexes: every `rovo sync` finalisation writes `index.md` (a heading per
+  host and per top-level directory, linking every page and every directory index),
+  `_indexes/<host>/<dir>.md` for a directory holding more than 200 pages directly,
+  `index.jsonl` (one entry per page), `links.jsonl` (one entry per cited URL) and
+  `llms.txt`, all deterministic, UTF-8 with LF line ends, linked relative to each file
+  and rewritten only when their text changes; stale directory indexes are deleted. The
+  new command `rovo index OUT_DIR` rebuilds them offline from the manifest, and exits 2
+  without a mirror or when a page file is missing or not UTF-8.

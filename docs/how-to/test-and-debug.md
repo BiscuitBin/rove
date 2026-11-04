@@ -67,7 +67,7 @@ wheel into `target/wheel-smoke/venv` twice over. Its output says which step fail
 - `wheel_smoke: ...` during the first step means `import rovo`, from a wheel installed
   with no dependencies, tried to import something outside `rovo` and the standard
   library, or the installed files or metadata differ from what the wheel should carry
-  (twenty-three package files, `py.typed` among them, the console script, the upload guard, no
+  (twenty-five package files, `py.typed` among them, the console script, the upload guard, no
   licence field). Look for an import added to `src/rovo/__init__.py` or to a module it
   imports, or a change to `pyproject.toml`'s build tables.
 - `wheel_smoke: ...` during the second step means `python -m rovo --version` or the

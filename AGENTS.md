@@ -7,7 +7,8 @@ This file is the single source of truth for the whole repository. The provider f
 rovo is a Python API and a Typer command, `rovo`, in one distribution. The product is
 a documentation mirror, specified under `docs/specs/` and implemented slice by slice
 (decision 0012, tickets T09 onward); nothing may invent beyond the specification:
-today `rovo init` and `rovo sync` mirror the pages linked from the seeds, the public API is still only the
+today `rovo init` and `rovo sync` mirror the pages linked from the seeds and write the mirror's
+indexes, `rovo index` rebuilds them, the public API is still only the
 placeholder `rovo.__version__`, and `rovo --version` and `rovo version` print it.
 New behaviour arrives only through a ticket or a decision record, and is stated in an
 Allium specification under `docs/specs/` before it is built: the specifications decide
@@ -20,7 +21,8 @@ file or the user's request.
 
 - `src/rovo/` holds the package: the API in `src/rovo/__init__.py`, the command line in
   `src/rovo/cli.py`, and the private modules `_convert`, `_mirror`, `_crawl`, `_config`,
-  `_report`, `_commands` (`init` and `sync`) and `_unfinished`.
+  `_report`, `_commands` (`init`, `sync` and `index`), `_exit` (the exit codes) and
+  `_unfinished`.
 - `tests/` holds the pytest suite; `tests/fixtures/` holds the lint positive controls and,
   under `sites/`, the static sites the end-to-end tests in `tests/e2e/` serve.
 - `scripts/` holds the first-run script and the wheel smoke.

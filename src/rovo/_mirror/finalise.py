@@ -15,10 +15,13 @@ from pathlib import Path
 from rovo._convert.fidelity import prose_lines
 from rovo._convert.model import CONFIG as CONVERT
 from rovo._convert.model import QualityFlag
+from rovo._mirror.indexes import build_indexes
 from rovo._mirror.links import finish_link_pass, resolve_mirror_links, rewrite_destinations
 from rovo._mirror.model import (
     CONFIG,
     Frontmatter,
+    IndexBuildDue,
+    IndexesWritten,
     LinksRewritten,
     Mirror,
     MirrorPass,
@@ -154,6 +157,8 @@ class Finalisation:
     finalised: tuple[PageFinalised, ...]
     # FinishLinkPass's LinksRewritten; the pass is pending then, so it always fires.
     rewritten: LinksRewritten | None
+    # BuildIndexes' IndexesWritten; FinishLinkPass's IndexBuildDue always reaches it.
+    indexes: IndexesWritten | None = None
 
 
 def request_pass(
@@ -229,8 +234,8 @@ def finalise(operator: Operator, mirror: Mirror, run_id: int, clock: Clock) -> F
 
     RetireOutOfScopePages retires nothing in this slice: a page it would retire stops the
     pass. ResolveMirrorLinks resolves every written page's links; then every body is
-    finalised and published in path order, and FinishLinkPass reads the files back. The
-    index files are the indexes slice's: BuildIndexes completes the pass without them.
+    finalised and published in path order, FinishLinkPass reads the files back, and
+    BuildIndexes writes the index files and completes the pass.
     """
     pass_ = request_pass(operator, mirror, PassKind.finalise, run_id)
     pages = sorted(mirror.written_pages, key=lambda page: page.path)
@@ -244,8 +249,8 @@ def finalise(operator: Operator, mirror: Mirror, run_id: int, clock: Clock) -> F
         finalise_page_body(pass_, page)
     finalised = tuple(publish_page(pass_, page, clock) for page in pages)
     rewritten = finish_link_pass(pass_)
-    pass_.status = PassStatus.completed
-    return Finalisation(pass_=pass_, finalised=finalised, rewritten=rewritten)
+    indexes = None if rewritten is None else build_indexes(IndexBuildDue(pass_=pass_))
+    return Finalisation(pass_=pass_, finalised=finalised, rewritten=rewritten, indexes=indexes)
 
 
 def frontmatter_of(page: Page) -> Frontmatter:

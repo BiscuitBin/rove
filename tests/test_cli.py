@@ -1,6 +1,7 @@
 """The command line: in-process through CliRunner, and out of process as installed."""
 
 import importlib.metadata
+import json
 import shutil
 import subprocess
 import sys
@@ -114,10 +115,14 @@ def test_python_m_rovo_prints_the_version() -> None:
 
 @pytest.mark.parametrize(
     ("command", "arguments"),
-    [("init", ("SITE_URL", "OUT_DIR", "--profile")), ("sync", ("OUT_DIR",))],
+    [
+        ("init", ("SITE_URL", "OUT_DIR", "--profile")),
+        ("sync", ("OUT_DIR",)),
+        ("index", ("OUT_DIR",)),
+    ],
 )
 def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> None:
-    """`rovo init --help` and `rovo sync --help` name their arguments and exit 0."""
+    """`rovo init --help`, `rovo sync --help` and `rovo index --help` name their arguments."""
     result = runner().invoke(app, [command, "--help"], prog_name="rovo")
 
     assert result.exit_code == 0, result.output
@@ -126,10 +131,73 @@ def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> 
         assert argument in result.stdout
 
 
-@pytest.mark.parametrize("command", ["init", "sync"])
+@pytest.mark.parametrize("command", ["init", "sync", "index"])
 def test_mirror_commands_without_arguments_are_usage_errors(command: str) -> None:
-    """`rovo init` and `rovo sync` with no arguments exit 2 with the usage on stderr."""
+    """`rovo init`, `rovo sync` and `rovo index` with no arguments exit 2, usage on stderr."""
     result = runner().invoke(app, [command], prog_name="rovo")
 
     assert result.exit_code == USAGE_ERROR, result.output
     assert "Missing argument" in result.stderr
+
+
+# --- rovo index (T11) ---------------------------------------------------------------
+
+UNUSED_URL = "http://127.0.0.1:9/guide/start.html"  # init makes no request
+# Runs one command of rovo.cli in a fresh interpreter and prints its exit code and
+# whether httpx and rovo._crawl were loaded.
+MODULES_PROBE = """
+import json, sys
+from typer.testing import CliRunner
+from rovo.cli import app
+result = CliRunner().invoke(app, sys.argv[1:])
+print(json.dumps([result.exit_code, "httpx" in sys.modules, "rovo._crawl" in sys.modules]))
+"""
+
+
+def initialised(out_dir: Path) -> Path:
+    """`rovo init` through CliRunner; it exits 0."""
+    result = runner().invoke(app, ["init", UNUSED_URL, str(out_dir)], prog_name="rovo")
+    assert result.exit_code == 0, result.output
+    return out_dir
+
+
+def test_index_rebuilds_an_initialised_mirror(tmp_path: Path) -> None:
+    """`rovo index OUT_DIR` on a mirror exits 0 and writes the index files."""
+    out_dir = initialised(tmp_path / "out")
+    result = runner().invoke(app, ["index", str(out_dir)], prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    for name in ("index.md", "index.jsonl", "links.jsonl", "llms.txt"):
+        assert (out_dir / name).is_file(), name
+
+
+def test_index_without_a_mirror_exits_2(tmp_path: Path) -> None:
+    """`rovo index` on a directory holding no mirror exits 2 and says so on stderr."""
+    result = runner().invoke(app, ["index", str(tmp_path)], prog_name="rovo")
+
+    assert result.exit_code == USAGE_ERROR, result.output
+    assert result.stderr.startswith("rovo: index: ")
+    assert "No such command" not in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def probe_modules(*args: str) -> list[object]:
+    """[exit code, httpx loaded, rovo._crawl loaded] after one command, out of process."""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", MODULES_PROBE, *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    loaded = json.loads(completed.stdout)
+    assert isinstance(loaded, list)
+    return loaded
+
+
+def test_index_loads_neither_httpx_nor_the_crawl(tmp_path: Path) -> None:
+    """`rovo index` imports nothing for fetching; `rovo sync`, the positive control, does."""
+    out_dir = initialised(tmp_path / "out")
+    assert probe_modules("index", str(out_dir)) == [0, False, False]
+    assert probe_modules("sync", str(tmp_path / "missing")) == [USAGE_ERROR, True, True]

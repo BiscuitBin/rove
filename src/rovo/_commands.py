@@ -1,8 +1,11 @@
-"""The root's rules (rovo.allium): init and sync, composing config, crawl, mirror, report.
+"""The root's rules (rovo.allium): init, sync and index, composing config, crawl, mirror, report.
 
 Each command returns the ExitCode the process exits with and writes its problems to
 standard error. `sync` takes the Fetcher and the Clock it runs with, so tests drive it
-without the network; `rovo.cli` builds the real ones.
+without the network; `rovo.cli` builds the real ones. Only the mirror's modules load
+with this one: `index` never crawls, so `init` and `sync` import the configuration, the
+crawl and the report inside their bodies, and `rovo index` loads neither httpx nor
+rovo._crawl.
 """
 
 import importlib.metadata
@@ -10,25 +13,13 @@ import importlib.util
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from rovo._config import (
-    Configuration,
-    SyncOptions,
-    config_path,
-    effective_policy,
-    initial_scope,
-    resolve_config,
-    scope_hash,
-    scope_of,
-    signature_of,
-    starter_config,
-)
 from rovo._convert.profiles import GENERIC, profile_for
-from rovo._crawl.fetch import Fetcher
-from rovo._crawl.model import RobotsMode, RunKind, RunMode, RunRequest
-from rovo._crawl.run import drive_run, load_frontier, next_run_id, save_run
+from rovo._exit import ExitCode
 from rovo._mirror.finalise import finalise
-from rovo._mirror.model import Mirror, Operator, Tier
+from rovo._mirror.indexes import index_pass, unreadable_page_file
+from rovo._mirror.model import IndexesWritten, Mirror, Operator, PassKind, Tier
 from rovo._mirror.state import (
     Clock,
     ManifestError,
@@ -38,19 +29,11 @@ from rovo._mirror.state import (
     write_text,
 )
 from rovo._mirror.urls import is_http_url
-from rovo._report import (
-    CrawlReport,
-    CrawlReportStatus,
-    ExitCode,
-    ReportStatus,
-    close_run,
-    finalise_run_report,
-    rank_and_write_report,
-    take_broken_links,
-    tally_failed_url,
-    tally_finalised_page,
-)
 from rovo._unfinished import NotInThisSlice
+
+if TYPE_CHECKING:
+    from rovo._config import Configuration
+    from rovo._crawl.fetch import Fetcher
 
 
 def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitCode:
@@ -60,6 +43,13 @@ def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitC
     manifest does, parsable or not, or when rovo.toml does, so init never overwrites a
     file it would write.
     """
+    from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        config_path,
+        initial_scope,
+        signature_of,
+        starter_config,
+    )
+
     if not is_http_url(site_url):
         return _refuse(f"init: {site_url!r} is not an http or https URL")
     if manifest_path(out_dir).exists() or config_path(out_dir).exists():
@@ -82,7 +72,7 @@ def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitC
 def sync(
     out_dir: Path,
     *,
-    fetcher: Fetcher,
+    fetcher: "Fetcher",
     clock: Clock,
     tier_installed: Callable[[Tier], bool] | None = None,
 ) -> ExitCode:
@@ -93,6 +83,10 @@ def sync(
     writing a refused report. A branch a later slice implements exits partial and
     leaves the previous report in place.
     """
+    from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        resolve_config,
+    )
+
     installed = tier_installed or _tier_installed
     if not out_dir.is_dir():
         return _refuse(f"sync: {out_dir} is not a directory")
@@ -112,9 +106,11 @@ def sync(
 
 
 def _start_problem(
-    mirror: Mirror, settings: Configuration, installed: Callable[[Tier], bool]
+    mirror: Mirror, settings: "Configuration", installed: Callable[[Tier], bool]
 ) -> str | None:
     """The first StartSync guard that fails, in the refusals' order, else None."""
+    from rovo._crawl.model import RobotsMode  # noqa: PLC0415  Only a sync loads the crawl.
+
     problems = (
         (not settings.valid, "invalid configuration: " + "; ".join(settings.problems)),
         (not settings.has_seeds, "invalid configuration: no root URL and no start URL"),
@@ -143,9 +139,41 @@ def _start_problem(
 
 
 def _start_sync(
-    mirror: Mirror, settings: Configuration, fetcher: Fetcher, clock: Clock
+    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: Clock
 ) -> ExitCode:
     """StartSync, then the run, CloseRun, the finalise pass and RankAndWriteReport."""
+    # Only a sync loads the configuration, the crawl and the report (rovo index never).
+    from rovo._config import (  # noqa: PLC0415  Only a sync loads the crawl.
+        SyncOptions,
+        effective_policy,
+        scope_hash,
+        scope_of,
+        signature_of,
+    )
+    from rovo._crawl.model import (  # noqa: PLC0415  Only a sync loads the crawl.
+        RobotsMode,
+        RunKind,
+        RunMode,
+        RunRequest,
+    )
+    from rovo._crawl.run import (  # noqa: PLC0415  Only a sync loads the crawl.
+        drive_run,
+        load_frontier,
+        next_run_id,
+        save_run,
+    )
+    from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        CrawlReport,
+        CrawlReportStatus,
+        ReportStatus,
+        close_run,
+        finalise_run_report,
+        rank_and_write_report,
+        take_broken_links,
+        tally_failed_url,
+        tally_finalised_page,
+    )
+
     operator = Operator()
     options = SyncOptions(
         dry_run=False,
@@ -208,9 +236,38 @@ def _start_sync(
         take_broken_links(report, finalised.rewritten)
     save_mirror(mirror)
     save_run(result)  # Only now: a done frontier row must have its page saved.
-    finalise_run_report(finalised.pass_, result.run)
+    if finalised.indexes is not None:  # BuildIndexes completes every pending pass.
+        finalise_run_report(finalised.indexes.pass_, result.run)
     code = rank_and_write_report(report, result.run, clock)
     return ExitCode.partial if code is None else code
+
+
+def index(out_dir: Path) -> ExitCode:
+    """Realises rovo.allium RebuildIndex, RefuseRebuildIndex and FinishIndexCommand.
+
+    A missing directory, a manifest that does not load, or a written page whose file is
+    missing or not UTF-8 exits usage and writes nothing. Otherwise an index pass with no
+    run rebuilds the index files offline from the manifest: links are not re-resolved,
+    and no state file, run or report is written.
+    """
+    if not out_dir.is_dir():
+        return _refuse(f"index: {out_dir} is not a directory")
+    try:
+        mirror = load_mirror(out_dir)
+    except ManifestError as error:
+        return _refuse(f"index: no mirror in {out_dir} ({error})")
+    unreadable = unreadable_page_file(mirror)
+    if unreadable is not None:
+        return _refuse(f"index: the page file {unreadable} is missing or not UTF-8")
+    code = finish_index_command(index_pass(Operator(), mirror))
+    return ExitCode.partial if code is None else code
+
+
+def finish_index_command(written: IndexesWritten | None) -> ExitCode | None:
+    """Realises rovo.allium FinishIndexCommand: ok after an index pass, else None."""
+    if written is None or written.pass_.kind is not PassKind.index:
+        return None
+    return ExitCode.ok
 
 
 def _tier_installed(tier: Tier) -> bool:

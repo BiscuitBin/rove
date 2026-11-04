@@ -36,6 +36,14 @@ from rovo._mirror.finalise import (
     publish_page,
     request_pass,
 )
+from rovo._mirror.indexes import (
+    build_indexes,
+    directory_indexes_for,
+    index_entries,
+    index_pass,
+    link_index_entries,
+    rebuild_indexes,
+)
 from rovo._mirror.intake import (
     admit_candidate,
     drop_alias_of_own_identity,
@@ -61,8 +69,14 @@ from rovo._mirror.model import (
     CandidateOutcome,
     CandidateStatus,
     CrawlScope,
+    DirectoryIndex,
     Frontmatter,
+    Index,
+    IndexBuildDue,
+    IndexEntry,
+    IndexesWritten,
     Link,
+    LinkIndexEntry,
     LinksFound,
     Mirror,
     MirrorPass,
@@ -107,6 +121,9 @@ DEVICE_NAMES = frozenset(
 MANAGED_ROOT_FILES = frozenset(
     {"llms.txt", "index.jsonl", "links.jsonl", "crawl-report.json", "rovo.toml"}
 )
+# The index files BuildIndexes writes at the mirror's root (its guidance, mirror.allium
+# 1229 to 1262, and the managed root files of PagePathsAvoidManagedNames).
+INDEX_FILES = ("index.md", "index.jsonl", "links.jsonl", "llms.txt")
 MAX_PATH_CHARS_FLOOR = 128
 MAX_PATH_CHARS_CEILING = 240
 
@@ -752,8 +769,12 @@ def test_transition_edge_MirrorPass_pending_completed(tmp_path: Path) -> None:
     assert result.pass_.status is PassStatus.completed
     assert result.pass_.kind is PassKind.finalise
     assert [event.page.path for event in result.finalised] == [f"{ROOT}start.md"]
-    # IndexesWritten is raised without writing an index file in this slice.
-    assert not (tmp_path / "index.md").exists()
+    # T11: BuildIndexes completes the pass, raising IndexesWritten after the index files.
+    assert result.indexes is not None
+    assert result.indexes.pass_ is result.pass_
+    assert result.indexes.mirror is mirror
+    for name in INDEX_FILES:
+        assert (tmp_path / name).is_file(), name
 
 
 def test_transition_rejected_MirrorPass_status(tmp_path: Path) -> None:
@@ -1892,3 +1913,351 @@ def test_projection_Page_internal_inbound(tmp_path: Path) -> None:
     assert all(link.kind is model.LinkKind.internal for link in start.internal_inbound)
     assert start.inbound_internal == len(start.internal_inbound) == len(("self", "other"))
     assert other.inbound_internal == len(("", "setup", "missing"))
+
+
+# --- Indexes (T11): BuildIndexes, RebuildIndexes and the index values ---------------
+
+OTHER_TITLE = "Other page"
+OTHER_DESCRIPTION = "What the other page configures."
+INDEX_FIELDS = (
+    "path",
+    "identity",
+    "source_url",
+    "title",
+    "description",
+    "keywords",
+    "headings",
+    "quality_score",
+    "low_confidence",
+    "quality_flags",
+    "content_digest",
+    "last_modified",
+    "version",
+    "locale",
+    "word_count",
+    "outbound_internal",
+    "inbound_internal",
+)
+
+
+def index_entry(path: str, **changes: object) -> IndexEntry:
+    """An IndexEntry for a page at the mirror-relative `path`, constructed directly."""
+    stem = path.removesuffix(".md").rsplit("/", 1)[-1]
+    base = IndexEntry(
+        path=path,
+        identity=f"{SITE}/guide/{stem}.html",
+        source_url=f"{SITE}/guide/{stem}.html",
+        title=stem.capitalize(),
+        description=f"About {stem}.",
+        keywords=("example",),
+        headings=(stem.capitalize(),),
+        quality_score=1.0,
+        low_confidence=False,
+        quality_flags=frozenset(),
+        content_digest=digest_of(path),
+        last_modified=None,
+        version=None,
+        locale="en",
+        word_count=2,
+        outbound_internal=0,
+        inbound_internal=0,
+    )
+    return dataclasses.replace(base, **changes)  # type: ignore[arg-type]  # Test overrides by name.
+
+
+def digest_of(text: str) -> str:
+    """A content digest stand-in: the SHA-256 of `text`."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def indexed_mirror(out_dir: Path) -> tuple[Mirror, Page, Page, MirrorPass]:
+    """linked_mirror, finalised and published, its pages titled apart; the pass pending."""
+    mirror, start, other = linked_mirror(out_dir)
+    other.title = OTHER_TITLE
+    other.description = OTHER_DESCRIPTION
+    pass_ = finalised_pass(mirror)
+    return mirror, start, other, pass_
+
+
+def index_of(mirror: Mirror) -> Index | None:
+    """Mirror.index, read afresh: a rule may have set it since the last read."""
+    return mirror.index
+
+
+def built(pass_: MirrorPass) -> IndexesWritten:
+    """BuildIndexes for the pending pass; it fires."""
+    written = build_indexes(IndexBuildDue(pass_=pass_))
+    assert written is not None
+    return written
+
+
+def test_rule_success_RebuildIndexes(tmp_path: Path) -> None:
+    """Verify rule RebuildIndexes succeeds when all preconditions are met.
+
+    A pending index pass raises IndexBuildDue for itself and writes nothing yet.
+    """
+    mirror, _, _ = linked_mirror(tmp_path)
+    pass_ = request_pass(Operator(), mirror, PassKind.index, None)
+    due = rebuild_indexes(pass_)
+    assert isinstance(due, IndexBuildDue)
+    assert due.pass_ is pass_
+    assert pass_.status is PassStatus.pending
+    assert mirror.index is None
+    assert not (tmp_path / "index.md").exists()
+
+
+def test_rule_failure_RebuildIndexes_1(tmp_path: Path) -> None:
+    """Verify rule RebuildIndexes is rejected when requires clause fails.
+
+    requires: pass.status = pending.
+    """
+    mirror, _, _ = linked_mirror(tmp_path)
+    pass_ = request_pass(Operator(), mirror, PassKind.index, None)
+    pass_.status = PassStatus.completed
+    assert rebuild_indexes(pass_) is None
+    assert mirror.index is None
+
+
+def test_rule_failure_RebuildIndexes_2(tmp_path: Path) -> None:
+    """Verify rule RebuildIndexes is rejected when requires clause fails.
+
+    requires: pass.kind = index: a finalise pass and a verify pass raise nothing.
+    """
+    mirror, _, _ = linked_mirror(tmp_path)
+    for kind in (PassKind.finalise, PassKind.verify):
+        pass_ = request_pass(Operator(), mirror, kind, FIRST_RUN)
+        assert rebuild_indexes(pass_) is None
+        assert pass_.status is PassStatus.pending
+    assert mirror.index is None
+
+
+def test_rule_success_BuildIndexes(tmp_path: Path) -> None:
+    """Verify rule BuildIndexes succeeds when all preconditions are met.
+
+    The create branch makes the Index, the update branch sets the existing one; both
+    write the index files, complete the pass and raise IndexesWritten.
+    """
+    mirror, start, other, pass_ = indexed_mirror(tmp_path)
+    assert index_of(mirror) is None
+    written = built(pass_)
+    assert written.mirror is mirror
+    assert written.pass_ is pass_
+    assert written.operator is pass_.operator
+    assert pass_.status is PassStatus.completed
+    index = index_of(mirror)
+    assert isinstance(index, Index)
+    assert index.mirror is mirror
+    assert index.entries == index_entries(mirror.written_pages)
+    assert [entry.path for entry in index.entries] == [other.path, start.path]
+    assert index.link_entries == link_index_entries(mirror.written_pages, mirror.aliases)
+    assert index.directory_indexes == directory_indexes_for(
+        index.entries, model.CONFIG.hierarchical_index_threshold
+    )
+    assert index.directory_indexes == []  # both pages lie at the host's top level
+    assert index.summary == start.description  # the start URL's page, not the first by path
+    for name in INDEX_FILES:
+        assert (tmp_path / name).is_file(), name
+    assert not (tmp_path / "_indexes").exists()
+
+    other.title = "Other page, renamed"
+    again = request_pass(Operator(), mirror, PassKind.index, None)
+    built(again)
+    assert mirror.index is index  # the update branch keeps the one Index
+    assert again.status is PassStatus.completed
+    assert [entry.title for entry in index.entries] == ["Other page, renamed", start.title]
+    assert "Other page, renamed" in (tmp_path / "index.md").read_text(encoding="utf-8")
+
+
+def test_rule_failure_BuildIndexes_1(tmp_path: Path) -> None:
+    """Verify rule BuildIndexes is rejected when requires clause fails.
+
+    requires: pass.status = pending: a completed pass builds nothing.
+    """
+    mirror, _, _, pass_ = indexed_mirror(tmp_path)
+    pass_.status = PassStatus.completed
+    assert build_indexes(IndexBuildDue(pass_=pass_)) is None
+    assert mirror.index is None
+    for name in INDEX_FILES:
+        assert not (tmp_path / name).exists(), name
+
+
+def test_value_equality_IndexEntry(tmp_path: Path) -> None:
+    """Verify value type IndexEntry has structural equality."""
+    mirror, _, _, _ = indexed_mirror(tmp_path)
+    first = index_entries(mirror.written_pages)
+    second = index_entries(mirror.written_pages)
+    assert first == second
+    assert first[0] is not second[0]
+    assert hash(first[0]) == hash(second[0])
+    assert dataclasses.replace(first[0], word_count=first[0].word_count + 1) != first[0]
+    assert index_entry(f"{ROOT}a.md") == index_entry(f"{ROOT}a.md")
+
+
+def test_entity_fields_IndexEntry(tmp_path: Path) -> None:
+    """Verify all declared fields on IndexEntry are present with correct types.
+
+    Every field comes from the written page; word_count is the measured word list's
+    length (the ticket's interim) and the counts are the page's over Mirror.links.
+    """
+    mirror, start, other, _ = indexed_mirror(tmp_path)
+    entries = {entry.path: entry for entry in index_entries(mirror.written_pages)}
+    assert set(entries) == {start.path, other.path}
+    for page in (start, other):
+        entry = entries[page.path]
+        assert_fields(entry, INDEX_FIELDS)
+        assert entry.identity == page.identity
+        assert entry.source_url == page.source_url
+        assert entry.title == page.title
+        assert entry.description == page.description
+        assert list(entry.keywords) == list(page.keywords)
+        assert list(entry.headings) == list(page.headings)
+        assert entry.quality_score == page.quality.score
+        assert isinstance(entry.quality_score, float)
+        assert entry.low_confidence is page.low_confidence
+        assert set(entry.quality_flags) == set(page.flags)
+        assert entry.content_digest == page.content_digest
+        assert entry.last_modified == page.last_modified
+        assert entry.version == page.version
+        assert entry.locale == page.locale
+        assert entry.word_count == len(page.quality.output.words)
+        assert entry.outbound_internal == page.outbound_internal
+        assert entry.inbound_internal == page.inbound_internal
+    assert entries[start.path].outbound_internal > 0
+    assert entries[other.path].inbound_internal > 0
+
+
+def test_value_equality_LinkIndexEntry(tmp_path: Path) -> None:
+    """Verify value type LinkIndexEntry has structural equality."""
+    mirror, _, _, _ = indexed_mirror(tmp_path)
+    first = link_index_entries(mirror.written_pages, mirror.aliases)
+    second = link_index_entries(mirror.written_pages, mirror.aliases)
+    assert first
+    assert first == second
+    assert first[0] is not second[0]
+    assert hash(first[0]) == hash(second[0])
+    assert dataclasses.replace(first[0], url=f"{first[0].url}x") != first[0]
+
+
+def test_entity_fields_LinkIndexEntry(tmp_path: Path) -> None:
+    """Verify all declared fields on LinkIndexEntry are present with correct types.
+
+    One entry per cited identity, without fragment, sorted by URL; path only for an
+    internal one; cited_by the sorted paths of the linking pages.
+    """
+    mirror, start, other, _ = indexed_mirror(tmp_path)
+    entries = link_index_entries(mirror.written_pages, mirror.aliases)
+    for entry in entries:
+        assert_fields(entry, ("url", "kind", "path", "cited_by"))
+        assert isinstance(entry.kind, model.LinkKind)
+        assert list(entry.cited_by) == sorted(set(entry.cited_by))
+    assert [entry.url for entry in entries] == sorted({OTHER, SEED, NEW, OUTSIDE})
+    rows = {entry.url: (entry.kind, entry.path, list(entry.cited_by)) for entry in entries}
+    assert rows == {
+        OTHER: (model.LinkKind.internal, other.path, [start.path]),
+        SEED: (model.LinkKind.internal, start.path, [start.path]),
+        NEW: (model.LinkKind.uncrawled, None, [start.path]),
+        OUTSIDE: (model.LinkKind.external, None, [start.path]),
+    }
+
+
+def test_value_equality_DirectoryIndex() -> None:
+    """Verify value type DirectoryIndex has structural equality."""
+    entries = [index_entry(f"{ROOT}api/{name}.md") for name in ("a", "b")]
+    first = directory_indexes_for(entries, 1)
+    second = directory_indexes_for(entries, 1)
+    assert len(first) == 1
+    assert first == second
+    assert first[0] is not second[0]
+    assert hash(first[0]) == hash(second[0])
+    assert dataclasses.replace(first[0], heading="other") != first[0]
+
+
+def test_entity_fields_DirectoryIndex() -> None:
+    """Verify all declared fields on DirectoryIndex are present with correct types.
+
+    pages/docs.example/api gives _indexes/docs.example/api.md, its directory lower-cased
+    and its entries in path order.
+    """
+    entries = [index_entry(f"{ROOT}api/{name}.md") for name in ("b", "a")]
+    (directory_index,) = directory_indexes_for(entries, 1)
+    assert isinstance(directory_index, DirectoryIndex)
+    assert_fields(directory_index, ("directory", "path", "heading", "entries"))
+    assert directory_index.directory == "pages/docs.example/api"
+    assert directory_index.path == "_indexes/docs.example/api.md"
+    assert directory_index.heading == "docs.example/api"
+    assert [entry.path for entry in directory_index.entries] == [
+        f"{ROOT}api/a.md",
+        f"{ROOT}api/b.md",
+    ]
+
+
+def test_entity_fields_Index(tmp_path: Path) -> None:
+    """Verify all declared fields on Index are present with correct types."""
+    mirror, _, _, pass_ = indexed_mirror(tmp_path)
+    built(pass_)
+    index = mirror.index
+    assert index is not None
+    assert_fields(index, ("mirror", "entries", "link_entries", "directory_indexes", "summary"))
+    assert all(isinstance(entry, IndexEntry) for entry in index.entries)
+    assert all(isinstance(entry, LinkIndexEntry) for entry in index.link_entries)
+    assert all(isinstance(entry, DirectoryIndex) for entry in index.directory_indexes)
+    assert isinstance(index.summary, str)
+    assert [entry.path for entry in index.entries] == sorted(mirror.page_paths)
+    assert [entry.url for entry in index.link_entries] == sorted(
+        entry.url for entry in index.link_entries
+    )
+
+
+def test_entity_relationship_Mirror_index(tmp_path: Path) -> None:
+    """Verify relationship Mirror.index navigates to the correct related entities."""
+    mirror = new_mirror(tmp_path)
+    stored(mirror)
+    assert index_of(mirror) is None
+    finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    index = index_of(mirror)
+    assert index is not None
+    assert index.mirror is mirror
+    assert [entry.path for entry in index.entries] == mirror.page_paths
+    other = new_mirror(tmp_path / "other")
+    assert other.index is None  # one Index per mirror, never shared
+
+
+def test_enum_comparable_PassKind(tmp_path: Path) -> None:
+    """Verify fields typed with enum PassKind are comparable."""
+    mirror = new_mirror(tmp_path)
+    stored(mirror)
+    finalised = finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    rebuilt = index_pass(Operator(), mirror)
+    assert rebuilt is not None
+    kinds = [finalised.pass_.kind, rebuilt.pass_.kind]
+    assert kinds == [PassKind.finalise, PassKind.index]
+    assert kinds[1] == PassKind.index
+    assert kinds[0] != kinds[1]
+    assert {kind.value for kind in PassKind} == set(spec_enum("mirror", "PassKind"))
+
+
+def test_entity_optional_MirrorPass_run_id(tmp_path: Path) -> None:
+    """Verify optional field MirrorPass.run_id accepts null and non-null values.
+
+    A finalise pass follows its run; an index pass answers a command and has none.
+    """
+    mirror = new_mirror(tmp_path)
+    stored(mirror)
+    finalised = finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    rebuilt = index_pass(Operator(), mirror)
+    assert rebuilt is not None
+    assert finalised.pass_.run_id == FIRST_RUN
+    assert rebuilt.pass_.run_id is None
+    assert rebuilt.pass_.status is PassStatus.completed
+
+
+def test_config_default_hierarchical_index_threshold() -> None:
+    """Verify config parameter hierarchical_index_threshold has its declared default."""
+    assert model.CONFIG.hierarchical_index_threshold == spec_int(
+        "mirror", "hierarchical_index_threshold"
+    )
+
+
+def test_config_default_llms_txt_cap() -> None:
+    """Verify config parameter llms_txt_cap has its declared default."""
+    assert model.CONFIG.llms_txt_cap == spec_int("mirror", "llms_txt_cap")

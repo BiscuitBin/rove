@@ -75,3 +75,13 @@ def sync_command(
     with HttpxFetcher() as fetcher:
         code = _commands.sync(out_dir, fetcher=fetcher, clock=SystemClock())
     raise typer.Exit(code.number)
+
+
+@app.command("index")
+def index_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Rebuild index.md, index.jsonl, links.jsonl, llms.txt and _indexes/ offline."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.index(out_dir).number)

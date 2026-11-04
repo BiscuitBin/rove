@@ -12,9 +12,9 @@ Nothing is on PyPI yet, and nothing can be: the licence is undecided and the pac
 carries a classifier that makes PyPI refuse an upload
 ([decision 0006](../decisions/0006-licence-deferred.md)). Today the only way to run
 `rovo` is from a checkout. What `rovo` does today is the first slice of the product:
-`rovo init` creates a mirror and `rovo sync` mirrors its seed pages and the pages they
-link to as Markdown (the
-[command reference](../reference/cli.md) has both); the package exports its version.
+`rovo init` creates a mirror, `rovo sync` mirrors its seed pages and the pages they
+link to as Markdown and writes the mirror's indexes, and `rovo index` rebuilds them (the
+[command reference](../reference/cli.md) has each); the package exports its version.
 
 ## Run from a checkout
 

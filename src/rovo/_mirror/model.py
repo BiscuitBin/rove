@@ -244,6 +244,49 @@ class BrokenLink:
     reason: BrokenLinkReason
 
 
+@dataclass(frozen=True, kw_only=True)
+class IndexEntry:
+    """One line of index.jsonl, and the source of index.md and llms.txt lines."""
+
+    path: str
+    identity: str
+    source_url: str
+    title: str
+    description: str
+    keywords: tuple[str, ...]
+    headings: tuple[str, ...]
+    quality_score: float
+    low_confidence: bool
+    quality_flags: frozenset[QualityFlag]
+    content_digest: str
+    last_modified: str | None
+    version: str | None
+    locale: str | None
+    word_count: int
+    outbound_internal: int
+    inbound_internal: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class LinkIndexEntry:
+    """One line of links.jsonl: a URL some page links to."""
+
+    url: str
+    kind: LinkKind
+    path: str | None
+    cited_by: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class DirectoryIndex:
+    """A generated per-directory index, _indexes/<host>/<dir>.md."""
+
+    directory: str
+    path: str
+    heading: str
+    entries: tuple[IndexEntry, ...]
+
+
 @dataclass(kw_only=True, eq=False)
 class Mirror:
     """An output directory and its manifest."""
@@ -257,7 +300,7 @@ class Mirror:
     pages: list["Page"] = field(default_factory=list)
     aliases: list["Alias"] = field(default_factory=list)
     links: list["Link"] = field(default_factory=list)
-    index: None = None
+    index: "Index | None" = None
 
     @property
     def written_pages(self) -> list["Page"]:
@@ -490,6 +533,40 @@ class MirrorPass:
     failures: list[object]
     broken_links: list[BrokenLink]
     status: PassStatus
+
+
+@dataclass(kw_only=True, eq=False)
+class Index:
+    """The generated indexes, regenerated from scratch by every pass that writes them."""
+
+    mirror: Mirror
+    entries: list[IndexEntry]
+    link_entries: list[LinkIndexEntry]
+    directory_indexes: list[DirectoryIndex]
+    summary: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexBuildDue:
+    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1182, 1200)."""
+
+    pass_: MirrorPass
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexFilesWritten:
+    """The trigger BuildIndexes raises once the index files are on disk."""
+
+    mirror: Mirror
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexesWritten:
+    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1227)."""
+
+    mirror: Mirror
+    pass_: MirrorPass
+    operator: Operator
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -73,8 +73,8 @@ def page_root(base: str) -> str:
 
 
 def markdown_files(out: Path) -> list[str]:
-    """Every Markdown file in the mirror, mirror-relative."""
-    return sorted(path.relative_to(out).as_posix() for path in out.rglob("*.md"))
+    """Every page file under pages/, mirror-relative (the root indexes are not pages)."""
+    return sorted(path.relative_to(out).as_posix() for path in out.glob("pages/**/*.md"))
 
 
 def load(path: Path) -> dict[str, object]:
@@ -141,7 +141,7 @@ def test_robots_disallow_skips_the_seed(serve_site: Callable[[str], str], tmp_pa
     assert runner.invoke(app, ["init", seed, str(out)]).exit_code == 0
     result = runner.invoke(app, ["sync", str(out)])
     assert result.exit_code == 0, result.output
-    assert list(out.rglob("*.md")) == []
+    assert list(out.glob("pages/**/*.md")) == []
     frontier = load(out / ".rovo" / "frontier.json")
     entries = frontier["entries"]
     assert isinstance(entries, list)
