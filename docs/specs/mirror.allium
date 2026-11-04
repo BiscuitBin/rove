@@ -180,7 +180,8 @@ value Frontmatter {
 
 -- One line of index.jsonl, and the source of index.md and llms.txt lines.
 -- Every path an index records is mirror-relative, so a page's path starts
--- with pages/<host>/.
+-- with pages/<host>/. Every field comes from the manifest's page and its
+-- links, never from the page file; BuildIndexes states the line encoding.
 value IndexEntry {
     path: String                        -- the page's mirror-relative path, under pages/<host>/
     identity: String
@@ -196,7 +197,7 @@ value IndexEntry {
     last_modified: String?
     version: String?
     locale: String?
-    word_count: Integer
+    word_count: Integer                 -- words the quality measurement counted outside code (quality.output.words)
     outbound_internal: Integer
     inbound_internal: Integer
 }
@@ -216,12 +217,14 @@ value LinkIndexEntry {
 -- (was api/_index.md) and pages/docs.example/api/v2 gives
 -- _indexes/docs.example/api/v2.md. Directories that differ only in case
 -- form one group and share one index, named in lower case. A host's top
--- level never gets a directory index: index.md lists its pages.
+-- level never gets a directory index: index.md lists its pages. The file's
+-- text is "# <heading>", then its nearest indexed descendants, then its
+-- entries, as BuildIndexes states.
 value DirectoryIndex {
     directory: String                   -- the full directory path, lower-cased, e.g. pages/docs.example/api
     path: String                        -- the index file, _indexes/<host>/<dir>.md
-    heading: String
-    entries: List<IndexEntry>
+    heading: String                     -- <host>/<dir>: directory without its pages/ prefix, e.g. docs.example/api
+    entries: List<IndexEntry>           -- the pages directly in the directory, in path order
 }
 
 -- A relative link in a page file that reaches no file or no anchor, or a
@@ -473,7 +476,7 @@ entity Index {
     entries: List<IndexEntry>           -- one per written page, sorted by path
     link_entries: List<LinkIndexEntry>  -- sorted by URL
     directory_indexes: List<DirectoryIndex>
-    summary: String                     -- the llms.txt blockquote: the start page's description
+    summary: String                     -- the llms.txt blockquote, as llms_summary gives it (BuildIndexes)
 }
 
 ------------------------------------------------------------
@@ -492,7 +495,7 @@ config {
     keywords_per_page: Integer = 8
     keywords_min: Integer = 5
     hierarchical_index_threshold: Integer = 200    -- pages in a directory before it gets its own file under _indexes/
-    llms_txt_cap: Integer = 2000                   -- pages listed one by one before directories are listed instead
+    llms_txt_cap: Integer = 2000                   -- past it (written pages > cap), llms.txt lists an indexed directory as one line
     prune: Boolean = false                         -- delete a removed page's file instead of archiving it
 }
 
@@ -1228,32 +1231,79 @@ rule BuildIndexes {
 
     @guidance
         -- index_entries makes one IndexEntry per written page in path
-        -- order. index.md groups entries under one heading per host and,
-        -- beneath it, one per top-level directory of that host, and marks
-        -- low-confidence pages. A directory below a host's top level
-        -- holding more than hierarchical_index_threshold pages (counted
-        -- directly, not recursively, directories that differ only in case
-        -- counted as one) gets its own file under _indexes/<host>/, named
-        -- as DirectoryIndex states. index.md links every directory index,
-        -- so none is orphaned, and each directory index also links its
-        -- nearest indexed descendants: the indexes of the directories below
-        -- its own, skipping any directory without an index of its own
+        -- order, every field from the manifest: word_count is the number
+        -- of words the quality measurement counted outside code (the
+        -- length of quality.output.words), and outbound_internal and
+        -- inbound_internal count the page's internal links over
+        -- Mirror.links.
+        --
+        -- The Markdown indexes (index.md, llms.txt and the directory
+        -- indexes) are blocks of lines, one blank line between two
+        -- blocks; an empty block is left out. A page line is
+        -- "- [<title>](<link>)", followed by " (low confidence)" when the
+        -- page is low_confidence; a directory-index line is
+        -- "- [<heading>](<link>)". A title entering link text has each
+        -- "\", "[" and "]" escaped with a backslash, and each newline or
+        -- run of whitespace in it becomes one space. Nearest first means
+        -- the shallower directory first, then by path.
+        --
+        -- index.md is "# Index", then for each host segment in name order
+        -- "## <host>" and the host's top-level pages (directly under
+        -- pages/<host>/) in path order, then for each top-level directory
+        -- of that host in name order "### <dir>", the directory indexes at
+        -- or below it, nearest first, then every page below it in path
+        -- order, the pages of a directory with its own index included.
+        -- The <dir> of "### <dir>" is the directory's name lower-cased,
+        -- and the directories are ordered by it, so top-level directories
+        -- that differ only in case share one heading. A mirror with no page
+        -- writes "# Index" alone.
+        --
+        -- A directory below a host's top level holding more than
+        -- hierarchical_index_threshold pages (counted directly, not
+        -- recursively, directories that differ only in case counted as
+        -- one) gets its own file under _indexes/<host>/, named as
+        -- DirectoryIndex states. Its text is "# <heading>", then a line
+        -- for each of its nearest indexed descendants, nearest first: the
+        -- indexes of the directories below its own, skipping any
+        -- directory without an index of its own
         -- (_indexes/<host>/api.md links _indexes/<host>/api/v2.md, or
-        -- _indexes/<host>/api/v2/ref.md when api/v2 has no index).
-        -- A host's top level gets no directory index. llms.txt lists every page up to
-        -- llms_txt_cap; past it, a directory that has its own directory
-        -- index is listed as one link, and a host's top-level pages are
-        -- always listed. The summary is the description of the page whose
-        -- identity or alias matches a start URL, else the first page by
-        -- path. links.jsonl holds one LinkIndexEntry per cited identity,
+        -- _indexes/<host>/api/v2/ref.md when api/v2 has no index), then a
+        -- line for each of its own pages in path order. index.md links
+        -- every directory index, so none is orphaned. A host's top level
+        -- gets no directory index.
+        --
+        -- llms.txt is "# <host>" of the first page by path ("# Index" for
+        -- an empty mirror), then "> <summary>" unless the summary is
+        -- empty, then one page line per page in path order. Past
+        -- llms_txt_cap, when the written pages number more than the cap,
+        -- a directory that has its own directory index is listed as one
+        -- directory-index line, in the place of its first page in path
+        -- order, instead of its pages; a host's top-level pages and the
+        -- pages of a directory without an index of its own are still
+        -- listed one by one.
+        --
+        -- llms_summary is the description of the page whose identity, or
+        -- one of whose aliases, is the identity of a start URL (the first
+        -- such start URL in the scope's order), else of the page the root
+        -- URL's identity or alias names, else of the first page by path;
+        -- the empty string for an empty mirror.
+        --
+        -- links.jsonl holds one LinkIndexEntry per cited identity,
         -- without fragment, sorted by URL, with the kind link resolution
-        -- gave it and the citing pages' paths sorted. Every path an index
-        -- holds is mirror-relative (pages/<host>/...), and every link it
-        -- holds is relative to the index file: index.md and llms.txt link
-        -- down into pages/ and _indexes/, a file under _indexes/<host>/
-        -- links up and back down into pages/<host>/. Stale files under
-        -- _indexes/ are deleted. Index files are written only when their
-        -- text would differ.
+        -- gave it and the citing pages' paths sorted. index.jsonl and
+        -- links.jsonl hold one JSON object per line: keys sorted, compact
+        -- separators ("," and ":"), non-ASCII characters written as
+        -- themselves, a set as a sorted list, an enum value (kind, each
+        -- quality flag) as its name, an absent optional value as null,
+        -- and a line feed after every line, so an empty mirror
+        -- writes an empty file.
+        --
+        -- Every path an index holds is mirror-relative (pages/<host>/...),
+        -- and every link it holds is relative to the index file: index.md
+        -- and llms.txt link down into pages/ and _indexes/, a file under
+        -- _indexes/<host>/ links up and back down into pages/<host>/.
+        -- Stale files under _indexes/ are deleted. Index files are written
+        -- only when their text would differ.
 }
 
 ------------------------------------------------------------

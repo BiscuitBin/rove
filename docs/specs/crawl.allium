@@ -377,8 +377,10 @@ entity TierHint {
     reprobe_due(run_id): run_id - learned_in_run >= config.reprobe_every_syncs
 }
 
--- The robots stance of one origin for one run, fetched once per host on
--- first contact at the host's origin, under the host's limiter.
+-- The robots stance of one origin (scheme, host and port) for one run.
+-- robots.txt is scoped per origin, as RFC 9309 says: each origin's file is
+-- fetched once, on the run's first contact with that origin, under the
+-- limiter of the host whose name the origin carries.
 entity RobotsPolicy {
     run: Run
     origin: String                      -- scheme://host[:port]
@@ -397,7 +399,7 @@ entity RobotsPolicy {
 entity Host {
     run: Run
     name: String                        -- host name, lower-cased, port dropped
-    origin: String                      -- scheme://host[:port] of the URL that opened the host; where its robots.txt is read
+    origin: String                      -- scheme://host[:port] of the URL that opened the host; the first origin whose robots.txt is read for it
     rate: Decimal?                      -- requests per second; null means the control is disabled
     crawl_delay: Duration               -- the robots Crawl-delay floor, zero when none
     paused_until: Timestamp?
@@ -751,29 +753,31 @@ rule OpenHost {
             highest_tier: run.highest_tier, outcomes: [], escalations: 0,
             since_escalation: 0, status: watching
         )
-        RobotsRequested(run: run, name: name)
+        RobotsRequested(run: run, name: name, origin: origin)
 }
 
--- robots.txt is fetched once per host on first contact, at the origin that
--- opened the host, through the host's limiter, even under robots = ignore
+-- robots.txt is fetched once per origin, on the run's first contact with
+-- that origin, through its host's limiter, even under robots = ignore
 -- because its Sitemap lines still seed discovery. Default stated here
 -- (veto at review): an unreachable or refused robots.txt is disallow-all
--- for that host, is reported, and makes the run partial.
+-- for that origin, is reported, and makes the run partial.
 rule FetchRobots {
-    when: RobotsRequested(run, name)
+    when: RobotsRequested(run, name, origin)
     requires: run.status = running
     let host = Host{run: run, name: name}
     requires: exists host
-    requires: not exists RobotsPolicy{run: run, origin: host.origin}
-    let response = fetch_resource(robots_url(host.origin), null, null, run, host)
+    requires: not exists RobotsPolicy{run: run, origin: origin}
+    let response = fetch_resource(robots_url(origin), null, null, run, host)
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
-        RobotsAnswered(run: run, host: host, response: response)
+        RobotsAnswered(run: run, host: host, origin: origin, response: response)
 
     @guidance
-        -- A host is one name: two origins that share it, apart by scheme
-        -- or port, share its politeness state and its robots policy, which
-        -- is read at the origin that opened the host. fetch_resource is the
+        -- robots.txt is scoped per origin (RFC 9309): two origins that
+        -- share a host name, apart by scheme or port, each fetch and adopt
+        -- their own robots.txt and policy. The host stays one name: they
+        -- share its rate, concurrency, pause, Crawl-delay and breaker,
+        -- which are keyed by name, not origin. fetch_resource is the
         -- http tier only, under the host's rate, concurrency, pause and
         -- Retry-After, with retries, and follows at most
         -- discovery_max_redirects redirects within the allowed hosts
@@ -783,49 +787,51 @@ rule FetchRobots {
 }
 
 rule AdoptRobotsRules {
-    when: RobotsAnswered(run, host, response)
+    when: RobotsAnswered(run, host, origin, response)
     requires: response.ok
     ensures:
         RobotsPolicy.created(
-            run: run, origin: host.origin, stance: rules,
+            run: run, origin: origin, stance: rules,
             crawl_delay: robots_crawl_delay(response), declared_sitemaps: robots_sitemaps(response, host.name),
             problem: null
         )
         if run.policy.honor_crawl_delay and robots_crawl_delay(response) != null:
-            host.crawl_delay = robots_crawl_delay(response) ?? 0.seconds
+            host.crawl_delay = max(host.crawl_delay, robots_crawl_delay(response) ?? 0.seconds)
             host.rate = if host.rate != null: min(host.rate, 1 / robots_crawl_delay(response)) else: null
 
     @guidance
         -- The host's rate is min(rate_per_host, 1 / Crawl-delay) when
-        -- Crawl-delay is honoured and the host declares one. If the rate
+        -- Crawl-delay is honoured and the origin's robots.txt declares one.
+        -- Crawl-delay stays keyed by host name: when several origins of one
+        -- host declare it, the longest delay and the lowest rate win. If the rate
         -- control is disabled but Crawl-delay remains honoured, Crawl-delay
         -- still spaces requests: disabling one control never disables
         -- another.
 }
 
 rule DenyAllWhenRobotsRefused {
-    when: RobotsAnswered(run, host, response)
+    when: RobotsAnswered(run, host, origin, response)
     requires: not response.ok
     requires: response.access_refused or response.server_error
     ensures:
-        RobotsPolicy.created(run: run, origin: host.origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_refused)
-        DiscoveryFailed(run: run, url: robots_url(host.origin), problem: robots_refused)
+        RobotsPolicy.created(run: run, origin: origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_refused)
+        DiscoveryFailed(run: run, url: robots_url(origin), problem: robots_refused)
 }
 
 rule DenyAllWhenRobotsUnreachable {
-    when: RobotsAnswered(run, host, response)
+    when: RobotsAnswered(run, host, origin, response)
     requires: not response.ok
     requires: response.error != null
     ensures:
-        RobotsPolicy.created(run: run, origin: host.origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_unreachable)
-        DiscoveryFailed(run: run, url: robots_url(host.origin), problem: robots_unreachable)
+        RobotsPolicy.created(run: run, origin: origin, stance: disallow_all, crawl_delay: null, declared_sitemaps: [], problem: robots_unreachable)
+        DiscoveryFailed(run: run, url: robots_url(origin), problem: robots_unreachable)
 }
 
 rule AllowAllWhenRobotsAbsent {
-    when: RobotsAnswered(run, host, response)
+    when: RobotsAnswered(run, host, origin, response)
     requires: not response.ok
     requires: response.error = null and not response.access_refused and not response.server_error
-    ensures: RobotsPolicy.created(run: run, origin: host.origin, stance: allow_all, crawl_delay: null, declared_sitemaps: [], problem: null)
+    ensures: RobotsPolicy.created(run: run, origin: origin, stance: allow_all, crawl_delay: null, declared_sitemaps: [], problem: null)
 }
 
 -- Sitemaps named by robots.txt are declared; /sitemap.xml and
@@ -851,6 +857,21 @@ rule QueueSitemaps {
         -- sitemaps are queued.
 }
 
+-- A sitemap at another origin of its host (another scheme or port) waits
+-- for that origin's robots.txt, then is due again.
+rule ReadRobotsBeforeSitemap {
+    when: SitemapDue(run, name, url, declared)
+    requires: run.status = running
+    let host = Host{run: run, name: name}
+    requires: exists host
+    requires: hostname_of(url) = name
+    requires: sitemap_admitted(url, run.target.profile, run.target.scope)
+    requires: not exists RobotsPolicy{run: run, origin: origin_of(url)}
+    ensures:
+        RobotsRequested(run: run, name: name, origin: origin_of(url))
+        SitemapDue(run: run, name: name, url: url, declared: declared)
+}
+
 rule FetchSitemap {
     when: SitemapDue(run, name, url, declared)
     requires: run.status = running
@@ -859,6 +880,7 @@ rule FetchSitemap {
     requires: hostname_of(url) = name
     requires: sitemap_admitted(url, run.target.profile, run.target.scope)
     requires: robots_allows(run, url)
+    requires: exists RobotsPolicy{run: run, origin: origin_of(url)}
     let frontier = Frontier{mirror: run.target}
     let snapshot = SitemapSnapshot{frontier: frontier, url: url}
     let response = fetch_resource(url, snapshot?.etag, snapshot?.last_modified, run, host)
@@ -871,9 +893,12 @@ rule FetchSitemap {
         -- applies the profile's sitemap_include filter, always, with the
         -- scope's section and locale filled in. A sitemap on another host,
         -- or one robots disallows, produces nothing and no problem.
-        -- robots_allows is true under robots = ignore, true for a host whose
-        -- stance is allow_all, false under disallow_all, and otherwise the
-        -- parsed rules' answer for the user agent rovo.
+        -- robots_allows(run, url) reads the RobotsPolicy of the URL's own
+        -- origin, origin_of(url), never another origin of the same host:
+        -- it is true under robots = ignore, true when that origin's stance
+        -- is allow_all, false under disallow_all, and otherwise the parsed
+        -- rules' answer for the user agent rovo. An origin whose robots.txt
+        -- the run has not read is read before anything there is fetched.
 }
 
 rule ReuseUnchangedSitemap {
@@ -946,7 +971,9 @@ rule ExpandSitemapEntries {
 }
 
 -- llms.txt is a speculative probe: read when robots allows it, never
--- conditional, and silent when absent or unreachable.
+-- conditional, and silent when absent or unreachable. llms_txt_url(name)
+-- and well_known_sitemaps(name) lie at the host's origin (host.origin),
+-- whose robots.txt OpenHost has already requested.
 rule ReadLlmsTxt {
     when: LlmsTxtRequested(run, name)
     requires: run.status = running
@@ -1134,6 +1161,7 @@ rule SkipRobotsDisallowed {
     let host = Host{run: run, name: entry.host_name}
     requires: exists host and not host.breaker_tripped
     requires: not robots_allows(run, entry.identity)
+    requires: exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}
     ensures: entry.status = skipped_robots
 }
 
@@ -1151,6 +1179,21 @@ rule OpenHostForEntry {
         -- first use; its robots.txt is read before its first page.
 }
 
+-- An entry on a known host at an origin whose robots.txt the run has not
+-- read yet (another scheme or port of the host) reads that origin's
+-- robots.txt before its first page there.
+rule ReadRobotsForNewOrigin {
+    when: entry: FrontierEntry.status transitions_to in_progress
+    let run = Run{target: entry.frontier.mirror, status: running}
+    requires: exists run
+    let host = Host{run: run, name: entry.host_name}
+    requires: exists host and not host.breaker_tripped
+    requires: not exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}
+    ensures:
+        RobotsRequested(run: run, name: entry.host_name, origin: origin_of(entry.identity))
+        EntryHostReady(run: run, entry: entry)
+}
+
 rule ProceedWithKnownHost {
     when: entry: FrontierEntry.status transitions_to in_progress
     let run = Run{target: entry.frontier.mirror, status: running}
@@ -1158,6 +1201,7 @@ rule ProceedWithKnownHost {
     let host = Host{run: run, name: entry.host_name}
     requires: exists host and not host.breaker_tripped
     requires: robots_allows(run, entry.identity)
+    requires: exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}
     ensures: EntryHostReady(run: run, entry: entry)
 }
 

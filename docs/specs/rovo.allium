@@ -778,6 +778,12 @@ rule RebuildIndex {
     let target = mirror/Mirror{out_dir: out_dir}
     requires: exists target and page_files_readable(target)
     ensures: mirror/PassRequested(operator: operator, mirror: target, kind: index)
+
+    @guidance
+        -- page_files_readable holds when every written page's file exists
+        -- and decodes as UTF-8. The index pass reads nothing else from the
+        -- page files: every index field comes from the manifest, so a
+        -- hand-edited page file does not move its index entry.
 }
 
 rule RefuseRebuildIndex {
@@ -793,8 +799,8 @@ rule FinishIndexCommand {
     ensures: CommandExited(operator: operator, code: ok)
 
     @guidance
-        -- The indexes are rebuilt offline from the manifest and the page
-        -- files; links are not re-resolved.
+        -- The indexes are rebuilt offline from the manifest, the page
+        -- files only checked readable; links are not re-resolved.
 }
 
 rule ShowReport {
