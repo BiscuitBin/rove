@@ -487,7 +487,8 @@ entity FetchAttempt {
     verdict: BlockVerdict               -- classified when the attempt is created
     render_reason: RenderReason?        -- why an unblocked http answer still needs a browser
 
-    -- A Retry-After past the cap retires the host, whatever try this is.
+    -- A Retry-After past the cap retires the host, whatever try this is;
+    -- FetchRobots applies the same test to a robots.txt try.
     retires_host:
         tier = http and response.retryable
         and response.retry_after != null
@@ -768,8 +769,16 @@ rule FetchRobots {
     requires: exists host
     requires: not exists RobotsPolicy{run: run, origin: origin}
     let response = fetch_resource(robots_url(origin), null, null, run, host)
+    let breaker = host.breaker
+    let retires_host =
+        response.retryable and response.retry_after != null
+        and run.policy.honor_retry_after
+        and response.retry_after > run.policy.retry_after_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
+        if retires_host and exists breaker and breaker.status = watching:
+            breaker.status = tripped
+            BreakerTripped(host: host)
         RobotsAnswered(run: run, host: host, origin: origin, response: response)
 
     @guidance
@@ -784,6 +793,17 @@ rule FetchRobots {
         -- without revisiting a URL; anything else comes back as an error.
         -- Its size covers every byte its retries received. It never
         -- classifies blocks and never feeds the breaker.
+        -- For robots.txt its tries are a page's http tries: a retryable
+        -- answer is retried while try < http_attempts, as HttpRetry does,
+        -- with the same retry_wait, the same host pause and a
+        -- HostBackedOff for each retry; every try that carries a
+        -- Retry-After on a 429 or 503 while honor_retry_after holds adds
+        -- one to the host's retry_after_honored, as CountRetryAfter does;
+        -- and a Retry-After past retry_after_cap, on any try, ends the
+        -- tries with that answer as the response and retires the host
+        -- for the run, as RetireHostOnLongRetryAfter does (retires_host
+        -- above, the same test as FetchAttempt.retires_host). The answer
+        -- then stands: a 429 or 5xx is robots_refused.
 }
 
 rule AdoptRobotsRules {
@@ -797,11 +817,19 @@ rule AdoptRobotsRules {
         )
         if run.policy.honor_crawl_delay and robots_crawl_delay(response) != null:
             host.crawl_delay = max(host.crawl_delay, robots_crawl_delay(response) ?? 0.seconds)
-            host.rate = if host.rate != null: min(host.rate, 1 / robots_crawl_delay(response)) else: null
+            host.rate =
+                if host.rate != null and robots_crawl_delay(response) > 0.seconds:
+                    min(host.rate, 1 / robots_crawl_delay(response))
+                else: host.rate
 
     @guidance
         -- The host's rate is min(rate_per_host, 1 / Crawl-delay) when
         -- Crawl-delay is honoured and the origin's robots.txt declares one.
+        -- Crawl-delay: 0 adds no delay: the rate is unchanged and the
+        -- host's crawl_delay keeps its value. robots_crawl_delay reads the
+        -- Crawl-delay of the group that applies to the user agent rovo as
+        -- a decimal number of seconds (0.5 is half a second), and is null
+        -- when the group declares none or its value is not a number.
         -- Crawl-delay stays keyed by host name: when several origins of one
         -- host declare it, the longest delay and the lowest rate win. If the rate
         -- control is disabled but Crawl-delay remains honoured, Crawl-delay
@@ -897,7 +925,10 @@ rule FetchSitemap {
         -- origin, origin_of(url), never another origin of the same host:
         -- it is true under robots = ignore, true when that origin's stance
         -- is allow_all, false under disallow_all, and otherwise the parsed
-        -- rules' answer for the user agent rovo. An origin whose robots.txt
+        -- rules' answer for the user agent rovo, matched as RFC 9309 says:
+        -- the longest matching Allow or Disallow path wins, Allow wins a
+        -- tie, * matches any run of characters and a final $ anchors the
+        -- end of the path. An origin whose robots.txt
         -- the run has not read is read before anything there is fetched.
 }
 
@@ -1126,7 +1157,9 @@ rule SelectBatch {
         -- page_budget_remaining, counted down row by row, is above zero.
         -- When the first chosen row
         -- is at depth 0, only depth-0 rows run in that batch, so start
-        -- pages' links queue first. The batch runs concurrently. A
+        -- pages' links queue first. The batch may run concurrently up to
+        -- the per-host limits; running its rows one at a time respects
+        -- concurrency_per_host (an open question below). A
         -- targeted run selects only its targets' rows; every other pending
         -- row stays pending for a later run. Owner-testing runs select and
         -- sweep only active_urls. host_tripped is true when the row's
@@ -1285,7 +1318,10 @@ rule AttemptTier {
         -- stop says the page moved away. Every response counts toward
         -- max_bytes the moment it arrives, retries and discarded renders
         -- included. Enabled controls wait for a free concurrency
-        -- slot, any host pause and a rate token. A render waits for the
+        -- slot, any host pause and a rate token. There is no burst: the
+        -- starts of two requests to one host name are at least
+        -- 1 / host.rate apart, and at least host.crawl_delay apart when
+        -- Crawl-delay is honoured, robots.txt and retries included. A render waits for the
         -- configured load state, capped at render_max_wait; a navigation
         -- with no response is an error, never a success. Cookies a browser
         -- earns are shared only with that host's http session. Every
@@ -1380,11 +1416,13 @@ rule HttpRetry {
         -- nothing; a Retry-After on 429 or 503 lengthens it when
         -- honor_retry_after is enabled. A retry never shortens a required
         -- host pause and never raises a host's rate. Retry counts and
-        -- request timeouts stay finite.
+        -- request timeouts stay finite. A robots.txt try through
+        -- fetch_resource is retried the same way (FetchRobots).
 }
 
 -- A Retry-After beyond the cap retires the host for the run, on any try,
--- the last included: the breaker trips without a pause, and the attempt
+-- the last included, a robots.txt try through fetch_resource too
+-- (FetchRobots): the breaker trips without a pause, and the attempt
 -- settles as it stands.
 rule RetireHostOnLongRetryAfter {
     when: AttemptReady(attempt)
@@ -1408,6 +1446,10 @@ rule CountRetryAfter {
     requires: attempt.response.retry_after != null and attempt.response.may_carry_retry_after
     requires: attempt.walk.host.run.policy.honor_retry_after
     ensures: attempt.walk.host.retry_after_honored = attempt.walk.host.retry_after_honored + 1
+
+    @guidance
+        -- A robots.txt try through fetch_resource is counted the same way
+        -- (FetchRobots).
 }
 
 -- A standard run climbs only to render content, never to answer a block;
@@ -2018,3 +2060,4 @@ surface OwnerTesting {
 
 open question "May a sitemap index on an allowed host point rovo at child sitemaps on other hosts? Until decided, children are read only on the host that served the index."
 open question "Should a URL that fails on every sync be retried for ever, or retired after a number of syncs? Until decided, every failed row is re-pended on every sync and FrontierEntry.attempts keeps counting."
+open question "Should a batch run concurrently across hosts, and when, within the per-host limits SelectBatch allows? Until decided, a batch's rows run one at a time, which respects concurrency_per_host."
