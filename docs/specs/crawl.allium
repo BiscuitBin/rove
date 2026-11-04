@@ -966,8 +966,17 @@ rule FetchSitemap {
         -- rules' answer for the user agent rovo, matched as RFC 9309 says:
         -- the longest matching Allow or Disallow path wins, Allow wins a
         -- tie, * matches any run of characters and a final $ anchors the
-        -- end of the path. An origin whose robots.txt
-        -- the run has not read is read before anything there is fetched.
+        -- end of the path. One addition, as protego and Google make: an
+        -- Allow path ending in "/index.html", with no final $, also allows
+        -- its directory, as though the group held a second Allow line with
+        -- that "index.html" replaced by $ ("Allow: /private/index.html"
+        -- adds "Allow: /private/$"), weighed by its length like any line.
+        -- So under "Disallow: /private/" the identity "/private/", which
+        -- the mirror folds "/private/index.html" into, is allowed, while
+        -- "/private/?a=1" is not. Nothing else folds: not "index.htm" or
+        -- any other name, not "INDEX.HTML", and never a Disallow line.
+        -- An origin whose robots.txt the run has not read is read before
+        -- anything there is fetched.
 }
 
 rule ReuseUnchangedSitemap {
