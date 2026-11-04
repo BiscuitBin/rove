@@ -1,10 +1,12 @@
 """The generated indexes (T11): the guarantees and the hand-written cases of the ticket.
 
-`DeterministicIndexes` and the index half of `RelativeLinksOnly` (mirror.allium 1420 and
-1437) have no obligation id, so their tests are named after the guarantees. The other
-tests pin `BuildIndexes`' guidance and the interim index text of the ticket's step 1,
-which changes only through the maintainer's answer to the batched question. A small
-threshold and cap go through the functions' parameters; no test patches CONFIG.
+`DeterministicIndexes` and the index half of `RelativeLinksOnly` (mirror.allium 1487 and
+1470, at 91d5623) have no obligation id, so their tests are named after the guarantees.
+The other tests pin `BuildIndexes`' guidance (mirror.allium 1209 to 1307, at 91d5623),
+which since 91d5623 states the index files' exact text: the maintainer adopted the
+ticket's step-1 interim, with titles escaped and flattened in link text and the llms.txt
+summary falling back to the root URL's page. A small threshold and cap go through the
+functions' parameters; no test patches CONFIG.
 """
 
 import json
@@ -12,6 +14,7 @@ import posixpath
 import re
 from pathlib import Path
 
+from rovo._convert.model import QualityFlag
 from rovo._mirror.finalise import request_pass
 from rovo._mirror.indexes import (
     build_indexes,
@@ -28,6 +31,7 @@ from rovo._mirror.model import (
     Index,
     IndexBuildDue,
     IndexEntry,
+    LinkIndexEntry,
     LinkKind,
     Mirror,
     MirrorPass,
@@ -427,7 +431,7 @@ def test_links_jsonl_has_an_entry_of_each_kind(tmp_path: Path) -> None:
 
 
 def jsonl_line(row: dict[str, object]) -> str:
-    """The interim encoding: sorted keys, compact separators, UTF-8 unescaped."""
+    """The specified encoding: sorted keys, compact separators, UTF-8 unescaped."""
     return json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -501,3 +505,158 @@ def test_a_stale_directory_index_is_deleted(tmp_path: Path) -> None:
     assert not stale.parent.exists()
     assert mirror.index is not None
     assert mirror.index.directory_indexes == []
+
+
+# --- Follow-up to 91d5623: the maintainer's answer to the batched question -------------
+#
+# BuildIndexes' guidance (mirror.allium 1209 to 1307, at 91d5623): a title entering link
+# text has each backslash, "[" and "]" escaped with a backslash, and each newline or run of
+# whitespace becomes one space (B); llms_summary falls back from the start URLs, in the
+# scope's order, to the root URL's page, then to the first page by path (C); "### <dir>"
+# is the directory's name lower-cased, ordered by it; JSON writes an enum value by name.
+
+RAW_TITLE = "Flags [beta] \\ and\nmore  \tthings"
+ESCAPED_TITLE = r"Flags \[beta\] \\ and more things"
+
+
+def test_a_title_is_escaped_and_flattened_in_every_markdown_index(tmp_path: Path) -> None:
+    """index.md, llms.txt and a directory index each write the escaped, flattened title.
+
+    The low-confidence marker still follows the link; the raw title appears nowhere.
+    """
+    entries = [
+        index_entry(f"{ROOT}api/a.md", title=RAW_TITLE, low_confidence=True),
+        index_entry(f"{ROOT}api/b.md"),
+        index_entry(f"{ROOT}top.md"),
+    ]
+    files = index_files(unit_index(new_mirror(tmp_path), entries, 1), CAP)
+    expected = {
+        "index.md": f"- [{ESCAPED_TITLE}]({ROOT}api/a.md){LOW_CONFIDENCE}",
+        "llms.txt": f"- [{ESCAPED_TITLE}]({ROOT}api/a.md){LOW_CONFIDENCE}",
+        "_indexes/docs.example/api.md": (
+            f"- [{ESCAPED_TITLE}](../../pages/docs.example/api/a.md){LOW_CONFIDENCE}"
+        ),
+    }
+    for name, line in expected.items():
+        text = files[name]
+        assert line in text.splitlines(), name
+        assert RAW_TITLE not in text, name
+        assert "more  " not in text, name
+        assert "\t" not in text, name
+
+
+def test_a_title_without_special_characters_is_written_as_it_is(tmp_path: Path) -> None:
+    """Escaping touches only backslashes and brackets; other punctuation stays."""
+    title = "Install (on Linux): step #1 & *more*"
+    entries = [index_entry(f"{ROOT}a.md", title=title)]
+    lines = content_lines(
+        index_files(unit_index(new_mirror(tmp_path), entries, 1), CAP)["index.md"]
+    )
+    assert f"- [{title}]({ROOT}a.md)" in lines
+
+
+def test_the_summary_line_is_not_escaped(tmp_path: Path) -> None:
+    """Only titles are escaped: the `> <summary>` line keeps brackets and backslashes."""
+    index = unit_index(new_mirror(tmp_path), llms_entries(), 1)
+    index.summary = "Read [the guide] \\ first."
+    lines = content_lines(index_files(index, CAP)["llms.txt"])
+    assert lines[1] == "> Read [the guide] \\ first."
+
+
+def root_identity(mirror: Mirror) -> str:
+    """The identity of the scope's root URL."""
+    root_url = mirror.scope.root_url
+    assert root_url is not None
+    return mirror.scope.identity_of(root_url)
+
+
+def test_llms_summary_takes_the_root_url_page_without_start_urls(tmp_path: Path) -> None:
+    """No start URL: the root URL's page wins over the first page by path."""
+    mirror = new_mirror(tmp_path, start_urls=())
+    entries = [
+        index_entry(f"{ROOT}a.md", description="First by path."),
+        index_entry(f"{ROOT}z.md", identity=root_identity(mirror), description="The root page."),
+    ]
+    assert llms_summary(mirror, entries) == "The root page."
+
+
+def test_llms_summary_takes_the_root_url_page_when_no_start_url_matches(tmp_path: Path) -> None:
+    """A start URL that names no page falls back to the root URL's page."""
+    mirror = new_mirror(tmp_path, start_urls=(f"{SITE}/guide/nowhere.html",))
+    entries = [
+        index_entry(f"{ROOT}a.md", description="First by path."),
+        index_entry(f"{ROOT}z.md", identity=root_identity(mirror), description="The root page."),
+    ]
+    assert llms_summary(mirror, entries) == "The root page."
+
+
+def test_llms_summary_takes_a_root_url_alias(tmp_path: Path) -> None:
+    """A root URL that is an alias of a page gives that page's description."""
+    mirror = new_mirror(tmp_path, start_urls=())
+    target = stored(mirror, requested=OTHER)
+    mirror.aliases.append(Alias(mirror=mirror, url=root_identity(mirror), target=target))
+    entries = [
+        index_entry(f"{ROOT}a.md", identity=f"{SITE}/guide/a.html", description="First."),
+        index_entry(target.path, identity=OTHER, description="The aliased root page."),
+    ]
+    assert llms_summary(mirror, entries) == "The aliased root page."
+
+
+def test_llms_summary_prefers_a_start_url_over_the_root_url(tmp_path: Path) -> None:
+    """A matching start URL wins over the root URL's page."""
+    mirror = new_mirror(tmp_path)
+    entries = [
+        index_entry(f"{ROOT}a.md", identity=root_identity(mirror), description="The root page."),
+        index_entry(f"{ROOT}z.md", identity=SEED, description="The start page."),
+    ]
+    assert llms_summary(mirror, entries) == "The start page."
+
+
+def test_llms_summary_takes_the_first_matching_start_url_in_scope_order(tmp_path: Path) -> None:
+    """Two start URLs match: the first in the scope's order wins, not the first by path."""
+    mirror = new_mirror(tmp_path, start_urls=(OTHER, SEED))
+    entries = [
+        index_entry(f"{ROOT}a.md", identity=SEED, description="The second start page."),
+        index_entry(f"{ROOT}z.md", identity=OTHER, description="The first start page."),
+    ]
+    assert llms_summary(mirror, entries) == "The first start page."
+
+
+def test_index_md_top_level_directories_are_lower_cased_and_ordered_by_that_name(
+    tmp_path: Path,
+) -> None:
+    """`### <dir>` is the name lower-cased and ordered by it; API/ and api/ share one.
+
+    Ordered by the raw names, API and Zed would come before api and beta.
+    """
+    entries = [
+        index_entry(f"{ROOT}Zed/a.md"),
+        index_entry(f"{ROOT}API/b.md"),
+        index_entry(f"{ROOT}api/c.md"),
+        index_entry(f"{ROOT}beta/d.md"),
+    ]
+    lines = content_lines(
+        index_files(unit_index(new_mirror(tmp_path), entries, CAP), CAP)["index.md"]
+    )
+    assert [line for line in lines if line.startswith("### ")] == [
+        "### api",
+        "### beta",
+        "### zed",
+    ]
+    api_at, beta_at = lines.index("### api"), lines.index("### beta")
+    assert lines[api_at + 1 : beta_at] == [f"- [B]({ROOT}API/b.md)", f"- [C]({ROOT}api/c.md)"]
+
+
+def test_jsonl_writes_enum_values_by_name(tmp_path: Path) -> None:
+    """index.jsonl writes each quality flag, and links.jsonl each kind, by its name."""
+    flags = frozenset({QualityFlag.tables, QualityFlag.html_table_kept})
+    index = unit_index(new_mirror(tmp_path), [index_entry(f"{ROOT}a.md", quality_flags=flags)], 1)
+    index.link_entries = [
+        LinkIndexEntry(url=f"{SITE}/{kind.name}", kind=kind, path=None, cited_by=(f"{ROOT}a.md",))
+        for kind in LinkKind
+    ]
+    files = index_files(index, CAP)
+    (row,) = [json.loads(line) for line in files["index.jsonl"].splitlines()]
+    assert row["quality_flags"] == sorted(flag.name for flag in flags)
+    kinds = [json.loads(line)["kind"] for line in files["links.jsonl"].splitlines()]
+    assert sorted(kinds) == sorted(kind.name for kind in LinkKind)

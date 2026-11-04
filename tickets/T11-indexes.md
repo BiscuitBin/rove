@@ -46,9 +46,9 @@ specification base `32f2210` (`git diff --stat 32f2210 9fd11fd -- docs/specs` is
 
 | Class | Rules |
 | --- | --- |
-| **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `mirror.allium`: `BuildIndexes` (1206: `index_entries`, `link_index_entries`, `directory_indexes_for(entries, config.hierarchical_index_threshold)`, `llms_summary`, both the create and the update branch of `Index`, `IndexFilesWritten`, the pass completed, `IndexesWritten`; the whole of its guidance, including the files under `_indexes/<host>/`, stale ones deleted, and a file written only when its text would differ); `RebuildIndexes` (1196: an `index` pass raises `IndexBuildDue`); the values `IndexEntry` (184), `LinkIndexEntry` (206) and `DirectoryIndex` (213 to 225: path lower-cased, directories differing only in case sharing one index, no index for a host's top level); the entity `Index` (467 to 477) and `Mirror.index` (290); `config.hierarchical_index_threshold` and `config.llms_txt_cap` (494, 495), read from `rovo._mirror.model.CONFIG`, never a literal; the `MirrorContents` guarantee `DeterministicIndexes` (1437), and the index half of `RelativeLinksOnly` (1420: "a generated index links down into pages/"). `rovo.allium`: `RebuildIndex` (776), `RefuseRebuildIndex` (783), `FinishIndexCommand` (790), and the index line of `MirrorCommands`' `VerifyIndexReportExitCodes` (914: "index: 0 when rebuilt, 2 when a page file cannot be read"). |
-| **Traversed, nothing new to do** | `RequestPass` (528): unchanged, now also creating an `index` pass with a null `run_id`. `FinishLinkPass` (1176): unchanged; the `IndexBuildDue` it raises now reaches `BuildIndexes`. `FinaliseRunReport` (`rovo.allium` 657) and `RankAndWriteReport`: unchanged, now after the index files are written. `PublishPage` (1143): unchanged; the index files are not page files. `FixedLayout` (1453): the managed root files `index.md`, `index.jsonl`, `links.jsonl` and `llms.txt` and the `_indexes/` namespace now exist; `assign_path` already keeps every page path out of them (T09, `1be7354`). |
-| **Outside this slice; reaching one still stops the run or is absent** | `VerifyPages` (1267) and its `index_stale` and generated-index `broken_link` findings (the verify slice); `UnchangedRunIsStable` (1430): a second sync still stops at `DisposeFetch` (the incremental slice), so only the index half of stability (`DeterministicIndexes`) is tested here; the `MirrorContents` surface obligations (`surface-actor`, `surface-exposure`, `surface-provides`): the surface also exposes `removed_pages` and provides `OperatorSavesOwnership` (the lifecycle and ownership slices); `MirrorCommands`' `surface-provides` (`verify`, `report` and `fetch` are later slices'). Every `NotInThisSlice` raise T09 and T10 left stays, unchanged. |
+| **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `mirror.allium`: `BuildIndexes` (1209: `index_entries`, `link_index_entries`, `directory_indexes_for(entries, config.hierarchical_index_threshold)`, `llms_summary`, both the create and the update branch of `Index`, `IndexFilesWritten`, the pass completed, `IndexesWritten`; the whole of its guidance, including the files under `_indexes/<host>/`, stale ones deleted, and a file written only when its text would differ); `RebuildIndexes` (1199: an `index` pass raises `IndexBuildDue`); the values `IndexEntry` (185), `LinkIndexEntry` (207) and `DirectoryIndex` (213 to 227: path lower-cased, directories differing only in case sharing one index, no index for a host's top level); the entity `Index` (470 to 480) and `Mirror.index` (293); `config.hierarchical_index_threshold` and `config.llms_txt_cap` (497, 498), read from `rovo._mirror.model.CONFIG`, never a literal; the `MirrorContents` guarantee `DeterministicIndexes` (1487), and the index half of `RelativeLinksOnly` (1470: "a generated index links down into pages/"). `rovo.allium`: `RebuildIndex` (776), `RefuseRebuildIndex` (789), `FinishIndexCommand` (796), and the index line of `MirrorCommands`' `VerifyIndexReportExitCodes` (920: "index: 0 when rebuilt, 2 when a page file cannot be read"). |
+| **Traversed, nothing new to do** | `RequestPass` (531): unchanged, now also creating an `index` pass with a null `run_id`. `FinishLinkPass` (1179): unchanged; the `IndexBuildDue` it raises now reaches `BuildIndexes`. `FinaliseRunReport` (`rovo.allium` 657) and `RankAndWriteReport`: unchanged, now after the index files are written. `PublishPage` (1146): unchanged; the index files are not page files. `FixedLayout` (1503): the managed root files `index.md`, `index.jsonl`, `links.jsonl` and `llms.txt` and the `_indexes/` namespace now exist; `assign_path` already keeps every page path out of them (T09, `1be7354`). |
+| **Outside this slice; reaching one still stops the run or is absent** | `VerifyPages` (1317) and its `index_stale` and generated-index `broken_link` findings (the verify slice); `UnchangedRunIsStable` (1480): a second sync still stops at `DisposeFetch` (the incremental slice), so only the index half of stability (`DeterministicIndexes`) is tested here; the `MirrorContents` surface obligations (`surface-actor`, `surface-exposure`, `surface-provides`): the surface also exposes `removed_pages` and provides `OperatorSavesOwnership` (the lifecycle and ownership slices); `MirrorCommands`' `surface-provides` (`verify`, `report` and `fetch` are later slices'). Every `NotInThisSlice` raise T09 and T10 left stays, unchanged. |
 
 ### Facts a later reader would otherwise rediscover
 
@@ -60,26 +60,25 @@ specification base `32f2210` (`git diff --stat 32f2210 9fd11fd -- docs/specs` is
   `links.jsonl` too. It needs nothing new: the kinds are the manifest's `links` rows of
   T10.
 - **The index pass reads no page body.** `FinishIndexCommand`'s guidance (`rovo.allium`
-  796 to 797): "The indexes are rebuilt offline from the manifest and the page files;
-  links are not re-resolved." Every `IndexEntry` field is a `Page` field or a count over
-  `Mirror.links`, all held in `.rovo/manifest.json`; the page files are only checked by
+  802 to 803): "The indexes are rebuilt offline from the manifest, the page files only
+  checked readable; links are not re-resolved." Every `IndexEntry` field is a `Page`
+  field or a count over `Mirror.links`, all held in `.rovo/manifest.json`; the page files are only checked by
   `page_files_readable` (every written page's file exists and decodes as UTF-8, the
   `rovo.allium` black box, line 50). An existing mirror (`exists target`) is one whose
   manifest loads: `load_mirror` raising `ManifestError` exits usage, as `rovo sync`
   does. The `index` command writes the index files only: no manifest, frontier, runs or
   report save, and it builds no `Clock`, since no index carries wall-clock time.
 - **`Index` is not persisted.** The spec regenerates it "from scratch by every pass that
-  writes them" (`mirror.allium` 469 to 470); it lives in memory on `Mirror.index` for the
+  writes them" (`mirror.allium` 472 to 473); it lives in memory on `Mirror.index` for the
   pass and on disk only as the index files. `docs/reference/mirror.md` says so.
-- **`word_count` has no source yet.** `IndexEntry.word_count` (199) is not a `Page` field,
-  and `convert.allium` 40 names `word_count` as a black box "where the comments name
-  them", which no comment does. The measured `QualityResult.output.words`
-  (`convert.allium` 100, `src/rovo/_convert/model.py` 120) is the body's word list outside
-  code; this slice uses its length as the interim value and carries the gap in the one
-  batched question (Open points).
+- **`word_count` is the measured word list.** `IndexEntry.word_count` (200) is not a
+  `Page` field; since `91d5623` its comment names it: the words the quality measurement
+  counted outside code, the length of `QualityResult.output.words` (`convert.allium` 100,
+  `src/rovo/_convert/model.py` 120). This slice proposed that value as an interim and the
+  maintainer adopted it (Open points).
 - **Paths and links in an index.** Every path an index records is mirror-relative
   (`pages/<host>/...`), and every link is relative to the index file
-  (`BuildIndexes`' guidance, 1250 to 1254): `index.md` and `llms.txt` link down into
+  (`BuildIndexes`' guidance, 1301 to 1304): `index.md` and `llms.txt` link down into
   `pages/` and `_indexes/`, `_indexes/<host>/api.md` links up and back down
   (`../../pages/<host>/api/ref.md`) and across to its nearest indexed descendants
   (`api/v2.md`). The links reuse T10's `relative_path` (`src/rovo/_mirror/links.py`).
@@ -91,14 +90,18 @@ specification base `32f2210` (`git diff --stat 32f2210 9fd11fd -- docs/specs` is
   scenario that produces a real `_indexes/<host>/<dir>.md` serves a site generated into
   `tmp_path` with `CONFIG.hierarchical_index_threshold + 1` pages in one directory,
   rather than committing 201 fixture files. No budget stops that crawl early: `max_pages`
-  is 5000 fetch attempts per run and `max_bytes` 2 GiB (`crawl.allium` 536 to 537).
+  is 5000 fetch attempts per run and `max_bytes` 2 GiB (`crawl.allium` 538 to 539).
 - **Case-differing directories.** Two directories that differ only in case cannot be
   served from one macOS checkout (a case-insensitive file system), so the shared
   lower-case directory index is proven on unit inputs only.
 - **The obligation source.** `just plan-spec <module>` (its echo line goes to standard
   error) over the committed `docs/specs/<module>.allium` at `32f2210`, written to
   `ai_tmp/T11/plan-spec-<module>.txt`: mirror 200, rovo 165, crawl 358, convert 47
-  obligations. The copies are scratch, regenerated by step 0.
+  obligations. The copies are scratch, regenerated by step 0. The follow-up re-derived
+  mirror and rovo at `91d5623` (`ai_tmp/T11/plan-spec-{mirror,rovo}-91d5623.txt`): 200
+  and 165, identical ids, since `91d5623` moves only guidance and comments there. Every
+  `mirror.allium`, `rovo.allium` and `crawl.allium` line this ticket cites is at
+  `91d5623`.
 
 ## Goal
 
@@ -133,7 +136,7 @@ named after its id; `just check` is green; the Allium loop's witness record says
   `OUT_DIR`.
 - No `NotInThisSlice` raise added or removed.
 - No specification change: `docs/specs/` is read, not edited. The five `open question`
-  blocks stay open (`crawl.allium` 1975 and 1976, `convert.allium` 473 to 475); none is
+  blocks stay open (`crawl.allium` 2019 and 2020, `convert.allium` 473 to 475); none is
   on this slice's path. A specification gap found while planning, implementing, in weed
   or in review is never resolved in code or in the specification: every such gap joins
   the one batched needs-user question (Open points) and the ledger's `open_questions`.
@@ -196,10 +199,12 @@ its reason, or handed back if it is a decision record or a specification.
    step 3.
 
 1. **The index files and their text.** Write each file into `docs/reference/mirror.md`
-   first, exactly as the code will write it, then code to it. The specification fixes
-   the structure; the text below is the interim the batched question (Open points) asks
-   the maintainer to confirm, and changes only through that answer.
-   - **`IndexEntry`** (184): one per written page, sorted by path; every field from the
+   first, exactly as the code will write it, then code to it. The text below was the
+   interim the batched question (Open points) asked the maintainer to confirm; since
+   `91d5623` it is `BuildIndexes`' guidance (1232 to 1306), with the two changes the
+   maintainer made: a title is escaped and flattened in link text, and the summary falls
+   back to the root URL's page.
+   - **`IndexEntry`** (185): one per written page, sorted by path; every field from the
      page (`path`, `identity`, `source_url`, `title`, `description`, `keywords`,
      `headings`, `quality_score` the page's `quality.score`, `low_confidence`,
      `quality_flags` the page's `flags`, `content_digest`, `last_modified`, `version`,
@@ -207,13 +212,13 @@ its reason, or handed back if it is a decision record or a specification.
      `outbound_internal` and `inbound_internal` the page's counts over `Mirror.links`.
    - **`index.jsonl`**: one entry per line in path order, each a JSON object with
      sorted keys, compact separators, UTF-8 unescaped, sets as sorted lists, an absent
-     optional value as `null`; LF after every line, so an empty mirror writes an empty
-     file.
-   - **`LinkIndexEntry`** (206) and **`links.jsonl`**: one entry per distinct
+     optional value as `null`, an enum value (a quality flag, a link's kind) by its name;
+     LF after every line, so an empty mirror writes an empty file.
+   - **`LinkIndexEntry`** (207) and **`links.jsonl`**: one entry per distinct
      `target_identity` across `Mirror.links`, sorted by URL; `kind` the link's kind;
      `path` the holder's path when the kind is `internal`, else `null`; `cited_by` the
      sorted, de-duplicated paths of the linking pages. Encoded as `index.jsonl` is.
-   - **`DirectoryIndex`** (220) and **`directory_indexes_for(entries, threshold)`**: group
+   - **`DirectoryIndex`** (223) and **`directory_indexes_for(entries, threshold)`**: group
      each entry by its directory below `pages/<host>/`, lower-cased; a group holding more
      than `threshold` entries directly gets `_indexes/<host>/<dir>.md`, its `directory`
      the lower-cased `pages/<host>/<dir>`, its `heading` `<host>/<dir>`, its entries in
@@ -223,7 +228,9 @@ its reason, or handed back if it is a decision record or a specification.
      `### <directory>`, a list of the directory's directory indexes (nearest first,
      `- [<heading>](<relative path>)`) followed by its pages. A page line is
      `- [<title>](<relative path>)`, followed by a space and `(low confidence)` when
-     `low_confidence` holds.
+     `low_confidence` holds. In link text a title has each `\`, `[` and `]` escaped with a
+     backslash, and each newline or run of whitespace becomes one space; the summary line
+     is not escaped. `### <directory>` is the name lower-cased, ordered by that name.
    - **`_indexes/<host>/<dir>.md`**: `# <heading>`, a list of the directory's nearest
      indexed descendants (the indexes of the directories below its own, skipping any
      directory without an index of its own), then its pages, each line as in
@@ -236,11 +243,14 @@ its reason, or handed back if it is a decision record or a specification.
      directory without an index, are always listed.
    - **`llms_summary(mirror, entries)`**: the description of the page whose identity, or
      an alias of which, matches a start URL of the scope (normalised with
-     `scope.identity_of`), else of the first entry by path, else the empty string.
+     `scope.identity_of`; the first such start URL in the scope's order), else of the page
+     the root URL names the same way, else of the first entry by path, else the empty
+     string.
    - **Writing.** Every file is LF-terminated UTF-8, written through `write_text` (T09's
      atomic write) only when its current text differs; a file under `_indexes/` that
      this build would not write is deleted, and a directory under `_indexes/` this leaves
-     empty is removed. Nothing an index writes carries a time.
+     empty is removed (still unspecified: Open points, item 7). Nothing an index writes
+     carries a time.
 
 2. **The import direction.** No new layer: `rovo._mirror.indexes` imports `rovo._mirror`'s
    own modules and `rovo._convert` only; `rovo._commands` calls it; `_crawl` never does.
@@ -287,9 +297,9 @@ its reason, or handed back if it is a decision record or a specification.
    T10's hashes of that file are superseded in T11's ledger, never edited in theirs.
 
    Guarantees (no obligation id; a hand-written test named after each in
-   `tests/test_indexes.py`): `DeterministicIndexes` (1437: built twice from one mirror,
+   `tests/test_indexes.py`): `DeterministicIndexes` (1487: built twice from one mirror,
    every file byte-identical; entries sorted by path and link entries by URL; LF-terminated
-   UTF-8) and the index half of `RelativeLinksOnly` (1420: every link an index holds
+   UTF-8) and the index half of `RelativeLinksOnly` (1470: every link an index holds
    resolves from the index file's directory to a file that exists).
 
    Not owned, and why, for the hand-back notes: `surface-actor`, `surface-exposure` and
@@ -471,14 +481,14 @@ one arrived; the verification output, each headed by its commit.
 ## Open points
 
 - **The one batched needs-user question: the index text and three undefined values.**
-  The specification fixes what the indexes hold and how they are ordered and linked, but
+  Answered in `91d5623` (below the list). As asked, the specification fixed what the indexes hold and how they are ordered and linked, but
   not these, which the slice needs before its files are a contract (`verify`'s
   `index_stale` will compare their bytes). Step 1 states the interim for each; the
   slice proceeds on it, names it in `docs/reference/mirror.md` and the ledger's
   `open_questions`, and changes it only through the maintainer's answer, never silently:
   1. The exact text of `index.md`, `_indexes/<host>/<dir>.md` and `llms.txt`: the title
      line of each, the heading text of a host, a top-level directory and a directory
-     index (`DirectoryIndex.heading`, 223), the shape of a page line, and how a
+     index (`DirectoryIndex.heading`, 226), the shape of a page line, and how a
      low-confidence page is marked (`BuildIndexes`' guidance says only "marks").
   2. Where a host's top-level pages sit in `index.md`, whose guidance names one heading
      per host and one per top-level directory but no place for the pages directly under
@@ -487,7 +497,7 @@ one arrived; the verification output, each headed by its commit.
      without an index of its own are still listed one by one, and whether "past it"
      means the written pages number more than the cap (the interim) or the listing
      reaches the cap partway.
-  4. `IndexEntry.word_count` (199): no `Page` field and no comment defines it; the
+  4. `IndexEntry.word_count` (200): no `Page` field and no comment defines it; the
      interim is the length of `quality.output.words` (words outside code).
   5. The encoding of `index.jsonl` and `links.jsonl` lines: key order, separators,
      escaping, and whether an absent optional value is `null` (the interim) or omitted
@@ -498,6 +508,25 @@ one arrived; the verification output, each headed by its commit.
      so a hand-edited page file does not move its index entry).
   7. Whether a directory under `_indexes/` left empty by the deletion of stale files is
      removed (the interim) or kept.
+
+  The weed tick added six interim choices to the same question: (8) top-level
+  directories differing only in case share one lower-case `###`; (9) nearest first is
+  depth, then path; (10) titles enter link text unescaped; (11) `llms_summary` consults
+  start URLs only; (12) past the cap an indexed directory's line takes its first page's
+  place; (13) `index.md` lists the pages of an indexed directory too.
+
+  **Answer (`91d5623`, `ai_tmp/T11/spec-format-report.md`).** Points 1 to 6, 8, 9, 12
+  and 13 are adopted as specification: `BuildIndexes`' guidance (`mirror.allium` 1232 to
+  1306), the `IndexEntry`, `DirectoryIndex`, `Index` and config comments, and
+  `RebuildIndex`'s guidance on `page_files_readable` (`rovo.allium` 783 to 786). Two are
+  changed, and the follow-up implements them in `src/rovo/_mirror/indexes.py`: (10) a
+  title in link text has each `\`, `[` and `]` backslash-escaped and each newline or
+  run of whitespace made one space, titles only, not the `> <summary>` line; (11)
+  `llms_summary` takes the first start URL in the scope's order that names a page, else
+  the root URL's page (identity or alias), else the first page by path. The JSON Lines
+  files write an enum value by its name. Point 7 was not decided and stays unspecified:
+  the code keeps removing an emptied directory under `_indexes/` (and `_indexes/` when
+  empty), and no test pins it beyond `test_a_stale_directory_index_is_deleted`.
 - **`links.jsonl` belongs here.** The task's capability sentence lists four of the five
   index files; `BuildIndexes` writes the fifth, and T09 and T10 deferred it to this
   slice (Facts). If the maintainer meant another slice to own it, that slice's ticket

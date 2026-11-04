@@ -236,18 +236,19 @@ pages and links and of two `mirror.allium` config values, `hierarchical_index_th
 mirror gives the same bytes. Every file is UTF-8 with LF line ends and ends in a line
 feed. A file is written, atomically, only when its bytes differ; every file under
 `_indexes/` the build does not write is deleted, and a directory there left empty is
-removed, `_indexes/` itself included.
+removed, `_indexes/` itself included (the specification does not say whether an emptied
+directory stays; rovo removes it).
 
 Every path an index records is mirror-relative (`pages/<host>/...`), and every link is
 relative to the index file: `index.md` and `llms.txt` link down into `pages/` and
 `_indexes/`, and `_indexes/<host>/api.md` links its pages as
-`../../pages/<host>/api/ref.md`. The exact text of `index.md`, the directory indexes
-and `llms.txt`, the encoding of the two JSON Lines files and `word_count` are interim
-values the specification leaves open; they change only through the maintainer's
-answer (ticket T11, Open points).
+`../../pages/<host>/api/ref.md`. The exact text of each file below, the encoding of the
+two JSON Lines files and `word_count` are those `mirror.allium` states in `BuildIndexes`.
 
 A page line is a Markdown list item: a hyphen, a space, then a link whose text is the page's title
-and whose destination is the relative path; a low-confidence page's line goes on with a
+and whose destination is the relative path. In the link text each `\`, `[` and `]` of
+the title is escaped with a backslash, and each line break or run of whitespace becomes
+one space; a low-confidence page's line goes on with a
 space and `(low confidence)`. A directory-index line is the same with `<host>/<dir>` as
 the link's text. Blocks of lines are separated by one blank line.
 
@@ -276,15 +277,17 @@ its own pages in path order.
 `# <host segment>` of the first page by path (`# Index` for an empty mirror), then
 `> <summary>` unless the summary is empty, then one page line per page in path order,
 linked from the mirror's root. The summary is the description of the page whose
-identity, or one of whose aliases, is a start URL's identity, else of the first page by
-path. When the written pages number more than `llms_txt_cap`, a directory with its own
+identity, or one of whose aliases, is a start URL's identity (the first such start URL
+in the configured order), else of the page the root URL names the same way, else of the
+first page by path; it is written as it is, unescaped. When the written pages number more than `llms_txt_cap`, a directory with its own
 directory index is listed as one directory-index line in place of its pages; a host's
 top-level pages and the pages of a directory without an index are still listed.
 
 ### `index.jsonl` and `links.jsonl`
 
 One JSON object per line, keys sorted, compact separators (`,` and `:`), non-ASCII
-characters written as themselves, a set as a sorted list, an absent value as `null`,
+characters written as themselves, a set as a sorted list, an enum value (a link's
+`kind`, each quality flag) as its name, an absent value as `null`,
 and a line feed after every line, so an empty mirror writes an empty file.
 
 `index.jsonl` holds one `IndexEntry` per written page, sorted by `path`: `path`,

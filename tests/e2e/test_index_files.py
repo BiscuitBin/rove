@@ -21,8 +21,10 @@ INDEX_FILES = ("index.md", "index.jsonl", "links.jsonl", "llms.txt")
 UNTOUCHED = (".rovo/manifest.json", ".rovo/frontier.json", ".rovo/runs.json", "crawl-report.json")
 PAGES = ("api/ref.md", "api/v2/x.md", "b.md", "start.md")
 DESCRIPTION = "The example product's documentation, mirrored for offline reading."
+ROOT_DESCRIPTION = "The root page of the example product's documentation."
 ELSEWHERE = "https://example.invalid/"
 MARKDOWN_LINK = re.compile(r"\]\(([^)\s]+)\)")
+START_URLS_LINE = 'start_urls = ["{base}guide/a.html"]\n'
 PAGE_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -247,3 +249,88 @@ def test_a_large_directory_gets_its_own_index(
     index_md = (out / "index.md").read_text(encoding="utf-8")
     assert f"](_indexes/{host}/big.md)" in index_md
     assert_links_reach_files(out, "index.md")
+
+
+ROOT_PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="description" content="{description}">
+<title>Overview | Example docs</title>
+</head>
+<body>
+<main>
+<h1>Overview</h1>
+<p>The overview introduces the example product and points to <a href="a.html">its flags</a>.</p>
+</main>
+</body>
+</html>
+"""
+
+
+def root_and_flags_site(directory: Path) -> Path:
+    """guide/index.html (the root URL's page, described) and guide/a.html, titled with brackets."""
+    guide = directory / "guide"
+    guide.mkdir(parents=True)
+    (guide / "index.html").write_text(
+        ROOT_PAGE_HTML.format(description=ROOT_DESCRIPTION), encoding="utf-8"
+    )
+    (guide / "a.html").write_text(
+        PAGE_HTML.format(
+            title="Flags [beta] \\ options",
+            prose=(
+                "The flags page lists every option of the example product that is still in "
+                "beta, with the value each one takes by default."
+            ),
+        ),
+        encoding="utf-8",
+    )
+    return directory
+
+
+def escaped(title: str) -> str:
+    """BuildIndexes' link text: backslash and brackets escaped, whitespace flattened."""
+    flat = " ".join(title.split())
+    return flat.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def test_sync_without_start_urls_summarises_the_root_page_and_escapes_titles(
+    serve_site: Callable[[str | Path], str], tmp_path: Path
+) -> None:
+    """With start_urls = [], llms.txt quotes the root URL's page; titles are escaped.
+
+    a.md sorts before the root page's file, so the first page by path is not the root
+    page: only the root URL fallback gives its description.
+    """
+    base = serve_site(root_and_flags_site(tmp_path / "site"))
+    out = tmp_path / "out"
+    init = rovo("init", f"{base}guide/a.html", str(out))
+    assert init.returncode == 0, init.stderr
+    toml = out / "rovo.toml"
+    text = toml.read_text(encoding="utf-8")
+    assert f'root_url = "{base}guide/"' in text
+    assert START_URLS_LINE.format(base=base) in text
+    toml.write_text(
+        text.replace(START_URLS_LINE.format(base=base), "start_urls = []\n"), encoding="utf-8"
+    )
+    sync = rovo("sync", str(out))
+    assert sync.returncode == 0, sync.stderr
+
+    entries = jsonl(out / "index.jsonl")
+    paths = [str(row["path"]) for row in entries]
+    flags_path = f"{page_root(base)}a.md"
+    assert len(paths) == len(("index", "a"))
+    assert paths[0] == flags_path
+    descriptions = {str(row["path"]): row["description"] for row in entries}
+    assert descriptions[paths[1]] == ROOT_DESCRIPTION
+    assert descriptions[flags_path] != ROOT_DESCRIPTION
+
+    llms = content_lines((out / "llms.txt").read_text(encoding="utf-8"))
+    assert llms[1] == f"> {ROOT_DESCRIPTION}"
+
+    title = next(str(row["title"]) for row in entries if row["path"] == flags_path)
+    assert "[" in title
+    assert "\\" in title
+    line = f"- [{escaped(title)}]({flags_path})"
+    assert line in content_lines((out / "index.md").read_text(encoding="utf-8"))
+    assert line in llms

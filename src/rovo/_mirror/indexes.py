@@ -1,16 +1,18 @@
-"""The generated indexes (mirror.allium 1196 to 1262): BuildIndexes and RebuildIndexes.
+"""The generated indexes (mirror.allium 1199 to 1307): BuildIndexes and RebuildIndexes.
 
 Every index is a pure function of the written pages, their links and the config, and no
 index carries a wall-clock time, so rebuilding from unchanged input rewrites nothing. The
 index pass reads no page body: every field comes from the manifest, and the page files
 are only checked to be readable. Paths an index records are mirror-relative
 (`pages/<host>/...`); links are relative to the index file. The exact text of each file
-is the interim docs/reference/mirror.md states (the T11 batched question).
+and the JSON Lines encoding are BuildIndexes' guidance (mirror.allium 1232 to 1306),
+which docs/reference/mirror.md restates.
 """
 
 import json
 import os
 import posixpath
+import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import fields
@@ -53,8 +55,8 @@ _TOP_LEVEL_SEGMENTS = 3
 def index_entries(pages: Iterable[Page]) -> list[IndexEntry]:
     """One IndexEntry per written page, in path order.
 
-    word_count is the length of the measured word list outside code (the interim of
-    the T11 batched question); the link counts are the page's over Mirror.links.
+    word_count is the length of the measured word list outside code (mirror.allium
+    IndexEntry.word_count); the link counts are the page's over Mirror.links.
     """
     chosen = sorted(pages, key=lambda page: page.path)
     outbound, inbound = _internal_counts(chosen)
@@ -129,26 +131,33 @@ def directory_indexes_for(entries: Iterable[IndexEntry], threshold: int) -> list
 
 
 def llms_summary(mirror: Mirror, entries: Iterable[IndexEntry]) -> str:
-    """The start page's description, else the first entry's by path, else "".
+    """The first start URL's page's description, else the root URL's, else the first by path.
 
-    The start page is the one whose identity, or an alias of which, is a start URL's
-    identity under the scope; the first start URL that matches wins.
+    A URL names the page whose identity, or an alias of which, is the URL's identity
+    under the scope; start URLs are tried in the scope's order. An empty mirror gives "".
     """
     ordered = sorted(entries, key=lambda entry: entry.path)
-    by_identity = {entry.identity: entry for entry in ordered}
-    by_path = {entry.path: entry for entry in ordered}
-    for start in mirror.scope.start_urls:
-        try:
-            identity = mirror.scope.identity_of(start)
-        except ValueError:  # normalise_url cannot parse it; it matches no page.
-            continue
-        alias = mirror.alias(identity)
-        entry = by_identity.get(identity) or (
-            None if alias is None else by_path.get(alias.target.path)
-        )
+    root_url = mirror.scope.root_url
+    candidates = [*mirror.scope.start_urls, *([] if root_url is None else [root_url])]
+    for url in candidates:
+        entry = _entry_named(mirror, ordered, url)
         if entry is not None:
             return entry.description
     return ordered[0].description if ordered else ""
+
+
+def _entry_named(mirror: Mirror, entries: list[IndexEntry], url: str) -> IndexEntry | None:
+    """The entry whose identity, or an alias of which, is the URL's identity."""
+    try:
+        identity = mirror.scope.identity_of(url)
+    except ValueError:  # normalise_url cannot parse it; it names no page.
+        return None
+    alias = mirror.alias(identity)
+    path = None if alias is None else alias.target.path
+    named = next((entry for entry in entries if entry.identity == identity), None)
+    if named is not None:
+        return named
+    return next((entry for entry in entries if entry.path == path), None)
 
 
 def index_files(index: Index, llms_txt_cap: int) -> dict[str, str]:
@@ -316,9 +325,15 @@ def _nearest_indexed_descendants(
     )
 
 
+def _link_text(title: str) -> str:
+    """A title as link text: backslash and brackets escaped, whitespace runs one space."""
+    escaped = title.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    return re.sub(r"\s+", " ", escaped)
+
+
 def _page_line(entry: IndexEntry, from_file: str) -> str:
     """`- [<title>](<relative path>)`, marked when the page is low confidence."""
-    line = f"- [{entry.title}]({relative_path(from_file, entry.path)})"
+    line = f"- [{_link_text(entry.title)}]({relative_path(from_file, entry.path)})"
     return line + _LOW_CONFIDENCE if entry.low_confidence else line
 
 
@@ -410,11 +425,11 @@ def _jsonl(rows: Iterable[dict[str, object]]) -> str:
 
 
 def _entry_row(entry: IndexEntry) -> dict[str, object]:
-    """An IndexEntry as JSON: lists for tuples, sorted values for the flag set."""
+    """An IndexEntry as JSON: lists for tuples, the flag set as its sorted names."""
     row: dict[str, object] = {field.name: getattr(entry, field.name) for field in fields(entry)}
     row["keywords"] = list(entry.keywords)
     row["headings"] = list(entry.headings)
-    row["quality_flags"] = sorted(flag.value for flag in entry.quality_flags)
+    row["quality_flags"] = sorted(flag.name for flag in entry.quality_flags)
     return row
 
 
@@ -422,7 +437,7 @@ def _link_row(entry: LinkIndexEntry) -> dict[str, object]:
     """A LinkIndexEntry as JSON: the kind by name, cited_by a list."""
     return {
         "url": entry.url,
-        "kind": entry.kind.value,
+        "kind": entry.kind.name,
         "path": entry.path,
         "cited_by": list(entry.cited_by),
     }

@@ -64,4 +64,7 @@ policy.
   `llms.txt`, all deterministic, UTF-8 with LF line ends, linked relative to each file
   and rewritten only when their text changes; stale directory indexes are deleted. The
   new command `rovo index OUT_DIR` rebuilds them offline from the manifest, and exits 2
-  without a mirror or when a page file is missing or not UTF-8.
+  without a mirror or when a page file is missing or not UTF-8. A title in an index's link
+  text has its backslashes and brackets escaped and its whitespace flattened to single
+  spaces, and the `llms.txt` summary falls back from the start URLs to the root URL's
+  page before the first page by path.
