@@ -632,3 +632,43 @@ def test_sync_tallies_a_failed_url_before_close_run(tmp_path: Path) -> None:
     assert row["error"]
     assert report["changes"] == [{"kind": "failed", "url": SEED, "path": None, "moved_from": None}]
     assert report["fetched"] == CRAWL.http_attempts
+
+
+def file_states(out_dir: Path) -> dict[str, tuple[bytes, int, int]]:
+    """Every file outside .rovo/ but the report: its bytes, st_mtime_ns and st_ino."""
+    states: dict[str, tuple[bytes, int, int]] = {}
+    for path in sorted(out_dir.rglob("*")):
+        relative = path.relative_to(out_dir)
+        if not path.is_file() or relative.parts[0] == ".rovo" or path == report_path(out_dir):
+            continue
+        status = path.stat()
+        states[relative.as_posix()] = (path.read_bytes(), status.st_mtime_ns, status.st_ino)
+    return states
+
+
+def test_UnchangedRunIsStable_a_second_sync_of_an_unchanged_site_rewrites_nothing(
+    tmp_path: Path,
+) -> None:
+    """mirror.allium UnchangedRunIsStable on unit inputs: two syncs over one FakeFetcher.
+
+    The second sync sends the seed's stored validators (it has none), gets the same raw
+    document, keeps the page (its row unchanged) and exits 0; no page file and no index
+    file is rewritten: same bytes, st_mtime_ns and st_ino, and no file added.
+    """
+    out = initialised(tmp_path / "out")
+    fetcher = site()
+    assert synced(out, fetcher) is ExitCode.ok
+    before = file_states(out)
+    assert START_PATH in before
+    assert {"index.md", "index.jsonl", "links.jsonl", "llms.txt"} <= set(before)
+    assert synced(out, fetcher) is ExitCode.ok
+    assert fetcher.requests.count(SEED) == len(["first sync", "second sync"])
+    assert file_states(out) == before
+    frontier = json.loads((out / ".rovo" / "frontier.json").read_text(encoding="utf-8"))
+    assert [row["status"] for row in frontier["entries"]] == ["unchanged"]
+    second = report(out)
+    assert second["exit_code"] == "ok"
+    assert (second["converted"], second["skipped_unchanged"]) == (0, 1)
+    assert second["changes"] == [
+        {"kind": "unchanged", "url": SEED, "path": START_PATH, "moved_from": None}
+    ]

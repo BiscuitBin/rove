@@ -33,6 +33,7 @@ OUT_DIR/
 └── .rovo/
     ├── manifest.json      the mirror: scope, profile, pages, aliases, links
     ├── frontier.json      every identity ever discovered, with its status
+    ├── sitemaps.json      each sitemap's validators and entries, as last read
     └── runs.json          one row per run
 ```
 
@@ -98,8 +99,12 @@ per URL a sitemap or `llms.txt` named, in scope or not, sorted by `url`: `url`,
 `sources` (the sorted list of `sitemap` and `llms_txt`) and `last_seen_run`, the id of
 the last run that saw it; a row unseen for more than `observed_url_retention_syncs` (3)
 runs is dropped when the next run's discovery ends. `tier_hints` stays empty until the
-browser slice fills it. A sitemap's validators and entries last one run and are not yet
-saved. `runs.json` holds `runs`, one row per run, oldest
+browser slice fills it. `sitemaps.json` holds `snapshots`, one row per sitemap ever
+read as a sitemap, sorted by `url`: `url`, `etag`, `last_modified`, `is_index` and
+`entries` (each `loc` and `lastmod`, in document order). It is written with
+`frontier.json`, a dry run's included; a later sync sends a snapshot's validators, and a
+`304` answer reuses its entries. No snapshot is ever dropped. An absent file holds no
+snapshot. `runs.json` holds `runs`, one row per run, oldest
 first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
 `finished_at` and `unresolved_urls`. A run's id is one more than the highest id there.
 Both files are written only after the manifest, so a frontier row marked `done` always

@@ -87,6 +87,7 @@ from rovo._unfinished import NotInThisSlice
 
 USER_AGENT = "rovo"
 _FRONTIER = "frontier.json"
+_SITEMAPS = "sitemaps.json"
 _RUNS = "runs.json"
 _ACCESS_DENIED = frozenset({401, 403})
 _REDIRECTS = range(300, 400)
@@ -673,16 +674,22 @@ def read_robots_before_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) 
     return True
 
 
-def fetch_sitemap(
-    run: Run, name: str, url: str, fetcher: Fetcher, *, declared: bool = False
+def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and the frontier.
+    run: Run,
+    name: str,
+    url: str,
+    fetcher: Fetcher,
+    *,
+    declared: bool = False,
+    frontier: Frontier | None = None,
 ) -> SiteResponse | None:
     """Realises crawl.allium FetchSitemap: the SitemapAnswered response, else None.
 
     Each sitemap is read at most once per run, through fetch_resource, its bytes counted.
-    No snapshot outlives its run in this slice, so no validators are sent. A Retry-After
+    A snapshot the frontier holds for the URL sends its validators. A Retry-After
     past the cap retires the host of a declared sitemap (the breaker slice's trip) and
     pauses it for retry_after_cap after a speculative probe, whose answer then stands. A
-    3xx answer (redirect following) is a later slice's branch.
+    3xx answer other than a 304 (redirect following) is a later slice's branch.
     """
     host = run.host(name)
     if host is None or not _sitemap_wanted(run, name, url):
@@ -692,13 +699,19 @@ def fetch_sitemap(
     if url in run.sitemaps_read:
         return None
     run.sitemaps_read.add(url)
-    response = fetch_resource(url, run, host, fetcher)
+    snapshot = None if frontier is None else _snapshot(frontier, url)
+    validators = (
+        None
+        if snapshot is None
+        else Validators(etag=snapshot.etag, last_modified=snapshot.last_modified)
+    )
+    response = fetch_resource(url, run, host, fetcher, validators)
     run.bytes_fetched += response.size
     if past_cap(response, run.policy):
         if declared:
             raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
         pause_for_cap(host)
-    if response.status in _REDIRECTS:
+    if response.status in _REDIRECTS and not response.not_modified:
         raise NotInThisSlice(rule="FetchSitemap")
     return response
 
@@ -715,7 +728,7 @@ def accept_fresh_sitemap(
         return None
     is_index = sitemaps.sitemap_is_index(response)
     entries = sitemaps.sitemap_entries(response)
-    snapshot = next((kept for kept in frontier.sitemap_snapshots if kept.url == url), None)
+    snapshot = _snapshot(frontier, url)
     if snapshot is None:
         snapshot = SitemapSnapshot(
             frontier=frontier,
@@ -732,6 +745,24 @@ def accept_fresh_sitemap(
     snapshot.is_index = is_index
     snapshot.entries = entries
     return snapshot
+
+
+def reuse_unchanged_sitemap(
+    run: Run, frontier: Frontier, url: str, response: SiteResponse
+) -> SitemapSnapshot | None:
+    """Realises crawl.allium ReuseUnchangedSitemap: the snapshot reused, else None.
+
+    Its is_index and entries are the SitemapEntriesFound's; the snapshot is unchanged.
+    """
+    del run  # SitemapEntriesFound names the run; the snapshot is the frontier's.
+    if not response.not_modified:
+        return None
+    return _snapshot(frontier, url)
+
+
+def _snapshot(frontier: Frontier, url: str) -> SitemapSnapshot | None:
+    """SitemapSnapshot{frontier: frontier, url: url}."""
+    return next((kept for kept in frontier.sitemap_snapshots if kept.url == url), None)
 
 
 def reject_non_sitemap(
@@ -908,18 +939,20 @@ def _read_sitemaps(
     """Each SitemapDue in turn, an index's children read depth first as they fall due.
 
     ReadRobotsBeforeSitemap, then FetchSitemap; the answer meets exactly one of
-    AcceptFreshSitemap (then ExpandSitemapEntries), RejectNonSitemap or
-    SkipUnavailableSitemap, and a 304 with no snapshot meets none.
+    ReuseUnchangedSitemap or AcceptFreshSitemap (each then ExpandSitemapEntries),
+    RejectNonSitemap or SkipUnavailableSitemap, and a 304 with no snapshot meets none.
     """
     stack = list(reversed(due))
     while stack:
         url, declared = stack.pop()
         read_robots_before_sitemap(run, name, url, fetcher)
-        response = fetch_sitemap(run, name, url, fetcher, declared=declared)
+        response = fetch_sitemap(run, name, url, fetcher, declared=declared, frontier=frontier)
         host = run.host(name)
         if response is None or host is None:
             continue
-        snapshot = accept_fresh_sitemap(run, frontier, url, response)
+        snapshot = reuse_unchanged_sitemap(run, frontier, url, response) or accept_fresh_sitemap(
+            run, frontier, url, response
+        )
         if snapshot is not None:
             children = expand_sitemap_entries(
                 run, frontier, host, url, snapshot.entries, is_index=snapshot.is_index
@@ -1224,19 +1257,23 @@ def feed_breaker(walk: LadderWalk) -> bool:
 # --- What a settled fetch becomes ---------------------------------------------------
 
 
-def dispose_fetch(walk: LadderWalk) -> EntryFailed | bool:
+def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     """Realises crawl.allium DisposeFetch, in its branch order: what the settled fetch is.
 
     The EntryFailed for a walk that failed outright (its error) or for an answer that is
-    not ok (its status text); True when an ok, unblocked HTML answer with no redirect for
-    a URL with no known page counts as fetched and raises PageFetched; False when the
+    not ok (its status text); the unchanged CandidateDelivered for a 304 on a known page
+    (the known raw digest) or for an ok answer whose raw document is unchanged (counted
+    as fetched), the row settled unchanged; True when any other ok, unblocked HTML
+    answer with no redirect counts as fetched and raises PageFetched; False when the
     guards do not hold. Every other branch is a later slice's.
     """
     attempt = walk.standing
-    if walk.status is not WalkStatus.settled or attempt is None:
-        return False
     entry = walk.entry
-    if entry.status is not FrontierStatus.in_progress:
+    if (
+        walk.status is not WalkStatus.settled
+        or attempt is None
+        or entry.status is not FrontierStatus.in_progress
+    ):
         return False
     run = walk.host.run
     response = attempt.response
@@ -1244,10 +1281,11 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | bool:
     if attempt.failed_outright:
         error = response.error or "no response"
         return EntryFailed(run=run, entry=entry, error=error, attempts=attempt.try_)
-    # The branches between failed_outright and not response.ok, in their order.
+    if response.not_modified and known is not None:
+        return _unchanged(walk, attempt, known.raw_digest)
+    # The branches between not_modified and not response.ok, in their order.
     earlier_branch = (
-        (response.not_modified and known is not None)
-        or response.absent
+        response.absent
         or attempt.verdict.counts_against_host
         or (response.redirected_out and known is not None)
         or response.unfollowed_redirect
@@ -1260,16 +1298,49 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | bool:
         return EntryFailed(
             run=run, entry=entry, error=status_text(response), attempts=attempt.try_
         )
+    raw_unchanged = (
+        known is not None
+        and known.raw_digest == response.raw_digest
+        and known.processing_signature == run.target.processing_signature
+        and not response.redirect_hops
+    )
+    unchanged = (
+        raw_unchanged and entry.identity not in run.forced_refetch and run.mode is RunMode.standard
+    )
+    # A soft verdict, a followed redirect and a non-HTML answer are later slices' too.
     if (
         earlier_branch
         or attempt.verdict.kind is not BlockKind.none
         or response.redirect_hops
-        or not response.is_html
-        or known is not None
+        or not (unchanged or response.is_html)
     ):
         raise NotInThisSlice(rule="DisposeFetch")
     walk.host.fetched += 1
+    if unchanged:
+        return _unchanged(walk, attempt, response.raw_digest)
     return True
+
+
+def _unchanged(walk: LadderWalk, attempt: FetchAttempt, raw_digest: str) -> CandidateDelivered:
+    """DisposeFetch's unchanged branches: the row settled, the unchanged candidate delivered."""
+    entry = walk.entry
+    run = walk.host.run
+    response = attempt.response
+    entry.status = FrontierStatus.unchanged
+    return CandidateDelivered(
+        run_id=run.id,
+        mirror=run.target,
+        requested_identity=entry.identity,
+        source_url=response.source_url,
+        redirect_hops=response.redirect_hops,
+        depth=entry.depth,
+        outcome=CandidateOutcome.unchanged,
+        tier=attempt.tier,
+        etag=response.etag,
+        last_modified=response.last_modified,
+        sitemap_lastmod=entry.sitemap_lastmod,
+        raw_digest=raw_digest,
+    )
 
 
 def convert_fetched(run: Run, entry: FrontierEntry, walk: LadderWalk) -> CandidateDelivered | None:
@@ -1504,6 +1575,11 @@ def _handle_entry(
     disposed = dispose_fetch(walk)
     if isinstance(disposed, EntryFailed):
         return entry_fails(disposed)
+    if isinstance(disposed, CandidateDelivered):
+        # An unchanged row is settled already: the mirror records it (RecordUnchanged),
+        # which raises no LinksFound.
+        settle_candidate(admit_candidate(disposed), clock)
+        return None
     return _store(run, frontier, walk, clock)
 
 
@@ -1556,15 +1632,19 @@ def load_frontier(mirror: Mirror) -> Frontier | None:
     frontier = Frontier(mirror=mirror)
     frontier.entries = [_decode_entry(frontier, row) for row in data["entries"]]
     frontier.observed_urls = [_decode_observed(frontier, row) for row in data["observed_urls"]]
+    sitemaps_path = state_path(mirror.out_dir, _SITEMAPS)
+    if sitemaps_path.is_file():
+        frontier.sitemap_snapshots = [
+            _decode_snapshot(frontier, row) for row in read_json(sitemaps_path)["snapshots"]
+        ]
     return frontier
 
 
 def save_frontier(frontier: Frontier) -> None:
-    """Write <out>/.rovo/frontier.json atomically.
+    """Write <out>/.rovo/frontier.json and <out>/.rovo/sitemaps.json atomically.
 
-    Observed URLs are kept sorted by URL; learned tiers are empty in this slice. Sitemap
-    snapshots last one run until the incremental slice saves them in their own file
-    (decision 0013).
+    Observed URLs and sitemap snapshots are kept sorted by URL; learned tiers are empty
+    in this slice. The snapshots are saved in their own file (decision 0013).
     """
     write_json(
         state_path(frontier.mirror.out_dir, _FRONTIER),
@@ -1575,6 +1655,15 @@ def save_frontier(frontier: Frontier) -> None:
                 for observed in sorted(frontier.observed_urls, key=lambda observed: observed.url)
             ],
             "tier_hints": [],
+        },
+    )
+    write_json(
+        state_path(frontier.mirror.out_dir, _SITEMAPS),
+        {
+            "snapshots": [
+                _encode_snapshot(snapshot)
+                for snapshot in sorted(frontier.sitemap_snapshots, key=lambda kept: kept.url)
+            ]
         },
     )
 
@@ -1658,6 +1747,30 @@ def _decode_observed(frontier: Frontier, row: dict[str, Any]) -> ObservedUrl:
         url=str(row["url"]),
         sources=frozenset(DiscoverySource(source) for source in row["sources"]),
         last_seen_run=int(row["last_seen_run"]),
+    )
+
+
+def _encode_snapshot(snapshot: SitemapSnapshot) -> dict[str, object]:
+    return {
+        "url": snapshot.url,
+        "etag": snapshot.etag,
+        "last_modified": snapshot.last_modified,
+        "is_index": snapshot.is_index,
+        "entries": [{"loc": entry.loc, "lastmod": entry.lastmod} for entry in snapshot.entries],
+    }
+
+
+def _decode_snapshot(frontier: Frontier, row: dict[str, Any]) -> SitemapSnapshot:
+    return SitemapSnapshot(
+        frontier=frontier,
+        url=str(row["url"]),
+        etag=row["etag"],
+        last_modified=row["last_modified"],
+        is_index=bool(row["is_index"]),
+        entries=tuple(
+            SitemapEntry(loc=str(entry["loc"]), lastmod=entry["lastmod"])
+            for entry in row["entries"]
+        ),
     )
 
 

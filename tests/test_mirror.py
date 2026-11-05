@@ -46,9 +46,12 @@ from rovo._mirror.indexes import (
 )
 from rovo._mirror.intake import (
     admit_candidate,
+    discard_unchanged_without_page,
     drop_alias_of_own_identity,
     record_alias,
+    record_unchanged,
     refresh_page,
+    rewrite_known_page,
     store_new_page,
     take_candidate,
 )
@@ -2298,3 +2301,309 @@ def test_config_default_hierarchical_index_threshold() -> None:
 def test_config_default_llms_txt_cap() -> None:
     """Verify config parameter llms_txt_cap has its declared default."""
     assert model.CONFIG.llms_txt_cap == spec_int("mirror", "llms_txt_cap")
+
+
+# --- Unchanged and rewritten known pages (T14) ------------------------------------------
+
+NEW_ETAG = '"etag-2"'
+NEW_LAST_MODIFIED = "Sun, 01 Nov 2026 12:00:00 GMT"
+NEW_LASTMOD = "2026-10-02"
+NEW_BODY = f"{BODY}\nThe dashboard now shows a summary of every installed product.\n"
+NO_PAGE_TO_CONFIRM = "no page to confirm"
+
+
+def unchanged_candidate(
+    mirror: Mirror,
+    *,
+    etag: str | None = None,
+    last_modified: str | None = None,
+    sitemap_lastmod: str | None = None,
+    run_id: int = SECOND_RUN,
+) -> PageCandidate:
+    """An unchanged candidate for the seed (a 304 or the same raw document), admitted."""
+    trigger = dataclasses.replace(
+        delivered(mirror, run_id=run_id, outcome=CandidateOutcome.unchanged, without_content=True),
+        etag=etag,
+        last_modified=last_modified,
+        sitemap_lastmod=sitemap_lastmod,
+    )
+    return admit_candidate(trigger)
+
+
+def rewritten_candidate(mirror: Mirror, *, run_id: int = SECOND_RUN) -> PageCandidate:
+    """A converted candidate for the seed whose body changed, admitted."""
+    return admit_candidate(delivered(mirror, run_id=run_id, converted=content(body=NEW_BODY)))
+
+
+def without_validators(mirror: Mirror) -> Page:
+    """The seed stored from an answer that carried no ETag and no Last-Modified."""
+    trigger = dataclasses.replace(delivered(mirror), etag=None, last_modified=None)
+    page = store_new_page(admit_candidate(trigger), FixedClock())
+    assert page is not None
+    return page
+
+
+def test_rule_success_RecordUnchanged(tmp_path: Path) -> None:
+    """Verify rule RecordUnchanged succeeds when all preconditions are met.
+
+    The known page is seen again: last_seen and last_seen_run move, a validator or
+    lastmod the candidate carries replaces the stored one and a null one keeps it; the
+    body, the measurement and every other field are carried, and PageStored names the
+    page.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    before = dataclasses.replace(page)
+    candidate = unchanged_candidate(mirror, etag=NEW_ETAG, sitemap_lastmod=NEW_LASTMOD)
+    kept = record_unchanged(candidate, FixedClock(LATER))
+    assert kept is page
+    assert candidate.status is CandidateStatus.accepted
+    assert mirror.pages == [page]
+    assert (page.last_seen, page.last_seen_run) == (LATER, SECOND_RUN)
+    assert (page.etag, page.last_modified) == (NEW_ETAG, LAST_MODIFIED)
+    assert page.sitemap_lastmod == NEW_LASTMOD
+    moved = {"last_seen", "last_seen_run", "etag", "sitemap_lastmod"}
+    for field in dataclasses.fields(Page):
+        if field.name not in moved:
+            assert getattr(page, field.name) == getattr(before, field.name), field.name
+
+
+def test_rule_failure_RecordUnchanged_1(tmp_path: Path) -> None:
+    """Verify rule RecordUnchanged is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = unchanged.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    converted = rewritten_candidate(mirror)
+    assert record_unchanged(converted, FixedClock(LATER)) is None
+    accepted = unchanged_candidate(mirror, etag=NEW_ETAG)
+    accepted.status = CandidateStatus.accepted
+    assert record_unchanged(accepted, FixedClock(LATER)) is None
+    assert converted.status is CandidateStatus.pending
+    assert (page.last_seen, page.last_seen_run, page.etag) == (START, FIRST_RUN, ETAG)
+
+
+def test_rule_failure_RecordUnchanged_2(tmp_path: Path) -> None:
+    """Verify rule RecordUnchanged is rejected when requires clause fails.
+
+    requires: exists previous, the known page of the requested identity: none was
+    stored, or the one stored was removed.
+    """
+    mirror = new_mirror(tmp_path / "empty")
+    candidate = unchanged_candidate(mirror)
+    assert record_unchanged(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert mirror.pages == []
+
+    removed_mirror = new_mirror(tmp_path / "removed")
+    removed = stored(removed_mirror)
+    removed.status = PageStatus.removed
+    candidate = unchanged_candidate(removed_mirror)
+    assert record_unchanged(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert (removed.last_seen, removed.last_seen_run) == (START, FIRST_RUN)
+
+
+def test_rule_success_DiscardUnchangedWithoutPage(tmp_path: Path) -> None:
+    """Verify rule DiscardUnchangedWithoutPage succeeds when all preconditions are met.
+
+    An unchanged candidate with no known page is accepted and discarded with the reason
+    "no page to confirm"; the mirror is unchanged (unit inputs: DisposeFetch's unchanged
+    branches both require a known page).
+    """
+    mirror = new_mirror(tmp_path)
+    candidate = unchanged_candidate(mirror)
+    discarded = discard_unchanged_without_page(candidate)
+    assert discarded is not None
+    assert discarded.candidate is candidate
+    assert discarded.reason == NO_PAGE_TO_CONFIRM
+    assert candidate.status is CandidateStatus.accepted
+    assert mirror.pages == []
+    assert mirror.aliases == []
+
+
+def test_rule_failure_DiscardUnchangedWithoutPage_1(tmp_path: Path) -> None:
+    """Verify rule DiscardUnchangedWithoutPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = unchanged.
+    """
+    mirror = new_mirror(tmp_path)
+    converted = admit_candidate(delivered(mirror))
+    assert discard_unchanged_without_page(converted) is None
+    accepted = unchanged_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert discard_unchanged_without_page(accepted) is None
+    assert converted.status is CandidateStatus.pending
+    assert mirror.pages == []
+
+
+def test_rule_failure_DiscardUnchangedWithoutPage_2(tmp_path: Path) -> None:
+    """Verify rule DiscardUnchangedWithoutPage is rejected when requires clause fails.
+
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity).
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    candidate = unchanged_candidate(mirror)
+    assert discard_unchanged_without_page(candidate) is None
+    assert candidate.status is CandidateStatus.pending
+    assert mirror.pages == [page]
+
+
+def test_rule_success_RewriteKnownPage(tmp_path: Path) -> None:
+    """Verify rule RewriteKnownPage succeeds when all preconditions are met.
+
+    The requested page is its own target (previous = target): its content digest becomes
+    its previous digest and RefreshPage refreshes it from the candidate, at its path, no
+    page retired and no alias recorded.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    old_digest = page.content_digest
+    candidate = rewritten_candidate(mirror)
+    target = rewrite_known_page(candidate, FixedClock(LATER))
+    assert target is page
+    assert mirror.pages == [page]
+    assert page.status is PageStatus.written
+    assert page.path == f"{ROOT}start.md"
+    assert page.previous_digest == old_digest
+    assert page.converted_body == NEW_BODY
+    assert (page.last_seen_run, page.last_stored_run) == (SECOND_RUN, SECOND_RUN)
+    assert (page.fetched_at, page.last_seen) == (LATER, LATER)
+    assert page.first_seen == START
+    assert candidate.status is CandidateStatus.accepted
+    assert mirror.aliases == []
+
+
+def test_rule_failure_RewriteKnownPage_1(tmp_path: Path) -> None:
+    """Verify rule RewriteKnownPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = converted.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    unchanged = unchanged_candidate(mirror)
+    assert rewrite_known_page(unchanged, FixedClock(LATER)) is None
+    accepted = rewritten_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert rewrite_known_page(accepted, FixedClock(LATER)) is None
+    assert unchanged.status is CandidateStatus.pending
+    assert page.previous_digest is None
+    assert page.converted_body == BODY
+    assert page.last_stored_run == FIRST_RUN
+
+
+def test_rule_failure_RewriteKnownPage_2(tmp_path: Path) -> None:
+    """Verify rule RewriteKnownPage is rejected when requires clause fails.
+
+    requires: exists target and target.status = written and target.last_stored_run !=
+    candidate.run_id: no page at the identity, a removed one, or one stored this run.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    candidate = rewritten_candidate(empty)
+    assert rewrite_known_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert empty.pages == []
+
+    removed_mirror = new_mirror(tmp_path / "removed")
+    removed = stored(removed_mirror)
+    removed.status = PageStatus.removed
+    candidate = rewritten_candidate(removed_mirror)
+    assert rewrite_known_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert removed.previous_digest is None
+
+    same_run = new_mirror(tmp_path / "same-run")
+    page = stored(same_run)
+    candidate = rewritten_candidate(same_run, run_id=FIRST_RUN)
+    assert rewrite_known_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert page.previous_digest is None
+    assert page.converted_body == BODY
+
+
+def test_entity_optional_Page_previous_digest(tmp_path: Path) -> None:
+    """Verify optional field Page.previous_digest accepts null and non-null values.
+
+    Null on a page StoreNewPage created; its content digest before the rewrite once
+    RewriteKnownPage stored it again.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    assert page.previous_digest is None
+    first_digest = page.content_digest
+    assert rewrite_known_page(rewritten_candidate(mirror), FixedClock(LATER)) is page
+    assert page.previous_digest == first_digest
+
+
+def test_entity_optional_Page_etag(tmp_path: Path) -> None:
+    """Verify optional field Page.etag accepts null and non-null values.
+
+    A page stored from an answer with no ETag has none, one with an ETag keeps it; an
+    unchanged candidate with no ETag keeps the stored value, null or not (RecordUnchanged).
+    """
+    bare = without_validators(new_mirror(tmp_path / "bare"))
+    assert bare.etag is None
+    assert record_unchanged(unchanged_candidate(bare.mirror), FixedClock(LATER)) is bare
+    assert bare.etag is None
+
+    tagged = stored(new_mirror(tmp_path / "tagged"))
+    assert tagged.etag == ETAG
+    assert record_unchanged(unchanged_candidate(tagged.mirror), FixedClock(LATER)) is tagged
+    assert tagged.etag == ETAG
+
+
+def test_entity_optional_Page_last_modified(tmp_path: Path) -> None:
+    """Verify optional field Page.last_modified accepts null and non-null values.
+
+    As Page.etag: null from an answer with none, kept by an unchanged candidate with
+    none, replaced by one that carries a new value (RecordUnchanged).
+    """
+    bare = without_validators(new_mirror(tmp_path / "bare"))
+    assert bare.last_modified is None
+    assert record_unchanged(unchanged_candidate(bare.mirror), FixedClock(LATER)) is bare
+    assert bare.last_modified is None
+
+    dated = stored(new_mirror(tmp_path / "dated"))
+    assert dated.last_modified == LAST_MODIFIED
+    assert record_unchanged(unchanged_candidate(dated.mirror), FixedClock(LATER)) is dated
+    assert dated.last_modified == LAST_MODIFIED
+    renewed = unchanged_candidate(dated.mirror, last_modified=NEW_LAST_MODIFIED, run_id=3)
+    assert record_unchanged(renewed, FixedClock(LATER)) is dated
+    assert dated.last_modified == NEW_LAST_MODIFIED
+
+
+def test_entity_optional_PageCandidate_etag(tmp_path: Path) -> None:
+    """Verify optional field PageCandidate.etag accepts null and non-null values.
+
+    An unchanged candidate carries the answer's ETag, or none; RecordUnchanged takes a
+    non-null one and ignores a null one.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    bare = unchanged_candidate(mirror)
+    assert bare.etag is None
+    assert record_unchanged(bare, FixedClock(LATER)) is page
+    assert page.etag == ETAG
+    tagged = unchanged_candidate(mirror, etag=NEW_ETAG, run_id=3)
+    assert tagged.etag == NEW_ETAG
+    assert record_unchanged(tagged, FixedClock(LATER)) is page
+    assert page.etag == NEW_ETAG
+
+
+def test_entity_optional_PageCandidate_last_modified(tmp_path: Path) -> None:
+    """Verify optional field PageCandidate.last_modified accepts null and non-null values.
+
+    As PageCandidate.etag, for the answer's Last-Modified.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    bare = unchanged_candidate(mirror)
+    assert bare.last_modified is None
+    assert record_unchanged(bare, FixedClock(LATER)) is page
+    assert page.last_modified == LAST_MODIFIED
+    dated = unchanged_candidate(mirror, last_modified=NEW_LAST_MODIFIED, run_id=3)
+    assert dated.last_modified == NEW_LAST_MODIFIED
+    assert record_unchanged(dated, FixedClock(LATER)) is page
+    assert page.last_modified == NEW_LAST_MODIFIED

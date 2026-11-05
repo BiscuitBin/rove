@@ -100,3 +100,10 @@ policy.
 - `rovo sync --dry-run OUT_DIR` discovers as a sync does, prints the URL of each page
   it would fetch, one per line in the order it would take them, fetches and writes no
   page or index, and saves the manifest, the frontier, the run and the report.
+- A second `rovo sync` is incremental: each page already in the mirror is fetched with
+  its stored `ETag` and `Last-Modified` (none once it is older than `crawl.max_age`,
+  after a settings change or when a sitemap gives a newer `lastmod`); a `304` or an
+  unchanged raw document keeps the page as it is (`unchanged` in the frontier and the
+  report), and a changed one is converted again. Sitemaps are saved in
+  `.rovo/sitemaps.json` and requested with their validators, a `304` reusing the saved
+  entries. A sync against an unchanged site rewrites no page file and no index.

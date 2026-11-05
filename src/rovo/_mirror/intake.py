@@ -2,8 +2,10 @@
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
 `settle_candidate` fires the one whose guards hold. This slice implements StoreNewPage,
-RefuseUnplaceableCandidate, and the shared RefreshPage with the aliases it records; a
-candidate that would need another rule stops with NotInThisSlice.
+RefuseUnplaceableCandidate, RecordUnchanged, DiscardUnchangedWithoutPage,
+RewriteKnownPage (when the requested page is its own target), and the shared
+RefreshPage with the aliases it records; a candidate that would need another rule stops
+with NotInThisSlice.
 """
 
 from rovo._mirror.model import (
@@ -24,6 +26,7 @@ from rovo._mirror.urls import assign_path, digest, version_label
 from rovo._unfinished import NotInThisSlice
 
 _NO_FREE_PATH = "no free path"
+_NO_PAGE_TO_CONFIRM = "no page to confirm"
 
 
 def admit_candidate(delivered: CandidateDelivered) -> PageCandidate:
@@ -223,23 +226,89 @@ def drop_alias_of_own_identity(mirror: Mirror, url: str, page: Page) -> bool:
     return True
 
 
-def settle_candidate(candidate: PageCandidate, clock: Clock) -> Page | CandidateDiscarded | None:
-    """Settle one candidate: the rule whose guards hold fires; None when it is not pending.
+def record_unchanged(candidate: PageCandidate, clock: Clock) -> Page | None:
+    """Realises mirror.allium RecordUnchanged: PageStored's page, else None.
 
-    StoreNewPage gives PageStored's page; else RefuseUnplaceableCandidate gives its
-    CandidateDiscarded when no path is free. A pending candidate neither takes needs a
-    rule a later slice implements (RejectDuplicateCandidate, RewriteKnownPage, MovePage,
-    ReviveRemovedPage, or an unchanged, absent or redirected-out outcome).
+    The known page is seen again: a validator or sitemap lastmod the candidate carries
+    replaces the stored one, a null one keeps it; the body and the measurement stay.
     """
     if candidate.status is not CandidateStatus.pending:
         return None
-    page = store_new_page(candidate, clock)
-    if page is not None:
-        return page
-    discarded = refuse_unplaceable_candidate(candidate)
-    if discarded is None:
+    if candidate.outcome is not CandidateOutcome.unchanged:
+        return None
+    previous = candidate.mirror.known_page(candidate.requested_identity)
+    if previous is None:
+        return None
+    previous.last_seen = clock.now()
+    previous.last_seen_run = candidate.run_id
+    if candidate.etag is not None:
+        previous.etag = candidate.etag
+    if candidate.last_modified is not None:
+        previous.last_modified = candidate.last_modified
+    if candidate.sitemap_lastmod is not None:
+        previous.sitemap_lastmod = candidate.sitemap_lastmod
+    candidate.status = CandidateStatus.accepted
+    return previous
+
+
+def discard_unchanged_without_page(candidate: PageCandidate) -> CandidateDiscarded | None:
+    """Realises mirror.allium DiscardUnchangedWithoutPage; None when its guards do not hold."""
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.unchanged:
+        return None
+    if candidate.mirror.known_page(candidate.requested_identity) is not None:
+        return None
+    candidate.status = CandidateStatus.accepted
+    return CandidateDiscarded(candidate=candidate, reason=_NO_PAGE_TO_CONFIRM)
+
+
+def rewrite_known_page(candidate: PageCandidate, clock: Clock) -> Page | None:
+    """Realises mirror.allium RewriteKnownPage: the refreshed target, else None.
+
+    The target keeps its content digest as its previous digest, then RefreshPage
+    (raised as PageContentAccepted) refreshes it. The merge branch, a known page other
+    than the target (PageRetired with reason merged), is a later slice's.
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.converted:
+        return None
+    mirror = candidate.mirror
+    target = mirror.page(_page_identity(candidate))
+    if target is None or target.status is not PageStatus.written:
+        return None
+    if target.last_stored_run == candidate.run_id:
+        return None
+    previous = mirror.known_page(candidate.requested_identity)
+    if previous is not None and previous is not target:
+        raise NotInThisSlice(rule="RewriteKnownPage")
+    target.previous_digest = target.content_digest
+    refresh_page(candidate, target, clock)
+    return target
+
+
+def settle_candidate(candidate: PageCandidate, clock: Clock) -> Page | CandidateDiscarded | None:
+    """Settle one candidate: the rule whose guards hold fires; None when it is not pending.
+
+    In order: StoreNewPage, RefuseUnplaceableCandidate, RecordUnchanged,
+    DiscardUnchangedWithoutPage, RewriteKnownPage; a page is PageStored's, a discard
+    CandidateDiscarded's. A pending candidate none takes needs a rule a later slice
+    implements (RejectDuplicateCandidate, MovePage, ReviveRemovedPage, or an absent or
+    redirected-out outcome).
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    settled = (
+        store_new_page(candidate, clock)
+        or refuse_unplaceable_candidate(candidate)
+        or record_unchanged(candidate, clock)
+        or discard_unchanged_without_page(candidate)
+        or rewrite_known_page(candidate, clock)
+    )
+    if settled is None:
         raise NotInThisSlice(rule="PageCandidate.created")
-    return discarded
+    return settled
 
 
 def take_candidate(candidate: PageCandidate, clock: Clock) -> Page | None:

@@ -37,6 +37,7 @@ snapshot.
 | T11 | Indexes: every finalisation writes index.md, the directory indexes, llms.txt, index.jsonl and links.jsonl, and rovo index rebuilds them | `T11-indexes.md` | T10 | none | open |
 | T12 | Robots and politeness: rovo sync reads robots.txt per origin, paces each host, retries with backoff and Retry-After, and exits partial on a failure | `T12-robots-politeness.md` | T11 | none | open |
 | T13 | Discovery: rovo sync reads sitemaps and llms.txt, records what they name, keeps the sitemap budgets, and --dry-run lists what it would fetch | `T13-discovery.md` | T12 | none | open |
+| T14 | Incremental sync: a second rovo sync fetches known pages conditionally, keeps what did not change, reuses unchanged sitemaps, honours max_age and rewrites nothing on an unchanged site | `T14-incremental.md` | T13 | none | open |
 
 ## Dependency graph
 
@@ -44,7 +45,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -87,6 +88,11 @@ T00 ─┬─ T01 ─┐
   `llms.txt`, records every URL they name as an observation, admits the in-scope ones
   within the sitemap caps and the page budget, reports a declared sitemap that fails,
   and `rovo sync --dry-run` lists the rows it would fetch without fetching a page.
+- **T14** is slice 6: incremental sync. A second `rovo sync` sends each known page's and
+  each saved sitemap's validators, keeps a page answered 304 or whose raw document did
+  not change, reconverts one that changed or that `max_age` forces, reuses a sitemap
+  answered 304 from its snapshot in `.rovo/sitemaps.json`, and rewrites no page file and
+  no index file on an unchanged site.
 
 ## How to pick up a ticket
 

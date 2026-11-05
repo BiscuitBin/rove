@@ -99,6 +99,24 @@ mirror has no free path for is refused: its URL is reported as failed with the e
 `no free path` and the sync exits 1 (the [mirror reference](mirror.md#page-files) says
 when that happens).
 
+A later `rovo sync` of the same mirror is incremental. Every page already in the mirror
+is fetched again, conditionally: the request carries the page's stored `ETag` as
+`If-None-Match` and its `Last-Modified` as `If-Modified-Since`, unless the page was last
+seen more than `crawl.max_age` seconds before the sync started, the processing settings
+changed, or a sitemap now gives it a newer `<lastmod>`, when it is fetched without them.
+A page answered `304`, or answered with the same raw document under the same settings
+and with no redirect, is kept as it is: its row in the frontier is `unchanged`, its body
+is not converted again and its links are not followed again; only the validators and the
+sitemap `<lastmod>` the answer carries replace the stored ones. A page whose raw
+document changed, or that `max_age` forces, is converted again and its page file
+rewritten only when its text differs. A sitemap read before is requested with its saved
+validators, and a `304` reuses the entries saved for it (`.rovo/sitemaps.json`, in the
+[mirror reference](mirror.md#rovofrontierjson-and-rovorunsjson)). Against a site that
+has not changed, a sync rewrites no page file and no index and exits 0. In
+`crawl-report.json`, `fetched` counts every page request, `304` answers included;
+`per_host`'s `fetched` counts only pages answered with a document; `converted` counts
+the pages whose body changed and `skipped_unchanged` the pages seen whose body did not.
+
 Before any page, `rovo sync` discovers pages beyond the seeds, host by host in sorted
 order, once each host's robots.txt is read. It reads the sitemaps that host's robots.txt
 declares (`Sitemap:` lines), in order, then `/sitemap.xml` and `/sitemap_index.xml`
@@ -175,8 +193,9 @@ The refusal is printed on standard error; the specification's refused report arr
 with a later slice. When a run reaches a branch a later slice implements (a redirect,
 robots.txt's, a sitemap's and `llms.txt`'s included, a 404, a block, a 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
-the host as soon as its robots.txt is read, a host whose failures trip its breaker, a page already
-in the mirror, a link to a missing page or to a URL that answers
+the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
+canonical URL that moves a page in the mirror onto another page, a non-HTML answer for a
+page in the mirror, a link to a missing page or to a URL that answers
 with a redirect or a non-HTML file, a profile other
 than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
 a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the

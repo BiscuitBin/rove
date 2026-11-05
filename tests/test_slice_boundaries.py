@@ -75,10 +75,7 @@ from rovo._mirror.model import (
 )
 from rovo._mirror.state import ManifestError, load_mirror, manifest_path, save_mirror
 from rovo._mirror.urls import assign_path, normalise_url, pattern_matches, version_label
-from rovo._report import (
-    ExitCode,
-    report_path,
-)
+from rovo._report import ExitCode
 from rovo._unfinished import NotInThisSlice
 from test_crawl import MAPS, MAPS_INDEX, PAST_CAP_DELAYS, PAST_CAP_IDS, past_cap, sitemapindex
 
@@ -379,20 +376,20 @@ def test_a_tripped_host_and_a_browser_attempt_stop(tmp_path: Path) -> None:
         select_batch(run, frontier)
 
 
-def test_a_second_sync_of_a_known_page_stops(tmp_path: Path) -> None:
-    """A known page is fetched conditionally; the unchanged answer is a later slice's.
+def test_a_second_sync_of_a_known_page_keeps_it(tmp_path: Path) -> None:
+    """A known page is fetched conditionally, and its unchanged answer keeps it (T14).
 
-    The command exits partial, says why on standard error, and keeps the first report.
+    Re-propagated from T09's test_a_second_sync_of_a_known_page_stops: the second sync
+    now exits 0 rather than partial, so the first report is no longer kept; the request
+    still carries the page's stored validators, which the fake's answer gave none of.
     """
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
     first = FakeFetcher({SEED: html_response(SEED, PAGE)})
     assert _commands.sync(out_dir, fetcher=first, clock=FixedClock()) is ExitCode.ok
-    report = report_path(out_dir).read_bytes()
     again = FakeFetcher({SEED: html_response(SEED, PAGE)})
-    assert _commands.sync(out_dir, fetcher=again, clock=FixedClock()) is ExitCode.partial
+    assert _commands.sync(out_dir, fetcher=again, clock=FixedClock()) is ExitCode.ok
     assert again.validators[-1] == Validators(etag=None, last_modified=None)
-    assert report_path(out_dir).read_bytes() == report
     # An atomic write gives the mode an ordinary new file gets, not the temporary's 0600.
     mask = os.umask(0)
     os.umask(mask)
@@ -430,6 +427,73 @@ def test_mirror_branches_of_later_slices_stop(tmp_path: Path) -> None:
     page.source_url = f"{SITE}/elsewhere/page.html"
     with pytest.raises(NotInThisSlice):
         finalise(Operator(), mirror, 2, FixedClock())
+
+
+def test_a_canonical_merging_a_known_page_into_another_stops(tmp_path: Path) -> None:
+    """RewriteKnownPage's merge branch (previous != target) is the lifecycle slice's (T15).
+
+    The seed's new canonical names another written page: the candidate stops at
+    NotInThisSlice("RewriteKnownPage") before anything changes.
+    """
+    mirror = new_mirror(tmp_path)
+    other = f"{SITE}/guide/other.html"
+    stored = []
+    for url in (SEED, other):
+        page = take_candidate(
+            admit_candidate(
+                CandidateDelivered(
+                    run_id=1,
+                    mirror=mirror,
+                    requested_identity=url,
+                    source_url=url,
+                    redirect_hops=(),
+                    depth=0,
+                    outcome=CandidateOutcome.converted,
+                    tier=Tier.http,
+                    raw_digest="0" * 64,
+                    content=page_content(PAGE),
+                )
+            ),
+            FixedClock(),
+        )
+        assert page is not None
+        stored.append(page)
+    canonical = PAGE.replace("<head>", f'<head><link rel="canonical" href="{other}">')
+    merging = admit_candidate(
+        CandidateDelivered(
+            run_id=2,
+            mirror=mirror,
+            requested_identity=SEED,
+            source_url=SEED,
+            redirect_hops=(),
+            depth=0,
+            outcome=CandidateOutcome.converted,
+            tier=Tier.http,
+            raw_digest="1" * 64,
+            content=page_content(canonical),
+        )
+    )
+    with pytest.raises(NotInThisSlice) as stopped:
+        take_candidate(merging, FixedClock())
+    assert stopped.value.rule == "RewriteKnownPage"
+    assert [page.previous_digest for page in stored] == [None, None]
+    assert [page.status for page in stored] == [PageStatus.written, PageStatus.written]
+    assert [page.last_stored_run for page in stored] == [1, 1]
+
+
+def test_a_known_pages_non_html_answer_stops(tmp_path: Path) -> None:
+    """A known page answering with another raw document that is not HTML stops (not T14's).
+
+    DisposeFetch's skipped_not_html branch keeps its NotInThisSlice.
+    """
+    mirror = new_mirror(tmp_path)
+    run_crawl(request(mirror), None, FakeFetcher({SEED: html_response(SEED, PAGE)}), FixedClock())
+    again = FakeFetcher({SEED: text_response(SEED, "plain")})
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(
+            request(mirror, id=2, kind=RunKind.update), load_frontier(mirror), again, FixedClock()
+        )
+    assert stopped.value.rule == "DisposeFetch"
 
 
 def page_content(html: str) -> ConvertedContent:

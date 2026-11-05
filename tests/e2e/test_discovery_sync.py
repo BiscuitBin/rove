@@ -11,6 +11,7 @@ sleep the crawl's pacing calls. Not `test_sitemaps.py`, which the unit suite nam
 """
 
 import dataclasses
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -42,6 +43,7 @@ DISCOVERY_PATHS = (
     "/llms.txt",
 )
 PAGE_PREFIXES = ("/guide/", "/outside/")
+A_MINUTE = 60
 
 
 def urlset(entries: Sequence[tuple[str, str | None]]) -> str:
@@ -413,7 +415,10 @@ def test_observations_are_forgotten_after_the_retention_syncs(
 
     Every sync is a dry run, so no page is written and none refetched. The orphan leaves
     the sitemap after the first run; it is kept for the retention runs and gone after one
-    more, while the outside page, still listed, is seen by every run.
+    more, while the outside page, still listed, is seen by every run. The rewritten
+    sitemap's mtime moves forward a minute: `http.server` dates Last-Modified to the
+    second, and a sitemap answering 304 replays its saved snapshot (T14,
+    ReuseUnchangedSitemap), orphan included.
     """
     sites = served(serve_site, tmp_path)
     write_base_site(sites)
@@ -427,6 +432,9 @@ def test_observations_are_forgotten_after_the_retention_syncs(
         "maps/guide.xml",
         urlset([(outside, None), (sites.url("guide/private/hidden.html"), None)]),
     )
+    sitemap = sites.root / "maps" / "guide.xml"
+    moved = sitemap.stat().st_mtime + A_MINUTE
+    os.utime(sitemap, (moved, moved))
     retention = CONFIG.observed_url_retention_syncs
     for _ in range(retention):
         assert synced(out, dry_run=True) is ExitCode.ok

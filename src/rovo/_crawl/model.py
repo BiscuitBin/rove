@@ -473,7 +473,7 @@ class ObservedUrl:
 
 @dataclass(kw_only=True, eq=False)
 class SitemapSnapshot:
-    """The validators and entries of a sitemap read this run (kept one run, T13)."""
+    """The validators and entries of a sitemap last read, saved in .rovo/sitemaps.json."""
 
     frontier: Frontier
     url: str
@@ -701,6 +701,26 @@ class LadderWalk:
     status: WalkStatus
     standing: "FetchAttempt | None" = None
     attempts: list["FetchAttempt"] = field(default_factory=list)
+
+    @property
+    def soft_suspect(self) -> list["FetchAttempt"]:
+        """The attempts with a soft verdict and no render reason."""
+        return [
+            attempt
+            for attempt in self.attempts
+            if attempt.verdict.kind is BlockKind.soft and attempt.render_reason is None
+        ]
+
+    @property
+    def ok_http(self) -> list["FetchAttempt"]:
+        """The ok, unblocked http attempts."""
+        return [
+            attempt
+            for attempt in self.attempts
+            if attempt.tier is Tier.http
+            and attempt.response.ok
+            and attempt.verdict.kind is BlockKind.none
+        ]
 
     @property
     def render_needed(self) -> bool:

@@ -10,6 +10,7 @@ FetchEntry makes its first attempt); the run's driver, `run_crawl`, does the res
 
 import dataclasses
 import importlib.metadata
+import json
 import sys
 from datetime import timedelta
 from decimal import Decimal
@@ -35,7 +36,7 @@ from rovo._convert import profiles
 from rovo._convert.model import QualityFlag
 from rovo._crawl import model, sitemaps
 from rovo._crawl import run as run_module
-from rovo._crawl.fetch import HttpxFetcher
+from rovo._crawl.fetch import HttpxFetcher, Validators
 from rovo._crawl.model import (
     BlockKind,
     BlockVerdict,
@@ -115,6 +116,7 @@ from rovo._crawl.run import (
     reject_non_sitemap,
     render_reason_of,
     retires_host_on_long_crawl_delay,
+    reuse_unchanged_sitemap,
     robots_allows,
     run_crawl,
     save_frontier,
@@ -128,6 +130,7 @@ from rovo._crawl.run import (
 )
 from rovo._mirror.intake import admit_candidate, take_candidate
 from rovo._mirror.model import (
+    CandidateDelivered,
     CandidateOutcome,
     CrawlScope,
     LinksFound,
@@ -137,6 +140,7 @@ from rovo._mirror.model import (
 )
 from rovo._mirror.state import save_mirror
 from rovo._mirror.urls import hostname_of
+from rovo._unfinished import NotInThisSlice
 from spec_values import spec_duration, spec_enum, spec_float, spec_int
 
 SITE = "http://docs.example"
@@ -4061,8 +4065,8 @@ def test_rule_failure_ReadRobotsBeforeSitemap_6(tmp_path: Path) -> None:
 def test_rule_success_FetchSitemap(tmp_path: Path) -> None:
     """Verify rule FetchSitemap succeeds when all preconditions are met.
 
-    The sitemap is read through fetch_resource without validators (no snapshot is ever
-    loaded in this slice) and its bytes count toward the run's, not its attempts.
+    The sitemap is read through fetch_resource without validators (no snapshot is saved
+    yet) and its bytes count toward the run's, not its attempts.
     """
     robots = declaring(MAPS)
     fetcher = site(robots=robots)
@@ -4805,3 +4809,596 @@ def test_a_sitemap_or_index_child_with_no_identity_is_skipped_uncounted(tmp_path
     assert host.sitemap_children_read == 1
     assert run.discovery_failures == []
     assert frontier.entry(ORPHAN) is not None
+
+
+# --- Incremental sync (T14) -------------------------------------------------------------
+
+NOT_MODIFIED = 304
+SEED_ETAG = '"seed-1"'
+NEW_ETAG = '"seed-2"'
+STAMP = "Sat, 31 Oct 2026 12:00:00 GMT"
+MAPS_ETAG = '"maps-1"'
+NEWER_LASTMOD = "2026-10-02"
+MAX_AGE = timedelta(seconds=60)
+STALE = START + timedelta(minutes=2)
+CHANGED_PAGE = PAGE.replace("</main>", "<p>A new paragraph about the dashboard.</p></main>")
+
+
+def not_modified(url: str, *, etag: str | None = None) -> SiteResponse:
+    """A 304 with an empty body, carrying `etag` when given."""
+    return SiteResponse(status=NOT_MODIFIED, source_url=url, markup="", size=0, etag=etag)
+
+
+def validated(response: SiteResponse) -> SiteResponse:
+    """`response` carrying the seed's ETag and Last-Modified."""
+    return dataclasses.replace(response, etag=SEED_ETAG, last_modified=STAMP)
+
+
+def seed_site(page: str = PAGE) -> FakeFetcher:
+    """The fixture site's seed answering with both validators; robots.txt absent."""
+    return FakeFetcher({SEED: validated(html_response(SEED, page))})
+
+
+def update_request(
+    mirror: Mirror, *, run_id: int = SECOND_RUN, max_age: timedelta | None = None
+) -> RunRequest:
+    """The RunRequested of a later standard update run over `mirror`."""
+    return dataclasses.replace(
+        request(mirror, run_id=run_id, kind=RunKind.update), max_age=max_age
+    )
+
+
+def first_synced(out_dir: Path, fetcher: FakeFetcher) -> Mirror:
+    """A mirror after one whole run over `fetcher`; its pages stay in memory."""
+    mirror = new_mirror(out_dir)
+    run_crawl(request(mirror), None, fetcher, FixedClock())
+    return mirror
+
+
+def synced_again(
+    mirror: Mirror,
+    fetcher: FakeFetcher,
+    *,
+    run_id: int = SECOND_RUN,
+    max_age: timedelta | None = None,
+    clock: FixedClock | None = None,
+) -> CrawlResult:
+    """A later whole update run over the same mirror and its saved frontier."""
+    return run_crawl(
+        update_request(mirror, run_id=run_id, max_age=max_age),
+        load_frontier(mirror),
+        fetcher,
+        clock or FixedClock(),
+    )
+
+
+def known_entry(
+    mirror: Mirror,
+    fetcher: FakeFetcher,
+    *,
+    max_age: timedelta | None = None,
+    clock: FixedClock | None = None,
+) -> tuple[Run, Frontier, FrontierEntry]:
+    """A second run over a mirror holding the seed, through discovery to the seed in progress."""
+    run = start_run(update_request(mirror, max_age=max_age), clock or FixedClock())
+    assert run is not None
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    assert attach_frontier(run, frontier) is frontier
+    assert prepare_run(run, frontier)
+    assert discover(run, frontier, fetcher)
+    assert drop_stale_observations(run, frontier)
+    assert begin_crawl(run)
+    batch = select_batch(run, frontier)
+    assert batch is not None
+    (entry,) = batch
+    assert entry.identity == SEED
+    return run, frontier, entry
+
+
+def known_walk(
+    out_dir: Path,
+    again: FakeFetcher,
+    *,
+    max_age: timedelta | None = None,
+    clock: FixedClock | None = None,
+) -> tuple[Run, Frontier, LadderWalk]:
+    """The seed stored by a first run, then a second run's walk of it, settled."""
+    mirror = first_synced(out_dir, seed_site())
+    run, frontier, entry = known_entry(mirror, again, max_age=max_age, clock=clock)
+    walk = fetch_entry(run, entry, again)
+    assert walk is not None
+    (attempt,) = walk.attempts
+    assert prepare_attempt(attempt)
+    assert settle_walk(attempt)
+    return run, frontier, walk
+
+
+def test_entity_optional_Run_max_age(tmp_path: Path) -> None:
+    """Verify optional field Run.max_age accepts null and non-null values.
+
+    Null: no page goes stale, so two minutes later the known seed is fetched conditionally
+    and answered 304, its row unchanged. A duration it outlived: the seed is in
+    run.forced_refetch, fetched with no validators, and its unchanged raw document is
+    reconverted, its row done (PrepareRun, FetchEntry, DisposeFetch).
+    """
+    never = first_synced(tmp_path / "null", seed_site())
+    again = FakeFetcher({SEED: not_modified(SEED)})
+    result = synced_again(never, again, clock=FixedClock(STALE))
+    assert result.run.max_age is None
+    assert result.run.forced_refetch == frozenset()
+    assert again.validators[-1] == Validators(etag=SEED_ETAG, last_modified=STAMP)
+    row = result.frontier.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.unchanged
+
+    aged = first_synced(tmp_path / "duration", seed_site())
+    forced = FakeFetcher({SEED: html_response(SEED, PAGE)})
+    result = synced_again(aged, forced, max_age=MAX_AGE, clock=FixedClock(STALE))
+    assert result.run.max_age == MAX_AGE
+    assert result.run.forced_refetch == frozenset({SEED})
+    assert forced.requests[-1] == SEED
+    assert forced.validators[-1] is None
+    row = result.frontier.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.done
+    (page,) = aged.pages
+    assert page.last_stored_run == SECOND_RUN
+
+
+def test_entity_fields_LadderWalk(tmp_path: Path) -> None:
+    """Verify all declared fields on LadderWalk are present with correct types.
+
+    A known page's walk on a second run: conditional, settled on its one http try. The
+    projections: soft_suspect holds no attempt (no soft verdict), ok_http the ok,
+    unblocked http attempt of a 200 and none of a 304.
+    """
+    run, _, walk = known_walk(tmp_path / "ok", FakeFetcher({SEED: html_response(SEED, PAGE)}))
+    assert_fields(
+        walk,
+        (
+            "entry",
+            "host",
+            "tiers",
+            "conditional",
+            "escalated",
+            "challenge_offered",
+            "standing",
+            "status",
+            "attempts",
+            "soft_suspect",
+            "ok_http",
+            "render_needed",
+        ),
+    )
+    (attempt,) = walk.attempts
+    assert walk.entry.identity == SEED
+    assert walk.host is run.host(HOST)
+    assert walk.tiers == (Tier.http,)
+    assert walk.conditional is True
+    assert (walk.escalated, walk.challenge_offered) == (False, False)
+    assert walk.standing is attempt
+    assert walk.status is WalkStatus.settled
+    assert list(walk.soft_suspect) == []
+    assert list(walk.ok_http) == [attempt]
+    assert walk.render_needed is False
+    _, _, unmodified = known_walk(tmp_path / "304", FakeFetcher({SEED: not_modified(SEED)}))
+    assert list(unmodified.ok_http) == []
+
+
+def test_transition_edge_FrontierEntry_in_progress_unchanged(tmp_path: Path) -> None:
+    """Verify transition in_progress -> unchanged on FrontierEntry.status is reachable via a witnessing rule.
+
+    DisposeFetch: a 304 for a known page settles its row unchanged and delivers an
+    unchanged candidate.
+    """  # noqa: E501  The obligation's description, quoted.
+    _, frontier, walk = known_walk(tmp_path, FakeFetcher({SEED: not_modified(SEED)}))
+    assert [row.status for row in frontier.entries] == [FrontierStatus.in_progress]
+    delivered = dispose_fetch(walk)
+    assert isinstance(delivered, CandidateDelivered)
+    assert delivered.outcome is CandidateOutcome.unchanged
+    assert walk.entry.status is FrontierStatus.unchanged
+
+
+def test_transition_edge_FrontierEntry_unchanged_pending(tmp_path: Path) -> None:
+    """Verify transition unchanged -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    A second run leaves the known seed's row unchanged; PrepareRun of the third re-pends
+    it, as it does every written page's row.
+    """  # noqa: E501  The obligation's description, quoted.
+    mirror = first_synced(tmp_path, seed_site())
+    second = synced_again(mirror, FakeFetcher({SEED: not_modified(SEED)}))
+    row = second.frontier.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.unchanged
+    third = start_run(update_request(mirror, run_id=THIRD_RUN), FixedClock())
+    assert third is not None
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    assert prepare_run(third, frontier)
+    reloaded = frontier.entry(SEED)
+    assert reloaded is not None
+    assert reloaded.status is FrontierStatus.pending
+
+
+def test_transition_edge_FrontierEntry_done_pending(tmp_path: Path) -> None:
+    """Verify transition done -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    The first run stores the seed and settles its row done; PrepareRun of the second
+    re-pends the row of every written page the scope admits.
+    """  # noqa: E501  The obligation's description, quoted.
+    mirror = first_synced(tmp_path, seed_site())
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    row = frontier.entry(SEED)
+    assert row is not None
+    assert [entry.status for entry in frontier.entries] == [FrontierStatus.done]
+    second = start_run(update_request(mirror), FixedClock())
+    assert second is not None
+    assert prepare_run(second, frontier)
+    assert row.status is FrontierStatus.pending
+
+
+def snapshot_of(out_dir: Path) -> tuple[Run, Frontier, Host, SitemapSnapshot]:
+    """A run whose host is open and whose frontier holds MAPS' snapshot, both validators."""
+    fetcher = site(robots=declaring(MAPS))
+    run, frontier, host = host_open(out_dir, fetcher)
+    fresh = validated(xml_response(MAPS, urlset((ORPHAN, LASTMOD))))
+    snapshot = accept_fresh_sitemap(
+        run, frontier, MAPS, dataclasses.replace(fresh, etag=MAPS_ETAG)
+    )
+    assert snapshot is not None
+    return run, frontier, host, snapshot
+
+
+def test_rule_success_ReuseUnchangedSitemap(tmp_path: Path) -> None:
+    """Verify rule ReuseUnchangedSitemap succeeds when all preconditions are met.
+
+    A 304 to a sitemap with a snapshot raises SitemapEntriesFound with the snapshot's
+    is_index and entries, which ExpandSitemapEntries treats as a fresh read; the
+    snapshot itself is not changed.
+    """
+    run, frontier, host, snapshot = snapshot_of(tmp_path)
+    reused = reuse_unchanged_sitemap(run, frontier, MAPS, not_modified(MAPS))
+    assert reused is snapshot
+    assert (reused.is_index, reused.etag, reused.last_modified) == (False, MAPS_ETAG, STAMP)
+    assert reused.entries == (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),)
+    assert frontier.sitemap_snapshots == [snapshot]
+    children = expand_sitemap_entries(
+        run, frontier, host, MAPS, reused.entries, is_index=reused.is_index
+    )
+    assert children == []
+    row = frontier.entry(ORPHAN)
+    assert row is not None
+    assert row.sitemap_lastmod == LASTMOD
+
+
+def test_rule_failure_ReuseUnchangedSitemap_1(tmp_path: Path) -> None:
+    """Verify rule ReuseUnchangedSitemap is rejected when requires clause fails.
+
+    requires: response.not_modified. A 200 or a 500 to a sitemap with a snapshot is not
+    reused.
+    """
+    run, frontier, _, snapshot = snapshot_of(tmp_path)
+    fresh = xml_response(MAPS, urlset((ORPHAN, NEWER_LASTMOD)))
+    assert reuse_unchanged_sitemap(run, frontier, MAPS, fresh) is None
+    failed = xml_response(MAPS, "", status=SERVER_ERROR)
+    assert reuse_unchanged_sitemap(run, frontier, MAPS, failed) is None
+    assert snapshot.entries == (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),)
+    assert frontier.entry(ORPHAN) is None
+
+
+def test_rule_failure_ReuseUnchangedSitemap_2(tmp_path: Path) -> None:
+    """Verify rule ReuseUnchangedSitemap is rejected when requires clause fails.
+
+    requires: exists snapshot. A 304 to a sitemap with no snapshot meets no rule.
+    """
+    run, frontier, _ = host_open(tmp_path, site(robots=declaring(MAPS)))
+    assert reuse_unchanged_sitemap(run, frontier, MAPS, not_modified(MAPS)) is None
+    assert frontier.sitemap_snapshots == []
+    assert run.discovery_failures == []
+
+
+# Guarantees and black boxes of the incremental path (no obligation id; hand-written).
+
+
+def test_a_304_for_a_known_page_keeps_its_raw_digest_and_takes_the_304s_validators(
+    tmp_path: Path,
+) -> None:
+    """DisposeFetch's not-modified branch: unchanged, known.raw_digest, the 304's validators.
+
+    A 304 is not counted in host.fetched; the candidate's sitemap_lastmod is the row's.
+    """
+    again = FakeFetcher({SEED: not_modified(SEED, etag=NEW_ETAG)})
+    run, _, walk = known_walk(tmp_path, again)
+    known = run.target.known_page(SEED)
+    assert known is not None
+    delivered = dispose_fetch(walk)
+    assert isinstance(delivered, CandidateDelivered)
+    assert delivered.run_id == SECOND_RUN
+    assert delivered.mirror is run.target
+    assert (delivered.requested_identity, delivered.source_url) == (SEED, SEED)
+    assert delivered.redirect_hops == ()
+    assert delivered.depth == 0
+    assert delivered.tier is Tier.http
+    assert delivered.content is None
+    assert delivered.raw_digest == known.raw_digest
+    assert (delivered.etag, delivered.last_modified) == (NEW_ETAG, None)
+    assert delivered.sitemap_lastmod == walk.entry.sitemap_lastmod
+    assert walk.host.fetched == 0
+    assert walk.entry.status is FrontierStatus.unchanged
+
+
+def test_a_raw_unchanged_answer_counts_as_fetched_and_is_unchanged(tmp_path: Path) -> None:
+    """DisposeFetch's raw_unchanged branch: the same raw document under the same signature.
+
+    host.fetched counts it; the candidate is unchanged with the response's validators.
+    """
+    plain = html_response(SEED, PAGE)
+    run, _, walk = known_walk(tmp_path, FakeFetcher({SEED: plain}))
+    delivered = dispose_fetch(walk)
+    assert isinstance(delivered, CandidateDelivered)
+    assert delivered.outcome is CandidateOutcome.unchanged
+    assert delivered.raw_digest == plain.raw_digest
+    known = run.target.known_page(SEED)
+    assert known is not None
+    assert delivered.raw_digest == known.raw_digest
+    assert (delivered.etag, delivered.last_modified) == (None, None)
+    assert walk.host.fetched == 1
+    assert walk.entry.status is FrontierStatus.unchanged
+
+
+def test_a_changed_raw_document_of_a_known_page_is_fetched_and_converted(tmp_path: Path) -> None:
+    """DisposeFetch's PageFetched branch now for a known page: its raw document changed.
+
+    ConvertFetched delivers it as converted; the row stays in progress for the mirror.
+    """
+    again = FakeFetcher({SEED: html_response(SEED, CHANGED_PAGE)})
+    run, _, walk = known_walk(tmp_path, again)
+    assert dispose_fetch(walk) is True
+    assert walk.host.fetched == 1
+    assert walk.entry.status is FrontierStatus.in_progress
+    delivered = convert_fetched(run, walk.entry, walk)
+    assert delivered is not None
+    assert delivered.outcome is CandidateOutcome.converted
+
+
+def test_raw_unchanged_is_defeated_by_a_forced_refetch_and_a_new_signature(
+    tmp_path: Path,
+) -> None:
+    """A page in run.forced_refetch, or processed under another signature, is reconverted.
+
+    The same raw document raises PageFetched rather than an unchanged candidate.
+    """
+    _, _, forced = known_walk(
+        tmp_path / "forced",
+        FakeFetcher({SEED: html_response(SEED, PAGE)}),
+        max_age=MAX_AGE,
+        clock=FixedClock(STALE),
+    )
+    assert dispose_fetch(forced) is True
+    assert forced.entry.status is FrontierStatus.in_progress
+
+    mirror = first_synced(tmp_path / "signature", seed_site())
+    mirror.processing_signature = "signature-2"
+    again = FakeFetcher({SEED: html_response(SEED, PAGE)})
+    run, _, entry = known_entry(mirror, again)
+    walk = fetch_entry(run, entry, again)
+    assert walk is not None
+    (attempt,) = walk.attempts
+    assert settle_walk(attempt)
+    assert dispose_fetch(walk) is True
+    assert entry.status is FrontierStatus.in_progress
+
+
+def test_raw_unchanged_is_defeated_by_a_redirect_hop(tmp_path: Path) -> None:
+    """A response that arrived through a redirect is never unchanged (DisposeFetch guidance).
+
+    Following a redirect is the lifecycle slice's, so the walk stops there rather than
+    delivering an unchanged candidate.
+    """
+    hopped = dataclasses.replace(html_response(SEED, PAGE), redirect_hops=(OTHER,))
+    _, _, walk = known_walk(tmp_path, FakeFetcher({SEED: hopped}))
+    with pytest.raises(NotInThisSlice):
+        dispose_fetch(walk)
+    assert walk.entry.status is FrontierStatus.in_progress
+
+
+def test_fetch_entry_is_unconditional_past_max_age_under_a_new_signature_or_a_newer_lastmod(
+    tmp_path: Path,
+) -> None:
+    """FetchEntry's conditional: false, and no validators sent, in each of three cases.
+
+    A page past max_age, a page processed under another signature, and a row whose
+    sitemap lastmod is newer than the page's; otherwise a known page is conditional.
+    """
+    cases: list[tuple[str, timedelta | None, FixedClock | None]] = [
+        ("conditional", None, None),
+        ("stale", MAX_AGE, FixedClock(STALE)),
+        ("signature", None, None),
+        ("lastmod", None, None),
+    ]
+    sent: dict[str, tuple[bool, Validators | None]] = {}
+    for name, max_age, clock in cases:
+        mirror = first_synced(tmp_path / name, seed_site())
+        if name == "signature":
+            mirror.processing_signature = "signature-2"
+        again = FakeFetcher({SEED: html_response(SEED, PAGE)})
+        run, _, entry = known_entry(mirror, again, max_age=max_age, clock=clock)
+        if name == "lastmod":
+            entry.sitemap_lastmod = NEWER_LASTMOD
+        walk = fetch_entry(run, entry, again)
+        assert walk is not None
+        sent[name] = (walk.conditional, again.validators[-1])
+    assert sent == {
+        "conditional": (True, Validators(etag=SEED_ETAG, last_modified=STAMP)),
+        "stale": (False, None),
+        "signature": (False, None),
+        "lastmod": (False, None),
+    }
+
+
+def test_a_conditional_walk_sends_both_stored_validators(tmp_path: Path) -> None:
+    """A conditional http try sends the stored ETag (If-None-Match) and Last-Modified."""
+    mirror = first_synced(tmp_path, seed_site())
+    again = ScriptedFetcher({}, {SEED: [not_modified(SEED)]})
+    synced_again(mirror, again)
+    assert again.count(SEED) == 1
+    assert again.validators[again.requests.index(SEED)] == Validators(
+        etag=SEED_ETAG, last_modified=STAMP
+    )
+
+
+def test_record_unchanged_keeps_a_stored_validator_and_takes_a_newer_lastmod(
+    tmp_path: Path,
+) -> None:
+    """RecordUnchanged keeps what the answer lacks and takes the sitemap's newer lastmod.
+
+    The second run's sitemap names the seed with a newer lastmod, so its fetch is
+    unconditional; the answer is the same raw document with no validator, so the page
+    keeps both of its own and takes the lastmod, and the third run is conditional again.
+    """
+    first = seed_site()
+    first.responses[ROBOTS] = declaring(MAPS)
+    first.responses[MAPS] = xml_response(MAPS, urlset((SEED, LASTMOD)))
+    mirror = first_synced(tmp_path, first)
+    (page,) = mirror.pages
+    assert page.sitemap_lastmod == LASTMOD
+
+    newer = FakeFetcher(
+        {
+            ROBOTS: declaring(MAPS),
+            MAPS: xml_response(MAPS, urlset((SEED, NEWER_LASTMOD))),
+            SEED: html_response(SEED, PAGE),
+        }
+    )
+    second = synced_again(mirror, newer)
+    assert newer.validators[newer.requests.index(SEED)] is None
+    row = second.frontier.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.unchanged
+    assert (page.etag, page.last_modified) == (SEED_ETAG, STAMP)
+    assert page.sitemap_lastmod == NEWER_LASTMOD
+    assert page.last_seen_run == SECOND_RUN
+    assert page.last_stored_run == 1
+
+    third = FakeFetcher(
+        {
+            ROBOTS: declaring(MAPS),
+            MAPS: xml_response(MAPS, urlset((SEED, NEWER_LASTMOD))),
+            SEED: not_modified(SEED),
+        }
+    )
+    synced_again(mirror, third, run_id=THIRD_RUN)
+    assert third.validators[third.requests.index(SEED)] == Validators(
+        etag=SEED_ETAG, last_modified=STAMP
+    )
+
+
+def sitemaps_json(out_dir: Path) -> dict[str, list[dict[str, object]]]:
+    """<out>/.rovo/sitemaps.json, parsed, its key order kept."""
+    data = json.loads((out_dir / ".rovo" / "sitemaps.json").read_text(encoding="utf-8"))
+    assert isinstance(data, dict)
+    return data
+
+
+def test_sitemap_snapshots_round_trip_through_sitemaps_json(tmp_path: Path) -> None:
+    """save_frontier writes .rovo/sitemaps.json beside frontier.json; load_frontier reads it.
+
+    One row per snapshot, sorted by URL, keys sorted, entries in document order; an
+    absent file is no snapshot.
+    """
+    run, frontier, _ = host_open(tmp_path, site())
+    later = validated(xml_response(MAPS, urlset((ORPHAN, LASTMOD), (OUT_OF_SCOPE, None))))
+    earlier = xml_response(MAPS_INDEX, sitemapindex(MAPS))
+    assert accept_fresh_sitemap(run, frontier, MAPS, later) is not None
+    assert accept_fresh_sitemap(run, frontier, MAPS_INDEX, earlier) is not None
+    save_frontier(frontier)
+    data = sitemaps_json(tmp_path)
+    assert list(data) == ["snapshots"]
+    rows = data["snapshots"]
+    assert [row["url"] for row in rows] == sorted([MAPS, MAPS_INDEX])
+    for row in rows:
+        assert list(row) == sorted(row)
+    by_url = {row["url"]: row for row in rows}
+    assert by_url[MAPS] == {
+        "entries": [{"lastmod": LASTMOD, "loc": ORPHAN}, {"lastmod": None, "loc": OUT_OF_SCOPE}],
+        "etag": SEED_ETAG,
+        "is_index": False,
+        "last_modified": STAMP,
+        "url": MAPS,
+    }
+    assert by_url[MAPS_INDEX]["is_index"] is True
+
+    loaded = load_frontier(run.target)
+    assert loaded is not None
+    kept = {
+        snapshot.url: (snapshot.etag, snapshot.last_modified, snapshot.is_index, snapshot.entries)
+        for snapshot in loaded.sitemap_snapshots
+    }
+    assert kept == {
+        MAPS: (
+            SEED_ETAG,
+            STAMP,
+            False,
+            (
+                SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),
+                SitemapEntry(loc=OUT_OF_SCOPE, lastmod=None),
+            ),
+        ),
+        MAPS_INDEX: (None, None, True, (SitemapEntry(loc=MAPS, lastmod=None),)),
+    }
+    assert all(snapshot.frontier is loaded for snapshot in loaded.sitemap_snapshots)
+    (tmp_path / ".rovo" / "sitemaps.json").unlink()
+    reloaded = load_frontier(run.target)
+    assert reloaded is not None
+    assert reloaded.sitemap_snapshots == []
+
+
+def test_a_dry_run_saves_the_sitemap_snapshots(tmp_path: Path) -> None:
+    """A dry run saves the frontier, and with it the snapshots of the sitemaps it read."""
+    fetcher = site(robots=declaring(MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, LASTMOD)))
+    mirror = new_mirror(tmp_path)
+    run_crawl(dataclasses.replace(request(mirror), dry_run=True), None, fetcher, FixedClock())
+    rows = sitemaps_json(tmp_path)["snapshots"]
+    assert [row["url"] for row in rows] == [MAPS]
+
+
+def test_a_second_discovery_sends_the_snapshots_validators_and_reuses_it_on_304(
+    tmp_path: Path,
+) -> None:
+    """FetchSitemap sends a saved snapshot's validators; a 304 reuses its entries.
+
+    The orphan's observation is seen again on the second run, which only the reused
+    entries can give, since the sitemap's body was not sent; the orphan stays admitted.
+    """
+    fresh = dataclasses.replace(
+        xml_response(MAPS, urlset((ORPHAN, LASTMOD))), etag=MAPS_ETAG, last_modified=STAMP
+    )
+    first = seed_site()
+    first.responses[ROBOTS] = declaring(MAPS)
+    first.responses[MAPS] = fresh
+    first.responses[ORPHAN] = validated(html_response(ORPHAN, PAGE))
+    mirror = first_synced(tmp_path, first)
+    again = FakeFetcher(
+        {
+            ROBOTS: declaring(MAPS),
+            MAPS: not_modified(MAPS),
+            SEED: not_modified(SEED),
+            ORPHAN: not_modified(ORPHAN),
+        }
+    )
+    second = synced_again(mirror, again)
+    assert again.validators[again.requests.index(MAPS)] == Validators(
+        etag=MAPS_ETAG, last_modified=STAMP
+    )
+    assert again.validators[again.requests.index(ROBOTS)] is None
+    assert again.validators[again.requests.index(LLMS_TXT)] is None
+    seen = observation(second.frontier, ORPHAN)
+    assert seen is not None
+    assert seen.last_seen_run == SECOND_RUN
+    assert second.discovery_failed == ()
+    row = second.frontier.entry(ORPHAN)
+    assert row is not None
+    assert row.status is FrontierStatus.unchanged

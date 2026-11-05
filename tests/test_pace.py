@@ -30,6 +30,7 @@ from fakes import (
 from rovo import _commands
 from rovo._convert import profiles
 from rovo._crawl import pace
+from rovo._crawl.fetch import Validators
 from rovo._crawl.model import (
     CONFIG,
     CrawlPolicy,
@@ -669,3 +670,30 @@ def test_waits_never_hang_on_a_timer_that_stands_still(tmp_path: Path) -> None:
     assert clock.sleeps
     assert len(clock.sleeps) <= len(fetcher.requests)
     assert all(0 <= seconds <= POLITE_DELAY.total_seconds() for seconds in clock.sleeps)
+
+
+# --- Conditional sitemap reads (T14) ----------------------------------------------------
+
+
+def test_fetch_resource_sends_its_validators_on_every_try(tmp_path: Path) -> None:
+    """fetch_resource passes the validators it is given to every try, and none by default.
+
+    crawl.allium FetchSitemap: fetch_resource(url, snapshot?.etag, snapshot?.last_modified,
+    run, host). A 503 is retried; the retry carries the same validators. Called without
+    validators, as robots.txt and llms.txt always are, every try sends none.
+    """
+    maps = f"{SITE}/maps/guide.xml"
+    busy = text_response(maps, "", status=SERVICE_UNAVAILABLE)
+    fetcher = ScriptedFetcher(polite(), {maps: [busy, busy]})
+    run = start_run(request(new_mirror(tmp_path)), FixedClock())
+    assert run is not None
+    assert create_frontier(run, None) is not None
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    validators = Validators(etag='"map-1"', last_modified="Sat, 31 Oct 2026 12:00:00 GMT")
+    pace.fetch_resource(maps, run, host, fetcher, validators)
+    assert fetcher.requests[1:] == [maps, maps, maps]
+    assert fetcher.validators[1:] == [validators] * len(["503", "503", "answered"])
+    pace.fetch_resource(maps, run, host, fetcher)
+    assert fetcher.requests[-1] == maps
+    assert fetcher.validators[-1] is None

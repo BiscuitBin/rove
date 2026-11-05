@@ -17,7 +17,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from rovo._crawl.fetch import Fetcher
+from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import CONFIG, CrawlPolicy, Host, HostBackedOff, Run, SiteResponse
 
 
@@ -147,7 +147,13 @@ def pause_for_cap(host: Host) -> HostBackedOff:
     return backed_off
 
 
-def fetch_resource(url: str, run: Run, host: Host, fetcher: Fetcher) -> SiteResponse:
+def fetch_resource(
+    url: str,
+    run: Run,
+    host: Host,
+    fetcher: Fetcher,
+    validators: Validators | None = None,
+) -> SiteResponse:
     """crawl.allium fetch_resource: the http tier under the host's limiter, with retries.
 
     Its tries are a page's http tries (FetchRobots guidance): a retryable answer is
@@ -155,7 +161,8 @@ def fetch_resource(url: str, run: Run, host: Host, fetcher: Fetcher) -> SiteResp
     HostBackedOff; every try whose retryable answer carries a Retry-After while
     honor_retry_after holds adds one to the host's retry_after_honored. A Retry-After
     past retry_after_cap ends the tries with that answer, with no wait and no pause;
-    whether it retires or pauses the host is the caller's to say. No redirect is
+    whether it retires or pauses the host is the caller's to say. Every try sends the
+    validators given, which only a sitemap with a snapshot has. No redirect is
     followed. The size covers every try's bytes; no try counts as a fetch attempt.
     """
     policy = run.policy
@@ -163,7 +170,7 @@ def fetch_resource(url: str, run: Run, host: Host, fetcher: Fetcher) -> SiteResp
     try_ = 1
     while True:
         wait_turn(host)
-        response = fetcher.fetch(url)
+        response = fetcher.fetch(url, validators=validators)
         received += response.size
         if response.retryable and response.retry_after is not None and policy.honor_retry_after:
             host.retry_after_honored += 1

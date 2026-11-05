@@ -142,7 +142,10 @@ the scripted tests make flaky and a page under a path its `robots.txt` disallows
 retries and the partial exit. `tests/e2e/test_discovery_sync.py` generates its sites
 into a temporary directory, since a sitemap names absolute URLs with the server's port,
 and syncs them to check sitemaps, sitemap indexes, `llms.txt`, the observations, the
-page budget and `rovo sync --dry-run`.
+page budget and `rovo sync --dry-run`. `tests/e2e/test_second_sync.py` generates its
+sites the same way and syncs each again: an unchanged site rewrites no file, and a
+changed page, a page answered with the same document and `max_age` are each handled
+incrementally.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`
