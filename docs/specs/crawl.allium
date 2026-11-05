@@ -239,6 +239,7 @@ entity Run {
     targets: Set<String>                -- operator-named identities, or an owner-testing run's seeds
     forced_refetch: Set<String>         -- refetched without validators: targets, else pages past max_age
     active_urls: Set<String>            -- owner testing: seeds plus admitted links
+    recheckable_urls: Set<String>       -- full run: settled rows PrepareRun left alone, re-pended once when discovery names them (Enqueue)
     unresolved_urls: Set<String>        -- snapshot fixed when the run ends
     error: String?                      -- the uncaught error that ended the run, when one did
     interrupt_requested: Boolean
@@ -616,7 +617,7 @@ rule StartRun {
         owned_hosts: owned_hosts, requested_owner_test: requested_owner_test,
         policy: policy, dry_run: dry_run, interactive: interactive,
         render_mode: render_mode, stealth_mode: stealth_mode, max_age: max_age,
-        refollow_unchanged_links: refollow_unchanged_links, targets: targets, forced_refetch: {}, active_urls: {}, unresolved_urls: {},
+        refollow_unchanged_links: refollow_unchanged_links, targets: targets, forced_refetch: {}, active_urls: {}, recheckable_urls: {}, unresolved_urls: {},
         error: null, interrupt_requested: false, crawling: false, budget_stopped: false,
         bytes_fetched: 0, fetch_attempts: 0, started_at: now, status: running
     )
@@ -641,7 +642,8 @@ rule AttachFrontier {
 -- every failed, blocked and skipped row the scope admits; there is no
 -- resume flag. Removed pages in scope are rechecked last. A page outside
 -- the scope is left for finalisation to retire, unfetched. A targeted run
--- re-pends only its targets.
+-- re-pends only its targets. A full run notes its absent, duplicate and
+-- done rows as recheckable, so its discovery may re-pend one (Enqueue).
 rule PrepareRun {
     when: FrontierAttached(run)
     requires: run.status = running
@@ -675,6 +677,7 @@ rule PrepareRun {
                         priority: config.start_priority, attempts: 0, status: pending
                     )
         else:
+            run.recheckable_urls = (frontier.entries where status in {absent, duplicate, done}) -> identity
             for p in run.target.written_pages where run.target.scope.within_bounds(source_url):
                 let recheck = FrontierEntry{frontier: frontier, identity: p.identity}
                 if exists recheck:
@@ -817,6 +820,17 @@ rule FetchRobots {
         -- Retry-After, with retries, and follows at most
         -- discovery_max_redirects redirects within the allowed hosts
         -- without revisiting a URL; anything else comes back as an error.
+        -- Decided: it sends validators on its first request only, never on
+        -- a hop; a 3xx without a usable Location is not followed and comes
+        -- back as an error answer. On a sitemap's or llms.txt's redirect,
+        -- each hop first reads the destination origin's robots.txt when
+        -- the run has not read it (RobotsRequested, as for a page's hop:
+        -- AttemptTier), and a hop robots.txt disallows is not requested:
+        -- the fetch comes back as an error, "redirect disallowed by
+        -- robots.txt". robots.txt's own redirects (here) are exempt, since
+        -- robots.txt is not governed by robots.txt (RFC 9309): they are
+        -- bounded by the allowed hosts, the hop limit and the no-revisit
+        -- test alone, so they never request robots.txt again.
         -- Its size covers every byte its retries received. It never
         -- classifies blocks and never feeds the breaker.
         -- Whatever it fetches (robots.txt here, a sitemap in FetchSitemap,
@@ -1198,6 +1212,8 @@ rule ExpandSitemapEntries {
         -- resolve_url(base, ref) resolves ref against base as RFC 3986
         -- section 5 resolves a reference; a ref it cannot resolve (an
         -- unclosed IPv6 bracket, say) gives a URL with no identity.
+        -- Decided: the base is the sitemap URL requested (url), even when
+        -- a redirect answered from another URL.
         -- A loc whose URL has no identity (identity_of is null) is skipped
         -- silently: it is neither observed nor discovered, is not queued,
         -- counts toward neither sitemap_children_read nor
@@ -1240,6 +1256,8 @@ rule ReadLlmsTxt {
         -- inline Markdown link in the file, [text](destination) with or
         -- without a title, resolved against base as resolve_url resolves
         -- (ExpandSitemapEntries), each taken once, in the order first met.
+        -- Decided: the base is the llms.txt URL requested, even when a
+        -- redirect answered from another URL.
         -- fetch_resource tries llms.txt as FetchRobots says, retries,
         -- HostBackedOff and retry_after_honored included; a Retry-After
         -- past retry_after_cap ends the tries with that answer, which is
@@ -1268,14 +1286,28 @@ rule RecordObservation {
 -- Dedup is by identity. Rediscovery lowers the depth to the shortest known
 -- route, takes a newer sitemap lastmod (which forces a refetch), and
 -- promotes a deferred recheck; it never changes a row's status, except
--- that an owner-testing run re-pends a newly admitted unresolved row once.
+-- that an owner-testing run re-pends a newly admitted unresolved row once,
+-- and a full run re-pends once a row settled before it that PrepareRun
+-- leaves alone. Decided by the maintainer: such a row (an absent row with
+-- no page, a duplicate row, or a done row whose identity is no page's
+-- own, such as the requested identity of a moved page) is rechecked when
+-- the full run's discovery names its URL again, by a page link, a sitemap
+-- entry or llms.txt; a row nothing names stays settled. A row settled in
+-- this run is not re-pended by its rediscovery. Removed pages are
+-- re-pended by PrepareRun, as before.
 rule Enqueue {
     when: UrlDiscovered(run, url, depth, via, priority, from?, lastmod?)
     let frontier = Frontier{mirror: run.target}
     let existing = FrontierEntry{frontier: frontier, identity: url}
     let newly_admitted = run.is_owner_testing and url not in run.active_urls
+    let rediscovered =
+        url in run.recheckable_urls
+        and exists existing and existing.status in {absent, duplicate, done}
+        and not exists mirror/Page{mirror: run.target, identity: url}
     ensures:
         run.active_urls = run.active_urls + { url }
+        if url in run.recheckable_urls:
+            run.recheckable_urls = run.recheckable_urls - { url }
         if not exists existing:
             FrontierEntry.created(
                 frontier: frontier, identity: url, depth: depth, discovered_via: via,
@@ -1283,7 +1315,7 @@ rule Enqueue {
                 priority: priority, attempts: 0, status: pending
             )
         else:
-            if newly_admitted:
+            if newly_admitted or rediscovered:
                 existing.status = pending
             if depth < existing.depth:
                 existing.depth = depth
@@ -1565,7 +1597,20 @@ rule AttemptTier {
         -- and recorded in redirect_hops; an out-of-scope, looping or
         -- over-limit redirect is not followed and comes back as
         -- redirect_location with its redirect_stop; only an out-of-scope
-        -- stop says the page moved away. Every response counts toward
+        -- stop says the page moved away. Decided: a hop is in scope when
+        -- the scope's within_bounds admits its target (a redirect is not a
+        -- link and carries no depth), and a revisit is a target whose
+        -- identity an earlier URL of the chain has. The validators of a
+        -- conditional fetch go on the first request only, never on a hop.
+        -- A 3xx without a usable Location is not followed and is no
+        -- unfollowed redirect: the page fails with its status text
+        -- (DisposeFetch). Before each hop the destination origin's
+        -- robots.txt is read when the run has not read it (RobotsRequested,
+        -- as ReadRobotsForNewOrigin reads it, the destination host opened
+        -- first as OpenHostForEntry opens one when the run has none); a hop
+        -- robots.txt disallows is not requested and the response is an
+        -- error, "redirect disallowed by robots.txt", which HttpRetry
+        -- retries as it does any error answer. Every response counts toward
         -- max_bytes the moment it arrives, retries and discarded renders
         -- included. Enabled controls wait for a free concurrency
         -- slot, any host pause and a rate token. There is no burst: the
@@ -1920,7 +1965,8 @@ rule DisposeFetch {
                 PageFetched(run: run, entry: entry, walk: walk)
 
     @guidance
-        -- A 304 for a URL with no stored page falls through to failed. A
+        -- A 304 for a URL with no stored page falls through to failed, and
+        -- so does a 3xx without a usable Location, with its status text. A
         -- redirect loop or an over-limit chain fails the entry and never
         -- retires its page, since nothing says the target left the scope. A
         -- target is always reconverted, even when its raw HTML is
@@ -2064,9 +2110,16 @@ rule RefollowUnchangedLinks {
         -- page's converted body, the links links.jsonl is written from),
         -- every kind alike: each target identity is tested again against
         -- the scope in force, so a link that was external under the old
-        -- scope is queued when the new one admits it. Navigation links are
-        -- not stored with a page, so an unchanged page re-follows its
-        -- content links only. Enqueue deduplicates, so a link already
+        -- scope is queued when the new one admits it. Decided: a stored
+        -- target identity keeps the normalisation of the scope in force at
+        -- that finalisation, so a parameter a later
+        -- meaningful_query_params would keep is not recovered until the
+        -- page changes. Decided: only content links are stored; navigation
+        -- links are not stored with a page, so an unchanged page re-follows
+        -- its content links only. Decided: a page stored by a run that
+        -- crashed before finalisation has no stored links
+        -- (mirror/RefreshPage drops them), so it re-follows nothing until
+        -- the next finalised sync. Enqueue deduplicates, so a link already
         -- queued changes nothing but a shorter depth. The setting is the
         -- configuration's refollow_unchanged_links (rovo.toml's
         -- crawl.refollow_unchanged_links, true by default), carried on
@@ -2264,7 +2317,9 @@ surface SiteExchange {
     @guarantee RedirectsFollowedOnlyInScope
         -- A redirect is followed only while its target stays in scope, at
         -- most discovery_max_redirects hops, never revisiting a URL;
-        -- anything else is answered as an unfollowed redirect.
+        -- anything else is answered as an unfollowed redirect, except a
+        -- hop robots.txt disallows, which is an error, and a 3xx without a
+        -- usable Location, which is not followed.
 
     @guarantee BrowserRendersContentNeverAnswersBlocks
         -- In a standard run the browser tier renders JavaScript content

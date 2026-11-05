@@ -157,7 +157,8 @@ value CrawlScope {
 -- The YAML block at the top of every page file. Keys are sorted and absent
 -- values are omitted. It carries no wall-clock time and none of the site's
 -- validators: fetch times, etag and last_modified live in the manifest,
--- so an unchanged page's file never changes.
+-- so an unchanged page's file never changes. Decided: sitemap_lastmod
+-- stays in it, so a sitemap lastmod that moves rewrites the page file.
 value Frontmatter {
     source_url: String
     title: String
@@ -488,6 +489,8 @@ entity Index {
 -- assign_path, outside the template, and both still reach the frontmatter
 -- and index.jsonl). max_path_chars is the mirror's own parameter, held
 -- within its range by MaxPathCharsInRange; it is not a rovo.toml key.
+-- prune is a rovo.toml key, [mirror] prune: the resolved configuration's
+-- prune (rovo.allium Configuration), false by default.
 config {
     max_path_chars: Integer = 200                  -- the whole mirror-relative path, pages/<host>/ included; within [128, 240]
     collision_hash_chars: Integer = 6
@@ -584,9 +587,10 @@ rule RejectDuplicateCandidate {
         -- honoured). The first store's content stands; this candidate's
         -- requested URL, redirect hops and source URL still become aliases
         -- of the stored page, and a written page the requested URL held
-        -- is merged into it, exactly as a store would have done, so the
-        -- order in which the two URLs were fetched never changes the
-        -- mirror.
+        -- is merged into it, exactly as a store would have done. Decided:
+        -- when the two URLs' content differs, the content of the one
+        -- fetched first stands, so the mirror is deterministic for a given
+        -- frontier order, not for every order.
 }
 
 rule RewriteKnownPage {
@@ -646,7 +650,10 @@ rule MovePage {
         -- A removed record already holding the new identity is replaced:
         -- the live page supersedes it and its archived copy is deleted. An
         -- alias the new identity held is dropped, since a page's identity
-        -- is never an alias.
+        -- is never an alias. Decided: an alias URL rechecked
+        -- (crawl/Enqueue) that now serves its own page moves the page it
+        -- aliased here, as any requested URL whose known page answers
+        -- under a new identity does.
         --
         -- assign_path gives "pages/", the host segment, "/" and a relative
         -- path. The host segment is the identity's host lower-cased, with a
@@ -704,6 +711,19 @@ rule MovePage {
         -- path can reach it, nor _indexes/, .rovo/ or a managed root file.
         -- No name is reserved inside pages/<host>/: _index.md and index.md
         -- there are ordinary page names.
+        --
+        -- Decided: each directory segment below pages/<host>/ is then
+        -- folded, ignoring case, onto the spelling that a path a page
+        -- holds (this page's own included) already uses for that
+        -- directory, so a directory has one spelling across
+        -- the manifest, the tree, index.jsonl and links: with
+        -- pages/<host>/sub/a.md held, /Sub/b gives pages/<host>/sub/b.md,
+        -- and a page at sub/x.md whose URL becomes /Sub/x keeps sub/x.md.
+        -- Where held paths already use several spellings of one directory,
+        -- the spelling of the held path that sorts first by code point is
+        -- taken; existing pages are not moved.
+        -- The last segment, the page file's name, keeps its own spelling
+        -- and meets the collision test below (UniquePagePathIgnoringCase).
         --
         -- A candidate path held by another page (compared ignoring case,
         -- because a case-insensitive file system holds API/ and api/ as one
@@ -917,7 +937,9 @@ rule RecordUnchanged {
         -- A not-modified answer or an unchanged raw document. The page
         -- file is untouched; the stored measurement is carried, not
         -- re-measured. Taking the entry's sitemap lastmod means the same
-        -- lastmod does not force a refetch again. The new etag and
+        -- lastmod does not force a refetch again; a lastmod that moved
+        -- reaches the frontmatter, so PublishPage rewrites the page file
+        -- (Frontmatter). The new etag and
         -- last_modified are kept in the manifest only (Frontmatter). The
         -- page's stored links are queued again by the crawl
         -- (crawl/RefollowUnchangedLinks, on PageStored) unless the run
@@ -1004,6 +1026,25 @@ rule RetirePage {
         -- Pages that linked here keep their links until the next
         -- finalisation re-resolves them as dangling. The first removal is
         -- kept: a removed page is never reported removed again.
+        --
+        -- Decided: the file effects (PageFileMoved, PageFileArchived,
+        -- PageFileDeleted, ArchivedCopyDeleted) are recorded when their
+        -- rule fires at intake and applied in the finalise pass, in the
+        -- order raised and idempotently, before any PublishPage. Pending
+        -- effects compose per page path: a page moved, once or more, and
+        -- then retired in the same run is archived from the path it was
+        -- last published at to _removed/<host>/<the path it was retired
+        -- at>, or under prune that file is deleted; a removed page revived
+        -- and retired again in the same run keeps its archived copy, the
+        -- PageFileArchived cancelling the pending ArchivedCopyDeleted of
+        -- that path and archiving nothing. Decided: a removed page revived
+        -- at a new path (its old one no longer free) and retired again in
+        -- the same run likewise keeps its existing _removed/ copy, its
+        -- last published bytes: the pending ArchivedCopyDeleted is
+        -- cancelled and the never-published new path is not archived, so
+        -- nothing is lost. A directory under pages/ or
+        -- _removed/ that an effect leaves empty is removed, the namespace
+        -- root (pages/ or _removed/) included.
 }
 
 ------------------------------------------------------------
@@ -1358,7 +1399,8 @@ invariant UniquePageIdentity {
 }
 
 -- Paths are unique ignoring case, so the mirror is portable to
--- case-insensitive file systems.
+-- case-insensitive file systems; a directory's spelling is shared by
+-- every path through it (assign_path, MovePage's guidance).
 invariant UniquePagePathIgnoringCase {
     for a in Pages:
         for b in Pages:
@@ -1488,7 +1530,8 @@ surface MirrorContents {
         -- are pure functions of the page bodies, links and configuration,
         -- and no generated file carries a wall-clock time or the site's
         -- validators, so a validator that moves over an unchanged body
-        -- rewrites nothing. A diff of the
+        -- rewrites nothing; a sitemap lastmod that moves is a change
+        -- upstream and rewrites its page's frontmatter. A diff of the
         -- mirror after a sync therefore shows only what changed upstream.
 
     @guarantee DeterministicIndexes
@@ -1545,9 +1588,12 @@ surface PageIntake {
 
     @guarantee EveryCandidateIsSettled
         -- Every delivered candidate is accepted or marked a duplicate in
-        -- the same step, and exactly one of PageStored, CandidateDuplicate,
+        -- the same step, and at most one of PageStored, CandidateDuplicate,
         -- CandidateDiscarded or PageRemoved follows it, so the run can
-        -- settle the frontier entry it came from.
+        -- settle the frontier entry it came from. Exactly one follows
+        -- every candidate but those AcceptAbsentWithoutPage and
+        -- AcceptRedirectedOutWithoutPage accept, which raise none: their
+        -- entry is already settled by crawl/DisposeFetch.
 
     @guarantee ConvertedContentCarriesFetchFlags
         -- A converted candidate's content already carries the fetch flags

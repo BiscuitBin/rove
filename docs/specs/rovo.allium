@@ -58,8 +58,8 @@ use "./convert.allium" as convert
 ------------------------------------------------------------
 
 -- The resolved configuration of one mirror: built-in defaults (config's
--- render_mode, max_depth, fail_on_low_quality and refollow_unchanged_links
--- among them), then rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then
+-- render_mode, max_depth, fail_on_low_quality, refollow_unchanged_links and
+-- prune among them), then rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then
 -- flags, later layers winning key by key. Invalid when the file is
 -- unreadable, a key is unknown or a value is bad, a profile name the
 -- catalogue lacks included; problems names every bad key path. The mirror's
@@ -67,6 +67,9 @@ use "./convert.allium" as convert
 -- "pages/{host}/{path}"), so path_template is not a key and a layer that
 -- sets it names an unknown key; max_path_chars is the mirror's own
 -- parameter, not a key, and lies within [128, 240] (MaxPathCharsInRange).
+-- prune is a key, mirror.allium's prune, in rovo.toml's own [mirror]
+-- section (mirror.prune, ROVO_MIRROR__PRUNE): the mirror uses the
+-- resolved value, and the built-in default is the mirror's (false).
 value Configuration {
     valid: Boolean
     problems: List<String>
@@ -86,6 +89,7 @@ value Configuration {
     stealth_mode: crawl/StealthMode
     max_age: Duration?
     refollow_unchanged_links: Boolean   -- crawl.refollow_unchanged_links: re-queue an unchanged page's stored links
+    prune: Boolean                      -- mirror.prune: delete a removed page's file instead of archiving it (mirror/config.prune)
     fail_on_low_quality: Boolean
     unblocking_provider: String?        -- reserved; any value is a configuration error
 
@@ -255,6 +259,7 @@ config {
     max_depth: Integer = 10
     fail_on_low_quality: Boolean = false
     refollow_unchanged_links: Boolean = true
+    prune: Boolean = mirror/config.prune
 }
 
 ------------------------------------------------------------
