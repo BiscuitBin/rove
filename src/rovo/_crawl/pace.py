@@ -19,7 +19,6 @@ from typing import Protocol
 
 from rovo._crawl.fetch import Fetcher
 from rovo._crawl.model import CONFIG, CrawlPolicy, Host, HostBackedOff, Run, SiteResponse
-from rovo._unfinished import NotInThisSlice
 
 
 class Timer(Protocol):
@@ -120,16 +119,44 @@ def back_off(host: Host, try_: int, retry_after: timedelta | None) -> HostBacked
     return backed_off
 
 
+def past_cap(response: SiteResponse, policy: CrawlPolicy) -> bool:
+    """A retryable answer whose honoured Retry-After is past retry_after_cap.
+
+    FetchRobots' retires_host and the past_cap of FetchSitemap and ReadLlmsTxt.
+    """
+    return (
+        response.retryable
+        and response.retry_after is not None
+        and policy.honor_retry_after
+        and response.retry_after > policy.retry_after_cap
+    )
+
+
+def pause_for_cap(host: Host) -> HostBackedOff:
+    """A speculative probe past the cap: pause the host until now + retry_after_cap.
+
+    paused_until = later_of(paused_until, now + retry_after_cap), never shortening a
+    longer pause; the HostBackedOff carries now + retry_after_cap and is recorded on the
+    run (FetchSitemap, ReadLlmsTxt).
+    """
+    run = host.run
+    until = run.timer.now() + run.policy.retry_after_cap
+    host.paused_until = until if host.paused_until is None else max(host.paused_until, until)
+    backed_off = HostBackedOff(host=host, until=until)
+    run.backoffs.append(backed_off)
+    return backed_off
+
+
 def fetch_resource(url: str, run: Run, host: Host, fetcher: Fetcher) -> SiteResponse:
     """crawl.allium fetch_resource: the http tier under the host's limiter, with retries.
 
     Its tries are a page's http tries (FetchRobots guidance): a retryable answer is
     retried while try < http_attempts, each retry pausing the host and raising a
-    HostBackedOff; every try carrying a Retry-After on a 429 or 503 while
+    HostBackedOff; every try whose retryable answer carries a Retry-After while
     honor_retry_after holds adds one to the host's retry_after_honored. A Retry-After
-    past retry_after_cap retires the host, the breaker slice's trip, so the run stops
-    there. No redirect is followed. The size covers every try's bytes; no try counts as
-    a fetch attempt.
+    past retry_after_cap ends the tries with that answer, with no wait and no pause;
+    whether it retires or pauses the host is the caller's to say. No redirect is
+    followed. The size covers every try's bytes; no try counts as a fetch attempt.
     """
     policy = run.policy
     received = 0
@@ -138,13 +165,9 @@ def fetch_resource(url: str, run: Run, host: Host, fetcher: Fetcher) -> SiteResp
         wait_turn(host)
         response = fetcher.fetch(url)
         received += response.size
-        retry_after = response.retry_after
-        if retry_after is not None and policy.honor_retry_after:
-            if response.may_carry_retry_after:
-                host.retry_after_honored += 1
-            if response.retryable and retry_after > policy.retry_after_cap:
-                raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
-        if not response.retryable or try_ >= CONFIG.http_attempts:
+        if response.retryable and response.retry_after is not None and policy.honor_retry_after:
+            host.retry_after_honored += 1
+        if past_cap(response, policy) or not response.retryable or try_ >= CONFIG.http_attempts:
             return dataclasses.replace(response, size=received)
-        back_off(host, try_, retry_after)
+        back_off(host, try_, response.retry_after)
         try_ += 1

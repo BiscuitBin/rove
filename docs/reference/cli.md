@@ -106,7 +106,8 @@ where robots.txt does not declare them, then `/llms.txt`, each once per run and 
 where robots.txt allows it. A sitemap is an XML `urlset` or `sitemapindex` in any
 namespace; a gzip or plain-text sitemap is not one. A sitemap index's child sitemaps
 are read as they come, only on the host that served the index (a child on another
-host is never requested), at most `sitemap_max_children` (40) per host. Every URL a
+host is never requested), in document order, at most `sitemap_max_children` (40) per
+host; a child is declared exactly when its index is. Every URL a
 sitemap lists, or an inline Markdown link of `llms.txt` points at, is recorded under
 `observed_urls` in the frontier, in scope or not, and forgotten once it goes
 unseen for more than `observed_url_retention_syncs` (3) syncs. Those the scope
@@ -121,7 +122,8 @@ error other than 404 or 410, its retries spent, is listed under `discovery_probl
 answers as `sitemap_unreachable`, and one that answers but is not a sitemap as
 `not_a_sitemap`, and each makes the sync exit 1; a declared sitemap that is missing
 (404 or 410) is silent, and so is every failure of `/sitemap.xml`, `/sitemap_index.xml`
-and `/llms.txt`.
+and `/llms.txt` where robots.txt does not declare them, and of the children of an index
+it does not declare.
 
 `rovo sync --dry-run OUT_DIR` makes the same discovery requests, robots.txt, the
 sitemaps and `llms.txt`, and then stops: it fetches, converts and writes no page and
@@ -150,12 +152,15 @@ everything. Requests to one host name are spaced, with no burst, by at least
 `1 / rate_per_host` (2 per second) and by the longest `Crawl-delay` any of its origins
 declares for `rovo`, read as decimal seconds; `Crawl-delay: 0` adds no delay, and one
 past `retry_after_cap` (120 s), however large, is never adopted. A
-transport error, a 429 or a 5xx is retried, robots.txt included, up to `http_attempts`
+transport error, a 429 or a 5xx is retried, robots.txt, sitemaps and `llms.txt` included, up to `http_attempts`
 (5) tries in all, waiting `backoff_base * 2^(try - 1)` capped at `max_backoff` (1 s
 doubling to 16 s), with 25% jitter either way, and at least the `Retry-After` an answer
 gives in seconds or as an HTTP date; nothing is requested from the host before that wait
 ends, and the host's `retry_after_honored` counts each honoured `Retry-After` that came with a 429
-or a 503. A page
+or a 5xx. A `Retry-After` past `retry_after_cap` (120 s) on `/sitemap.xml`,
+`/sitemap_index.xml`, `/llms.txt` or a child of an undeclared index ends that request
+silently, with no retry, and pauses the host for `retry_after_cap` (never shortening a
+longer pause); the sync then carries on. A page
 whose tries run out is listed under `failed_urls` with its tries and makes the sync exit
 1; a page robots.txt disallows is listed under `unresolved_urls` but alone leaves the
 exit 0. Retries and waits print nothing; progress output is a later slice's.
@@ -169,7 +174,7 @@ needs a browser or stealth engine that is not installed, or sets `robots = "igno
 The refusal is printed on standard error; the specification's refused report arrives
 with a later slice. When a run reaches a branch a later slice implements (a redirect,
 robots.txt's, a sitemap's and `llms.txt`'s included, a 404, a block, a 429 that survives its retries, a `Retry-After`
-past `retry_after_cap` (120 s), however large, a `Crawl-delay` past it, which retires
+past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a page already
 in the mirror, a link to a missing page or to a URL that answers
 with a redirect or a non-HTML file, a profile other

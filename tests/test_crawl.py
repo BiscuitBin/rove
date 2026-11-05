@@ -23,6 +23,8 @@ from fakes import (
     FakeFetcher,
     FixedClock,
     ScriptedFetcher,
+    StampingFetcher,
+    SteppingTimer,
     fixture_site,
     html_response,
     not_found,
@@ -210,6 +212,7 @@ NOSCRIPT_PAGE = """<!doctype html>
 </html>
 """
 SERVER_ERROR = 500
+BAD_GATEWAY = 502
 SERVICE_UNAVAILABLE = 503
 TOO_MANY = 429
 NOT_FOUND = 404
@@ -2172,7 +2175,6 @@ def test_entity_fields_SiteResponse() -> None:
     assert not ok.access_refused
     assert not ok.server_error
     assert not ok.retryable
-    assert not ok.may_carry_retry_after
     assert len(ok.raw_digest) == len("0" * 64)
     assert ok.raw_digest == ok.raw_digest.lower()
     assert not_found(SEED).absent
@@ -2248,7 +2250,7 @@ class Recorder:
 
 
 def test_httpx_fetcher_one_request_per_fetch_with_the_rovo_user_agent() -> None:
-    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1402)."""
+    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1534)."""
     recorder = Recorder()
     with HttpxFetcher(transport=httpx.MockTransport(recorder)) as fetcher:
         response = fetcher.fetch(SEED)
@@ -3361,17 +3363,17 @@ def test_rule_failure_HttpRetry_2(tmp_path: Path) -> None:
 def test_rule_success_CountRetryAfter(tmp_path: Path) -> None:
     """Verify rule CountRetryAfter succeeds when all preconditions are met.
 
-    An http attempt answering 429 or 503 with a Retry-After, while honoured, counts once.
+    An http attempt whose retryable answer (a 429 or any 5xx) carries a Retry-After,
+    while honoured, counts once: every honoured Retry-After is counted (crawl.allium
+    ecfa257), a 500 and a 502 as much as a 429 or a 503.
     """
     _, _, walk = walked(tmp_path, site())
     host = walk.host
     wait = timedelta(seconds=4)
-    assert count_retry_after(
-        attempt_on(walk, answered(SEED, SERVICE_UNAVAILABLE, retry_after=wait))
-    )
-    assert host.retry_after_honored == 1
-    assert count_retry_after(attempt_on(walk, answered(SEED, TOO_MANY, retry_after=wait)))
-    assert host.retry_after_honored == TWO_TRIES
+    statuses = (SERVICE_UNAVAILABLE, TOO_MANY, SERVER_ERROR, BAD_GATEWAY)
+    for counted, status in enumerate(statuses, start=1):
+        assert count_retry_after(attempt_on(walk, answered(SEED, status, retry_after=wait)))
+        assert host.retry_after_honored == counted, status
 
 
 def test_rule_failure_CountRetryAfter_1(tmp_path: Path) -> None:
@@ -3402,14 +3404,17 @@ def test_rule_failure_CountRetryAfter_2(tmp_path: Path) -> None:
 def test_rule_failure_CountRetryAfter_3(tmp_path: Path) -> None:
     """Verify rule CountRetryAfter is rejected when requires clause fails.
 
-    requires: attempt.response.retry_after != null and attempt.response.may_carry_retry_after.
+    requires: attempt.response.retry_after != null and attempt.response.retryable.
+    A retryable answer with no Retry-After, and a Retry-After on an answer that is not
+    retryable (a 200, a 404), count nothing.
     """
     _, _, walk = walked(tmp_path, site())
     wait = timedelta(seconds=4)
     for response in (
         answered(SEED, SERVICE_UNAVAILABLE),
-        answered(SEED, SERVER_ERROR, retry_after=wait),
+        answered(SEED, SERVER_ERROR),
         dataclasses.replace(html_response(SEED, PAGE), retry_after=wait),
+        dataclasses.replace(not_found(SEED), retry_after=wait),
     ):
         assert not count_retry_after(attempt_on(walk, response)), response.status
     assert walk.host.retry_after_honored == 0
@@ -3630,6 +3635,7 @@ RELATIVE = f"{SITE}/guide/relative.html"
 OUT_OF_SCOPE = f"{SITE}/outside/page.html"
 OFF_HOST_MAP = "http://elsewhere.example/maps/child.xml"
 PORTED_MAP = f"{PORTED}/maps/guide.xml"
+NO_IDENTITY_MAP = f"{SITE}:99999/maps/guide.xml"
 LASTMOD = "2026-10-01"
 SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 
@@ -4000,6 +4006,22 @@ def test_rule_failure_ReadRobotsBeforeSitemap_2(tmp_path: Path) -> None:
 def test_rule_failure_ReadRobotsBeforeSitemap_3(tmp_path: Path) -> None:
     """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
 
+    requires: run.target.scope.identity_of(url) != null. A sitemap URL on the host whose
+    port is out of range has no identity: nothing is requested, nothing raised, no
+    problem (FetchSitemap guidance).
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert hostname_of(NO_IDENTITY_MAP) == HOST
+    assert not read_robots_before_sitemap(run, HOST, NO_IDENTITY_MAP, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert [policy.origin for policy in run.robots_policies] == [SITE]
+    assert run.discovery_failures == []
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_4(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
     requires: hostname_of(url) = name.
     """
     fetcher = site()
@@ -4009,7 +4031,7 @@ def test_rule_failure_ReadRobotsBeforeSitemap_3(tmp_path: Path) -> None:
     assert run.robots_policy("http://elsewhere.example") is None
 
 
-def test_rule_failure_ReadRobotsBeforeSitemap_4(
+def test_rule_failure_ReadRobotsBeforeSitemap_5(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
@@ -4024,7 +4046,7 @@ def test_rule_failure_ReadRobotsBeforeSitemap_4(
     assert run.robots_policy(PORTED) is None
 
 
-def test_rule_failure_ReadRobotsBeforeSitemap_5(tmp_path: Path) -> None:
+def test_rule_failure_ReadRobotsBeforeSitemap_6(tmp_path: Path) -> None:
     """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
 
     requires: not exists RobotsPolicy{run: run, origin: origin_of(url)}.
@@ -4081,6 +4103,22 @@ def test_rule_failure_FetchSitemap_2(tmp_path: Path) -> None:
 def test_rule_failure_FetchSitemap_3(tmp_path: Path) -> None:
     """Verify rule FetchSitemap is rejected when requires clause fails.
 
+    requires: run.target.scope.identity_of(url) != null. A sitemap URL on the host whose
+    port is out of range produces nothing and no problem, and raises nothing.
+    """
+    fetcher = site()
+    run, _, host = host_open(tmp_path, fetcher)
+    assert hostname_of(NO_IDENTITY_MAP) == HOST
+    assert fetch_sitemap(run, HOST, NO_IDENTITY_MAP, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert run.discovery_failures == []
+    assert run.bytes_fetched == 0
+    assert (host.paused_until, run.backoffs) == (None, [])
+
+
+def test_rule_failure_FetchSitemap_4(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
     requires: hostname_of(url) = name. A sitemap on another host produces nothing.
     """
     fetcher = site()
@@ -4090,7 +4128,7 @@ def test_rule_failure_FetchSitemap_3(tmp_path: Path) -> None:
     assert run.discovery_failures == []
 
 
-def test_rule_failure_FetchSitemap_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rule_failure_FetchSitemap_5(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify rule FetchSitemap is rejected when requires clause fails.
 
     requires: sitemap_admitted(url, run.target.profile, run.target.scope).
@@ -4102,7 +4140,7 @@ def test_rule_failure_FetchSitemap_4(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert fetcher.requests == [ROBOTS]
 
 
-def test_rule_failure_FetchSitemap_5(tmp_path: Path) -> None:
+def test_rule_failure_FetchSitemap_6(tmp_path: Path) -> None:
     """Verify rule FetchSitemap is rejected when requires clause fails.
 
     requires: robots_allows(run, url). A disallowed sitemap produces nothing.
@@ -4115,7 +4153,7 @@ def test_rule_failure_FetchSitemap_5(tmp_path: Path) -> None:
     assert run.discovery_failures == []
 
 
-def test_rule_failure_FetchSitemap_6(tmp_path: Path) -> None:
+def test_rule_failure_FetchSitemap_7(tmp_path: Path) -> None:
     """Verify rule FetchSitemap is rejected when requires clause fails.
 
     requires: exists RobotsPolicy{run: run, origin: origin_of(url)}.
@@ -4469,7 +4507,7 @@ def test_discover_reads_the_sitemaps_and_llms_txt_in_order(tmp_path: Path) -> No
     """Robots.txt, then the sitemaps, depth first, then llms.txt; all before any page.
 
     The declared sitemaps, each index's children read as they fall due, then the
-    well-known sitemaps not declared, then llms.txt (Open points, item 8).
+    well-known sitemaps not declared, then llms.txt (crawl.allium Discover guidance).
     """
     fetcher = site(robots=declaring(MAPS_INDEX))
     fetcher.responses[MAPS_INDEX] = xml_response(MAPS_INDEX, sitemapindex(MAPS))
@@ -4533,7 +4571,7 @@ def test_the_dry_run_listing_is_next_pending_order(tmp_path: Path) -> None:
     """crawl.allium DryRun and rovo.allium ProgressOnRequest: the pending identities.
 
     Each row SelectBatch would consider, in next_pending order: non-deferred first, then
-    shallowest, then highest priority, then discovery order (Open points, item 5).
+    shallowest, then highest priority, then discovery order (DryRun guidance).
     """
     run, frontier = dry(tmp_path)
     deferred = f"{SITE}/guide/removed.html"
@@ -4552,3 +4590,218 @@ def test_the_dry_run_listing_is_next_pending_order(tmp_path: Path) -> None:
     assert finished is not None
     finished.status = FrontierStatus.done
     assert dry_run_listing(run, frontier) == [SEED, ORPHAN, RELATIVE, FROM_LLMS, deferred]
+
+
+def test_the_dry_run_listing_includes_rows_on_a_retired_host(tmp_path: Path) -> None:
+    """crawl.allium DryRun guidance (ecfa257): pending_rows, a retired host's included.
+
+    The listing is every row SelectBatch's pending_rows would hold, so a row whose host
+    has tripped its breaker is still listed.
+    """
+    run, frontier = dry(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    assert host.breaker_tripped
+    enqueue(
+        run,
+        frontier,
+        SEED,
+        depth=0,
+        via=DiscoverySource.start,
+        priority=model.CONFIG.start_priority,
+    )
+    assert dry_run_listing(run, frontier) == [SEED]
+
+
+# --- Discovery's tries, pauses and declaredness (T13 follow-up, crawl.allium ecfa257) --
+
+
+def past_cap(url: str, status: int = TOO_MANY) -> SiteResponse:
+    """A retryable answer whose Retry-After is one second past retry_after_cap."""
+    wait = standard_policy().retry_after_cap + timedelta(seconds=1)
+    return dataclasses.replace(xml_response(url, "", status=status), retry_after=wait)
+
+
+@pytest.mark.parametrize(
+    ("probe", "index"),
+    [
+        pytest.param(SITEMAP, None, id="sitemap"),
+        pytest.param(SITEMAP_INDEX, None, id="sitemap-index"),
+        pytest.param(LLMS_TXT, None, id="llms-txt"),
+        pytest.param(MAPS, SITEMAP_INDEX, id="speculative-index-child"),
+    ],
+)
+def test_a_speculative_probe_past_the_cap_pauses_the_host_silently(
+    tmp_path: Path, probe: str, index: str | None
+) -> None:
+    """FetchSitemap and ReadLlmsTxt, past_cap and not declared (crawl.allium ecfa257).
+
+    A Retry-After past retry_after_cap on a speculative probe (an undeclared well-known
+    sitemap, llms.txt, or a child of a speculative index) ends its tries with that
+    answer: asked once, no retry. It never retires the host and reports no problem; the
+    host is paused until retry_after_cap from then, with one HostBackedOff, so the next
+    request waits that long, and the seed page is then fetched. The Retry-After is
+    honoured, so it is counted.
+    """
+    fetcher = site()
+    if index is not None:
+        fetcher.responses[index] = xml_response(index, sitemapindex(probe))
+    fetcher.responses[probe] = past_cap(probe, SERVICE_UNAVAILABLE)
+    timer = SteppingTimer()
+    stamping = StampingFetcher(fetcher, timer)
+    result = run_crawl(request(new_mirror(tmp_path)), None, stamping, timer)
+    run = result.run
+    assert run.status is RunStatus.finished
+    assert run.discovery_failures == []
+    assert fetcher.requests.count(probe) == 1
+    (host,) = run.hosts
+    urls = [url for url, _ in stamping.stamps]
+    asked = stamping.stamps[urls.index(probe)][1]
+    until = asked + run.policy.retry_after_cap
+    (backed_off,) = result.backed_off
+    assert backed_off.host is host
+    assert backed_off.until == until
+    assert stamping.stamps[urls.index(probe) + 1][1] >= until
+    assert SEED in urls
+    assert host.retry_after_honored == 1
+    assert not host.breaker_tripped
+
+
+def test_a_speculative_pause_never_shortens_a_longer_one(tmp_path: Path) -> None:
+    """ReadLlmsTxt (crawl.allium ecfa257): paused_until = later_of(paused_until, now + cap).
+
+    The HostBackedOff still carries now + retry_after_cap; the probe ends unavailable and
+    silent, and nothing is discovered from it.
+    """
+    fetcher = site()
+    fetcher.responses[LLMS_TXT] = past_cap(LLMS_TXT)
+    run, frontier, host = host_open(tmp_path, fetcher)
+    longer = START + run.policy.retry_after_cap + timedelta(hours=1)
+    host.paused_until = longer
+    response = read_llms_txt(run, HOST, frontier, fetcher)
+    assert response is not None
+    assert not response.ok
+    assert fetcher.requests == [ROBOTS, LLMS_TXT]
+    assert host.paused_until == longer
+    (backed_off,) = run.backoffs
+    assert backed_off.until == START + run.policy.retry_after_cap
+    assert frontier.entries == []
+    assert run.discovery_failures == []
+
+
+def test_a_long_retry_after_unhonoured_neither_pauses_nor_retires(tmp_path: Path) -> None:
+    """FetchSitemap and ReadLlmsTxt guidance (ecfa257): with honor_retry_after off.
+
+    past_cap is false: a declared sitemap and every probe are retried as any retryable
+    answer is, nothing is counted, no pause reaches retry_after_cap, the host is not
+    retired, and the declared sitemap ends sitemap_unavailable.
+    """
+    policy = dataclasses.replace(standard_policy(), honor_retry_after=False)
+    fetcher = site(robots=declaring(MAPS))
+    for url in (MAPS, *PROBES):
+        fetcher.responses[url] = past_cap(url)
+    result = run_crawl(request(new_mirror(tmp_path), policy=policy), None, fetcher, FixedClock())
+    run = result.run
+    assert run.status is RunStatus.finished
+    assert [(failed.url, failed.problem) for failed in run.discovery_failures] == [
+        (MAPS, DiscoveryProblem.sitemap_unavailable)
+    ]
+    for url in (MAPS, *PROBES):
+        assert fetcher.requests.count(url) == model.CONFIG.http_attempts, url
+    (host,) = run.hosts
+    assert host.retry_after_honored == 0
+    assert not host.breaker_tripped
+    assert result.backed_off
+    assert all(off.until < START + policy.retry_after_cap for off in result.backed_off)
+    assert SEED in fetcher.requests
+
+
+def test_discovery_tries_count_every_honoured_retry_after(tmp_path: Path) -> None:
+    """FetchRobots guidance and CountRetryAfter (crawl.allium ecfa257).
+
+    robots.txt, a declared sitemap, a probe and llms.txt are each retried once after a
+    retryable answer carrying a Retry-After (a 500, a 502, a 503, a 429), each with a
+    HostBackedOff, and every one of the four honoured Retry-Afters is counted.
+    """
+    wait = timedelta(seconds=2)
+    busy = {
+        url: dataclasses.replace(xml_response(url, "", status=status), retry_after=wait)
+        for url, status in (
+            (ROBOTS, SERVER_ERROR),
+            (MAPS, BAD_GATEWAY),
+            (SITEMAP, SERVICE_UNAVAILABLE),
+            (LLMS_TXT, TOO_MANY),
+        )
+    }
+    responses = site(robots=declaring(MAPS)).responses
+    responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    responses[LLMS_TXT] = llms(FROM_LLMS)
+    fetcher = ScriptedFetcher(responses, {url: [answer] for url, answer in busy.items()})
+    run, frontier = discovered(tmp_path, fetcher)
+    for url in busy:
+        assert fetcher.count(url) == len(["busy", "answered"]), url
+    host = run.host(HOST)
+    assert host is not None
+    assert host.retry_after_honored == len(busy)
+    assert len(run.backoffs) == len(busy)
+    assert run.discovery_failures == []
+    assert frontier.entry(ORPHAN) is not None
+    assert frontier.entry(FROM_LLMS) is not None
+
+
+def test_an_index_child_is_declared_exactly_when_its_index_is(tmp_path: Path) -> None:
+    """ExpandSitemapEntries (crawl.allium ecfa257, answer A): children inherit declared.
+
+    The children of a speculative index (the undeclared /sitemap_index.xml), at any
+    depth, are speculative probes: a 500 child and an HTML child report nothing. The
+    same tree under a declared index reports both. The urlset child is read either way.
+    """
+    broken = f"{SITE}/maps/broken.xml"
+    page_map = f"{SITE}/maps/page.html"
+
+    def tree(fetcher: FakeFetcher) -> FakeFetcher:
+        fetcher.responses[SITEMAP_INDEX] = xml_response(SITEMAP_INDEX, sitemapindex(MAPS_INDEX))
+        fetcher.responses[MAPS_INDEX] = xml_response(
+            MAPS_INDEX, sitemapindex(broken, page_map, MAPS)
+        )
+        fetcher.responses[broken] = xml_response(broken, "", status=SERVER_ERROR)
+        fetcher.responses[page_map] = html_response(page_map, PAGE)
+        fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+        return fetcher
+
+    speculative = tree(site())
+    run, frontier = discovered(tmp_path / "speculative", speculative)
+    assert run.discovery_failures == []
+    assert all(url in speculative.requests for url in (broken, page_map, MAPS))
+    assert frontier.entry(ORPHAN) is not None
+
+    declared = tree(site(robots=declaring(SITEMAP_INDEX)))
+    run, frontier = discovered(tmp_path / "declared", declared)
+    assert [(failed.url, failed.problem) for failed in run.discovery_failures] == [
+        (broken, DiscoveryProblem.sitemap_unavailable),
+        (page_map, DiscoveryProblem.not_a_sitemap),
+    ]
+    assert frontier.entry(ORPHAN) is not None
+
+
+def test_a_sitemap_or_index_child_with_no_identity_is_skipped_uncounted(tmp_path: Path) -> None:
+    """ReadRobotsBeforeSitemap, FetchSitemap, ExpandSitemapEntries (crawl.allium ecfa257).
+
+    A declared sitemap and an index child whose URL has no identity (a port out of
+    range, an unclosed IPv6 bracket) are skipped silently: never requested, no problem,
+    and no child counted toward sitemap_children_read; nothing raises.
+    """
+    fetcher = site(robots=declaring(NO_IDENTITY_MAP, MAPS_INDEX))
+    fetcher.responses[MAPS_INDEX] = xml_response(
+        MAPS_INDEX, sitemapindex(NO_IDENTITY_MAP, "http://[", MAPS)
+    )
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    run, frontier = discovered(tmp_path, fetcher)
+    assert fetcher.requests == [ROBOTS, MAPS_INDEX, MAPS, *PROBES]
+    host = run.host(HOST)
+    assert host is not None
+    assert host.sitemap_children_read == 1
+    assert run.discovery_failures == []
+    assert frontier.entry(ORPHAN) is not None

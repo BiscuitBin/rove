@@ -26,13 +26,14 @@ from fakes import SteppingTimer
 from rovo import _commands
 from rovo._crawl import pace
 from rovo._crawl.fetch import HttpxFetcher
-from rovo._crawl.model import CONFIG
+from rovo._crawl.model import CONFIG, standard_policy
 from rovo._exit import ExitCode
 from rovo.cli import app
 
 NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 LASTMOD = "2026-10-01"
 SERVER_ERROR = 500
+SERVICE_UNAVAILABLE = 503
 DISCOVERY_PATHS = (
     "/maps/index.xml",
     "/maps/guide.xml",
@@ -145,9 +146,9 @@ def write_base_site(
         page(root, path, title, f"{title} is described here in a sentence of plain prose.")
 
 
-def synced(out: Path, *, dry_run: bool = False) -> ExitCode:
+def synced(out: Path, *, dry_run: bool = False, timer: SteppingTimer | None = None) -> ExitCode:
     """Rovo sync in process over the real HttpxFetcher on a SteppingTimer."""
-    timer = SteppingTimer()
+    timer = timer or SteppingTimer()
     with HttpxFetcher() as fetcher:
         return _commands.sync(out, fetcher=fetcher, clock=timer, dry_run=dry_run)
 
@@ -284,6 +285,56 @@ def test_declared_sitemaps_that_fail_are_reported_and_the_probes_stay_silent(
         {"url": sites.url("maps/page.html"), "problem": "not_a_sitemap"},
     ]
     assert f"{page_root(sites.base)}orphan.md" in markdown_files(out)
+
+
+def test_speculative_probes_stay_silent_and_a_long_retry_after_pauses_the_host(
+    serve_site: SiteServer, tmp_path: Path
+) -> None:
+    """T13 follow-up (crawl.allium ecfa257): probes retried, silent, and paused, never retired.
+
+    /sitemap.xml answers 503 with a Retry-After past retry_after_cap: asked once, it
+    pauses the host for retry_after_cap (the next request waits that long on the
+    SteppingTimer) instead of retiring it. /sitemap_index.xml is an undeclared index,
+    so its 500 child and its HTML child are speculative and report nothing. llms.txt
+    answers 500 with Retry-After: 1 on every try: retried http_attempts times and each
+    honoured Retry-After counted. The declared sitemap's pages are still mirrored, ok.
+    """
+    cap = standard_policy().retry_after_cap
+    long_wait = str(int(cap.total_seconds()) + 60)
+    sites = served(
+        serve_site,
+        tmp_path,
+        always={
+            "/sitemap.xml": Answer(SERVICE_UNAVAILABLE, {"Retry-After": long_wait}),
+            "/maps/broken.xml": Answer(SERVER_ERROR),
+            "/llms.txt": Answer(SERVER_ERROR, {"Retry-After": "1"}),
+        },
+    )
+    write_base_site(sites, sitemaps=("maps/guide.xml",), llms=False)
+    write(
+        sites.root,
+        "sitemap_index.xml",
+        sitemapindex([sites.url("maps/broken.xml"), sites.url("maps/page.html")]),
+    )
+    page(sites.root, "maps/page.html", "Not a sitemap", "This page is HTML, not a sitemap.")
+    out = initialised(sites, tmp_path / "out")
+    timer = SteppingTimer()
+    assert synced(out, timer=timer) is ExitCode.ok
+    paths = serve_site.paths(sites.base)
+    assert paths.count("/sitemap.xml") == 1
+    assert paths.count("/maps/broken.xml") == CONFIG.http_attempts
+    assert paths.count("/maps/page.html") == 1
+    assert paths.count("/llms.txt") == CONFIG.http_attempts
+    assert max(timer.sleeps) >= cap.total_seconds()
+    report = load(out / "crawl-report.json")
+    assert report["exit_code"] == "ok"
+    assert report["discovery_problems"] == []
+    hosts = report["per_host"]
+    assert isinstance(hosts, list)
+    (host,) = hosts
+    assert host["retry_after_honored"] == 1 + CONFIG.http_attempts
+    root = page_root(sites.base)
+    assert markdown_files(out) == [f"{root}orphan.md", f"{root}start.md"]
 
 
 def test_rovo_sync_dry_run_lists_what_it_would_fetch(

@@ -91,7 +91,11 @@ policy.
   with their priorities, at most `max_pages * sitemap_cap_multiplier` sitemap entries
   per host, a sitemap's `lastmod` kept on the page. A declared sitemap that fails or is
   not a sitemap is listed under `discovery_problems` and makes the sync exit 1; a
-  missing declared sitemap and every failing probe are silent. `crawl-report.json`'s
+  missing declared sitemap and every failing probe are silent; a child of an index is
+  declared exactly when its index is. Sitemaps and `llms.txt` are retried as robots.txt
+  is; a `Retry-After` past `retry_after_cap` on a probe ends it silently and pauses the
+  host for `retry_after_cap`, and every honoured `Retry-After` on a 429 or a 5xx is
+  counted. A URL that cannot be normalised is skipped. `crawl-report.json`'s
   `discovered` counts the frontier's rows when discovery ends.
 - `rovo sync --dry-run OUT_DIR` discovers as a sync does, prints the URL of each page
   it would fetch, one per line in the order it would take them, fetches and writes no

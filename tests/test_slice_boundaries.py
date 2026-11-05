@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from fakes import FakeFetcher, FixedClock, html_response, text_response
+from fakes import FakeFetcher, FixedClock, html_response, text_response, xml_response
 from rovo import _commands
 from rovo._config import SyncOptions, resolve_config
 from rovo._convert import profiles
@@ -80,7 +80,7 @@ from rovo._report import (
     report_path,
 )
 from rovo._unfinished import NotInThisSlice
-from test_crawl import PAST_CAP_DELAYS, PAST_CAP_IDS
+from test_crawl import MAPS, MAPS_INDEX, PAST_CAP_DELAYS, PAST_CAP_IDS, past_cap, sitemapindex
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -314,6 +314,32 @@ def test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_placeholder_stop(
     with pytest.raises(NotInThisSlice) as stopped:
         run_crawl(request(mirror), None, fetcher, FixedClock())
     assert stopped.value.rule == rule
+    assert SEED not in fetcher.requests
+
+
+@pytest.mark.parametrize("declared_by", ["robots-txt", "declared-index"])
+def test_a_declared_sitemap_past_the_cap_stops_at_retire_host(
+    tmp_path: Path, declared_by: str
+) -> None:
+    """T13 follow-up (crawl.allium ecfa257 FetchSitemap): retires_host = declared and past_cap.
+
+    A Retry-After past retry_after_cap on a declared sitemap, one robots.txt names or a
+    declared index's child, retires the host; the trip is the breaker slice's (T18), so
+    the run stops there. The long answer ends the tries: the sitemap is asked once.
+    """
+    named = MAPS if declared_by == "robots-txt" else MAPS_INDEX
+    responses = {
+        SEED: html_response(SEED, PAGE),
+        ROBOTS: text_response(ROBOTS, f"User-agent: *\nSitemap: {named}\n"),
+        MAPS_INDEX: xml_response(MAPS_INDEX, sitemapindex(MAPS)),
+        MAPS: past_cap(MAPS),
+    }
+    fetcher = FakeFetcher(responses)
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert stopped.value.rule == "RetireHostOnLongRetryAfter"
+    assert fetcher.requests[-1] == MAPS
+    assert fetcher.requests.count(MAPS) == 1
     assert SEED not in fetcher.requests
 
 
@@ -684,7 +710,7 @@ def test_httpx_fetcher_sends_validators_and_reads_retry_after() -> None:
     assert seen[0].headers["if-none-match"] == '"e"'
     assert seen[0].headers["if-modified-since"] == "Sat"
     assert response.retry_after == timedelta(seconds=7)
-    assert response.may_carry_retry_after
+    assert response.retryable
 
     sent = datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC)
     dated = {

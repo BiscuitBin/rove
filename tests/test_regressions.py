@@ -17,7 +17,8 @@ Crawl-delay is read exactly, so 1e309, 1e400, the cap plus one sub-ULP step and 
 exponent past Decimal's limit are past the cap, while a value outside float's grammar is
 no Crawl-delay and one too small for Decimal is no delay. T13 (planning): the report's
 discovered counts the frontier's rows after discovery, and a sitemap entry or llms.txt
-target with no identity is skipped (Open points, item 2, the interim).
+target with no identity is skipped (crawl.allium ExpandSitemapEntries and ReadLlmsTxt
+guidance, at ecfa257).
 """
 
 import json
@@ -859,7 +860,7 @@ def test_discovered_counts_the_rows_after_discovery(tmp_path: Path) -> None:
 
 
 def test_a_sitemap_entry_or_llms_txt_target_with_no_identity_is_skipped(tmp_path: Path) -> None:
-    """Planning T13, Open points item 2, the interim: a URL with no identity is skipped.
+    """T13, crawl.allium ExpandSitemapEntries (ecfa257): a URL with no identity is skipped.
 
     normalise_url cannot normalise a port out of range (identity_of is null in the
     specification): such a sitemap entry or llms.txt target is neither observed nor

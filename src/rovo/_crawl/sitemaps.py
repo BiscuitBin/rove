@@ -57,8 +57,8 @@ def resolve_url(base: str, loc: str) -> str:
 def llms_txt_targets(response: SiteResponse, base: str) -> tuple[str, ...]:
     """Every inline Markdown link's destination, resolved against `base`, each once.
 
-    A destination urljoin cannot parse has no identity and is no target (T13 Open
-    points, item 2).
+    A destination urljoin cannot parse has no identity and is no target (ReadLlmsTxt
+    guidance).
     """
     targets: list[str] = []
     for match in _INLINE_LINK.finditer(response.markup):
@@ -73,7 +73,8 @@ def sitemap_admitted(url: str, profile: Profile, scope: CrawlScope) -> bool:
     """The profile's sitemap_include filter: an empty filter admits every sitemap.
 
     Filling {section} and {locale} with the scope's is unstated (CrawlScope has no
-    section), so a filter holding a placeholder stops the run (T13 Open points, item 4).
+    section), so a filter holding a placeholder stops the run (FetchSitemap guidance;
+    T13 follow-up question, item 4, carried to T17).
     """
     del scope  # Only the placeholders read it, and they stop first.
     patterns = profile.sitemap_include

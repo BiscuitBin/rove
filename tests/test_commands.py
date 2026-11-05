@@ -268,7 +268,7 @@ def test_sync_dry_run_lists_the_pending_rows_and_writes_no_page(
 
     The listing is the one thing on standard output, one identity a line in next_pending
     order; the frontier, the run (dry_run true) and the report are saved; no page file,
-    index or _indexes/ is written (Open points, items 5 and 6, the interims).
+    index or _indexes/ is written (crawl.allium DryRun guidance, at ecfa257).
     """
     llms_txt = f"{SITE}/llms.txt"
     listed = f"{SITE}/guide/listed.html"

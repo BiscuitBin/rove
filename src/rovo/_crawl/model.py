@@ -26,7 +26,6 @@ _NOT_MODIFIED = 304
 _ABSENT = frozenset({404, 410})
 _ACCESS_REFUSED = frozenset({401, 403, 429})
 _TOO_MANY_REQUESTS = 429
-_SERVICE_UNAVAILABLE = 503
 _SERVER_ERROR = 500
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
 
@@ -205,7 +204,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 539 to 584), the one copy in code.
+# crawl.allium's config block (crawl.allium 541 to 586), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -372,11 +371,6 @@ class SiteResponse:
     def retryable(self) -> bool:
         """An error, a 429 or a 5xx."""
         return self.error is not None or self.status == _TOO_MANY_REQUESTS or self.server_error
-
-    @property
-    def may_carry_retry_after(self) -> bool:
-        """A 429 or a 503."""
-        return self.status in {_TOO_MANY_REQUESTS, _SERVICE_UNAVAILABLE}
 
     @property
     def is_html(self) -> bool:
@@ -813,7 +807,7 @@ class HostBackedOff:
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2000)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2136)."""
 
     operator: Operator
     mirror: Mirror

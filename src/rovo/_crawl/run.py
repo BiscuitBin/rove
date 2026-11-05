@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 601 to 1908).
+"""One standard run, RunRequested to RunEnded (crawl.allium 603 to 2044).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -68,7 +68,7 @@ from rovo._crawl.model import (
     UrlFailed,
     WalkStatus,
 )
-from rovo._crawl.pace import Timer, back_off, fetch_resource, wait_turn
+from rovo._crawl.pace import Timer, back_off, fetch_resource, past_cap, pause_for_cap, wait_turn
 from rovo._mirror.intake import admit_candidate, links_found, settle_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
@@ -303,9 +303,9 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
     The request goes through `fetch_resource`, under the host's limiter, with a page's
     retries; the answer ends in exactly one of AdoptRobotsRules, DenyAllWhenRobotsRefused,
     DenyAllWhenRobotsUnreachable or AllowAllWhenRobotsAbsent. A 3xx answer (redirect
-    following) is a later slice's branch, and so is retiring the host on a Retry-After
-    past the cap, which fetch_resource stops at, or on an honoured Crawl-delay past it
-    (RetireHostOnLongCrawlDelay), which stops once the rules are adopted.
+    following) is a later slice's branch, and so is retiring the host (retires_host: a
+    Retry-After past the cap, which ends fetch_resource's tries) or on an honoured
+    Crawl-delay past it (RetireHostOnLongCrawlDelay), which stops once the rules are adopted.
     """
     host = run.host(name)
     if run.status is not RunStatus.running or host is None:
@@ -314,6 +314,8 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
         return None
     response = fetch_resource(robots_url(origin), run, host, fetcher)
     run.bytes_fetched += response.size
+    if past_cap(response, run.policy):
+        raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
     if response.status in _REDIRECTS:
         raise NotInThisSlice(rule="FetchRobots")
     adopted = adopt_robots_rules(run, host, response, origin=origin)
@@ -550,7 +552,7 @@ def robots_allows(run: Run, url: str) -> bool:
     True under robots = ignore and for an origin whose stance is allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 963 to 1003).
+    literal-$ copy included (crawl.allium 1037 to 1077).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True
@@ -671,12 +673,16 @@ def read_robots_before_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) 
     return True
 
 
-def fetch_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) -> SiteResponse | None:
+def fetch_sitemap(
+    run: Run, name: str, url: str, fetcher: Fetcher, *, declared: bool = False
+) -> SiteResponse | None:
     """Realises crawl.allium FetchSitemap: the SitemapAnswered response, else None.
 
     Each sitemap is read at most once per run, through fetch_resource, its bytes counted.
-    No snapshot outlives its run in this slice, so no validators are sent. A 3xx answer
-    (redirect following) is a later slice's branch.
+    No snapshot outlives its run in this slice, so no validators are sent. A Retry-After
+    past the cap retires the host of a declared sitemap (the breaker slice's trip) and
+    pauses it for retry_after_cap after a speculative probe, whose answer then stands. A
+    3xx answer (redirect following) is a later slice's branch.
     """
     host = run.host(name)
     if host is None or not _sitemap_wanted(run, name, url):
@@ -688,6 +694,10 @@ def fetch_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) -> SiteRespon
     run.sitemaps_read.add(url)
     response = fetch_resource(url, run, host, fetcher)
     run.bytes_fetched += response.size
+    if past_cap(response, run.policy):
+        if declared:
+            raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
+        pause_for_cap(host)
     if response.status in _REDIRECTS:
         raise NotInThisSlice(rule="FetchSitemap")
     return response
@@ -761,8 +771,8 @@ def expand_sitemap_entries(  # noqa: PLR0913  The SitemapEntriesFound trigger's 
     An index's children on the host that served it, at most sitemap_max_children per
     host (the open question's interim: no child on another host); a urlset's entries
     observed, and admitted at sitemap_depth when in scope, at most
-    max_pages * sitemap_cap_multiplier per host. An entry with no identity is skipped
-    (T13 Open points, item 2), and so is a child with none, uncounted (item 10).
+    max_pages * sitemap_cap_multiplier per host. An entry or a child with no identity is
+    skipped silently and uncounted. Each child is due with its index's declared.
     """
     if run.status is not RunStatus.running:
         return None
@@ -808,8 +818,9 @@ def read_llms_txt(
 ) -> SiteResponse | None:
     """Realises crawl.allium ReadLlmsTxt: the answer, else None when the rule does not fire.
 
-    Never conditional, and silent when absent or unreachable; a target with no identity
-    is skipped (T13 Open points, item 2). A 3xx answer is a later slice's branch.
+    Never conditional, and silent when absent or unreachable; a Retry-After past the cap
+    pauses the host for retry_after_cap and the probe ends unavailable. A target with no
+    identity is skipped. A 3xx answer is a later slice's branch.
     """
     host = run.host(name)
     if run.status is not RunStatus.running or host is None:
@@ -819,6 +830,8 @@ def read_llms_txt(
         return None
     response = fetch_resource(url, run, host, fetcher)
     run.bytes_fetched += response.size
+    if past_cap(response, run.policy):
+        pause_for_cap(host)
     if response.status in _REDIRECTS:
         raise NotInThisSlice(rule="ReadLlmsTxt")
     if not response.ok:
@@ -883,7 +896,7 @@ def dry_run(run: Run) -> bool:
 def dry_run_listing(run: Run, frontier: Frontier) -> list[str]:
     """The identities of the rows SelectBatch would consider, in next_pending order.
 
-    What a dry run lists (DryRun guidance; T13 Open points, item 5, the interim).
+    What a dry run lists (DryRun guidance).
     """
     pending = [entry for entry in frontier.pending_entries if _selectable(run, entry)]
     return [entry.identity for entry in _next_pending(pending, len(pending))]
@@ -902,7 +915,7 @@ def _read_sitemaps(
     while stack:
         url, declared = stack.pop()
         read_robots_before_sitemap(run, name, url, fetcher)
-        response = fetch_sitemap(run, name, url, fetcher)
+        response = fetch_sitemap(run, name, url, fetcher, declared=declared)
         host = run.host(name)
         if response is None or host is None:
             continue
@@ -911,7 +924,7 @@ def _read_sitemaps(
             children = expand_sitemap_entries(
                 run, frontier, host, url, snapshot.entries, is_index=snapshot.is_index
             )
-            stack.extend((child, True) for child in reversed(children or []))
+            stack.extend((child, declared) for child in reversed(children or []))
             continue
         failed = reject_non_sitemap(
             run, url, response, declared=declared
@@ -932,7 +945,7 @@ def _sitemap_wanted(run: Run, name: str, url: str) -> bool:
 
 
 def _normalisable(url: str) -> bool:
-    """normalise_url can normalise the URL; a sitemap's that cannot is skipped (item 10)."""
+    """normalise_url can normalise the URL; a sitemap whose URL it cannot is skipped."""
     try:
         origin_of(url)
     except ValueError:  # A port out of range or an unclosed IPv6 bracket.
@@ -941,7 +954,7 @@ def _normalisable(url: str) -> bool:
 
 
 def _resolved_or_none(base: str, loc: str) -> str | None:
-    """resolve_url(base, loc), or None where urljoin cannot parse it (no identity, item 2)."""
+    """resolve_url(base, loc), or None where urljoin cannot parse it (no identity)."""
     try:
         return sitemaps.resolve_url(base, loc)
     except ValueError:  # An unclosed IPv6 bracket.
@@ -1154,7 +1167,7 @@ def count_retry_after(attempt: FetchAttempt) -> bool:
     response = attempt.response
     if host.run.status is not RunStatus.running or attempt.tier is not Tier.http:
         return False
-    if response.retry_after is None or not response.may_carry_retry_after:
+    if response.retry_after is None or not response.retryable:
         return False
     if not host.run.policy.honor_retry_after:
         return False

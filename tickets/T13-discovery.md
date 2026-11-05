@@ -39,7 +39,8 @@ writes `observed_urls` as `[]` and `load_frontier` never reads it back; a dry ru
 at `NotInThisSlice("DryRun")` (`run.py` 1133) and `close_run` at
 `NotInThisSlice("CloseRun")` (`_report.py` 317). The specification base is `fa096c4`
 (`git diff --stat fa096c4 HEAD -- docs/specs` is empty); every line number below is at
-`fa096c4`.
+`fa096c4` unless it says `at ecfa257`. The follow-up after the maintainer's answers (Open
+points) moves the base to `ecfa257`.
 
 The page and byte budgets are already realised and covered: `select_batch`,
 `Run.page_budget_remaining`, `Run.byte_budget_left`, `_choose_batch`, the
@@ -58,7 +59,7 @@ first end-to-end proof that a page budget stops a run whose frontier discovery f
 | **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `crawl.allium`: `Discover` (711), its standard branch now raising `SitemapsRequested` and `LlmsTxtRequested` for every allowed host after `HostOpened`, hosts in sorted order; `QueueSitemaps` (908: each declared sitemap of the host's first origin, `host.origin`, then each of `well_known_sitemaps(name)` not declared, `/sitemap.xml` and `/sitemap_index.xml` at `host.origin`); `ReadRobotsBeforeSitemap` (929, handed over by T12: a sitemap at another origin of its host waits for that origin's robots.txt, read through T12's `fetch_robots`, then is due again); `FetchSitemap` (942: each sitemap read at most once per run, through `fetch_resource`; a sitemap on another host, one `sitemap_admitted` refuses or one robots disallows produces nothing and no problem; no validators sent, Facts); `AcceptFreshSitemap` (1017, the snapshot created or updated in the run's frontier); `RejectNonSitemap` (1036); `SkipUnavailableSitemap` (1044); `ExpandSitemapEntries` (1057: an index's children queued only on the host that served it, the open question's interim, at most `sitemap_max_children` per host; a urlset's entries observed whatever their scope and admitted at `sitemap_depth` with `sitemap_priority`, `from` the sitemap's URL and the entry's `lastmod`, at most `max_pages * sitemap_cap_multiplier` per host); `ReadLlmsTxt` (1082: never conditional, silent when absent or unreachable, each target observed and admitted at `llms_txt_depth` with `llms_txt_priority`, `from` `llms_txt_url(name)`); `RecordObservation` (1102); `DropStaleObservations` (1142), now with an effect, over the observations `load_frontier` reads back; `DryRun` (1153) and `BeginCrawl` (1166) on both sides of `run.dry_run`; `Enqueue` (1118) now meeting `via: sitemap` and `via: llms_txt` with `from` and `lastmod`; `PrepareRun` (636) re-pending a `skipped_limit` row (`retry_entries`). `rovo.allium`: `CloseRun` (623), its dry-run branch (`ReportReady` without the finalise pass) and `discovered_count` as the frontier's rows after discovery (Facts); `TallyDiscoveryProblem` (561), now also reached by `sitemap_unavailable`, `sitemap_unreachable` and `not_a_sitemap`; `RankAndWriteReport` (665) over a dry run; the `ProgressOnRequest` guarantee's last sentence (934 to 939: a dry run prints its frontier as plain text). `mirror.allium`: a page's and a candidate's `sitemap_lastmod`, carried from the frontier row (`ConvertFetched`, `crawl.allium` 1787) into the manifest and the frontmatter (`PageFileProvenance`). |
 | **Traversed, nothing new to do** | `OpenHost` (742), `FetchRobots` (767) and the robots rules: unchanged, `fetch_robots` serving `ReadRobotsBeforeSitemap` for another origin; `AdoptRobotsRules` (811) still records `declared_sitemaps` with `robots_sitemaps` (Facts). `SelectBatch` (1185), `NextBatch` (1243) and the entry rules: unchanged, now meeting rows at depth 1 with `sitemap_priority` and `llms_txt_priority`, and the page budget stopping a run that discovery filled. `FetchEntry` (1325): unchanged; its `conditional` test already reads `entry.sitemap_lastmod`, which a sitemap now sets (a change of `lastmod` makes the next refetch unconditional; the incremental slice owns what follows). `FinishRun` (1861): not reached by a dry run, which goes `DryRun` to `RunEnding` (`EndRun`, 1898), so a dry run's `unresolved_urls` is empty. `AnnounceBackoff` (`rovo.allium` 568): a sitemap's retries raise `HostBackedOff` as robots.txt's do, with no sink. |
 | **Later slices'** | `ReuseUnchangedSitemap` (1009) and the conditional sitemap fetch are the incremental slice's (T14): this slice keeps each `SitemapSnapshot` in the run's frontier only, never saves or loads one, and so never sends a sitemap's validators (Facts). `config-default.discovery_max_redirects` and every 3xx answer to a sitemap or an llms.txt are the redirects slice's, as a 3xx robots.txt is (T12). The targeted and owner-testing branches of `Discover` and `PrepareRun` stay where T09 left them. |
-| **Outside this slice; reaching one still stops the run** | Every raise T12 left, minus `NotInThisSlice("DryRun")` (`run.py` 1133) and `NotInThisSlice("CloseRun")` (`_report.py` 317), which this slice removes; plus three new ones: a 3xx answer to a sitemap (`NotInThisSlice("FetchSitemap")`) or to an llms.txt (`NotInThisSlice("ReadLlmsTxt")`), redirect following being the redirects slice's as it is for robots.txt; and a profile whose `sitemap_include` holds a `{section}` or `{locale}` placeholder (`NotInThisSlice("sitemap_admitted")`, Open points, item 4), which only `mslearn` has and whose conversion already stops the run. A Retry-After past `retry_after_cap` on a sitemap or llms.txt try stops at `fetch_resource`'s existing `NotInThisSlice("RetireHostOnLongRetryAfter")` (Open points, item 1). |
+| **Outside this slice; reaching one still stops the run** | Every raise T12 left, minus `NotInThisSlice("DryRun")` (`run.py` 1133) and `NotInThisSlice("CloseRun")` (`_report.py` 317), which this slice removes; plus three new ones: a 3xx answer to a sitemap (`NotInThisSlice("FetchSitemap")`) or to an llms.txt (`NotInThisSlice("ReadLlmsTxt")`), redirect following being the redirects slice's as it is for robots.txt; and a profile whose `sitemap_include` holds a `{section}` or `{locale}` placeholder (`NotInThisSlice("sitemap_admitted")`, Open points, item 4), which only `mslearn` has and whose conversion already stops the run. A Retry-After past `retry_after_cap` on a robots.txt or a declared sitemap's try retires the host, which stays `NotInThisSlice("RetireHostOnLongRetryAfter")` (the breaker slice's, T18); on a speculative probe it pauses the host instead (Open points, item 1, answered at `ecfa257`). |
 
 ### Facts a later reader would otherwise rediscover
 
@@ -147,8 +148,8 @@ first end-to-end proof that a page budget stops a run whose frontier discovery f
   before returning it, and no `Any` crosses its boundary (`warn_return_any`, part of
   strict). `scripts/wheel_smoke.py`' `PACKAGE_FILES` gains `rovo/_crawl/sitemaps.py`
   and every page that counts the package files (twenty-six) follows.
-- **A URL with no identity is neither observed nor discovered** (Open points, item 2,
-  the interim). The specification says `identity_of` is null for a URL `normalise_url`
+- **A URL with no identity is neither observed nor discovered** (Open points, items 2
+  and 10, answered at `ecfa257`: skipped silently and uncounted, no problem). The specification says `identity_of` is null for a URL `normalise_url`
   cannot normalise (`mirror.allium` 113 to 118), and `ExpandSitemapEntries` and
   `ReadLlmsTxt` raise `UrlObserved` with `scope.identity_of(...)` unguarded; the code's
   `normalise_url` raises `ValueError` instead. Until the maintainer answers, such a
@@ -156,10 +157,17 @@ first end-to-end proof that a page budget stops a run whose frontier discovery f
   problem, and it counts toward neither sitemap cap, by the precedent of `mirror.allium`
   1106 to 1109 (a destination whose identity cannot be computed satisfies no rule) and
   of `within_bounds` (a malformed URL is out of bounds). The run never crashes on one.
-- **Sitemap and llms.txt tries are `fetch_resource`'s, unchanged** (Open points, item 1,
-  the interim): each is retried as a robots.txt try is, with a `HostBackedOff` per retry,
-  `retry_after_honored` counted for a Retry-After on a 429 or 503, and a Retry-After past
-  `retry_after_cap` stopping at `NotInThisSlice("RetireHostOnLongRetryAfter")`. Their
+- **Sitemap and llms.txt tries are `fetch_resource`'s** (Open points, items 1 and 3,
+  answered at `ecfa257`): each is retried as a robots.txt try is, with a `HostBackedOff`
+  per retry and every honoured Retry-After on a retryable answer (a 429 or any 5xx)
+  counted. A Retry-After past `retry_after_cap` ends the tries with that answer, no wait
+  and no pause; the caller decides: a robots.txt or a declared sitemap (named by
+  robots.txt or by a declared index) retires the host, still
+  `NotInThisSlice("RetireHostOnLongRetryAfter")` (T18); a speculative probe (an
+  undeclared well-known sitemap, llms.txt, or a speculative index's child) ends
+  unavailable and silent and pauses the host until `retry_after_cap` from then, never
+  shortening a longer pause, with a `HostBackedOff`. With `honor_retry_after` off
+  neither happens. An index's children are declared exactly when the index is. Their
   bytes count toward `run.bytes_fetched`; their tries never count toward
   `run.fetch_attempts`.
 - **The dry run, as built** (Open points, items 5 and 6, the interims). `rovo sync
@@ -233,7 +241,8 @@ green; the Allium loop's witness record says `PASS`.
   `ReuseUnchangedSitemap` is not realised (T14; Facts).
 - No redirect following for a sitemap or an llms.txt: a 3xx answer stops the run, as for
   robots.txt; `config-default.discovery_max_redirects` is not owned.
-- No sitemap children on another host: the open question (`crawl.allium` 2136) stays
+- No sitemap children on another host: the open question (`crawl.allium` 2272 at
+  `ecfa257`) stays
   open, and its interim, children read only on the host that served the index, is what
   this slice builds and tests.
 - No `{section}` or `{locale}` filling in `sitemap_include` (Open points, item 4): a
@@ -245,7 +254,7 @@ green; the Allium loop's witness record says `PASS`.
 - No new `rovo.toml` key or environment variable; one new flag, `--dry-run`; no new
   dependency (`lxml` is already a runtime dependency, Facts).
 - No specification change: `docs/specs/` is read, not edited. The six `open question`
-  blocks stay open (`crawl.allium` 2136 to 2138, `convert.allium` 473 to 475); the first
+  blocks stay open (`crawl.allium` 2272 to 2274 at `ecfa257`, `convert.allium` 473 to 475); the first
   is on this slice's path and its interim holds. A specification gap found while
   planning, implementing, in weed or in review is never resolved in code or in the
   specification: every such gap joins the one batched needs-user question (Open points)
@@ -258,41 +267,43 @@ green; the Allium loop's witness record says `PASS`.
 
 | Path | Class | Content |
 | --- | --- | --- |
-| `src/rovo/_crawl/sitemaps.py` | new | the pure discovery black boxes (Facts): `well_known_sitemaps`, `llms_txt_url`, `is_sitemap_document`, `sitemap_is_index`, `sitemap_entries` (lxml with entities, the network and DTDs off), `resolve_url`, `llms_txt_targets`, `sitemap_admitted` (an empty `sitemap_include` admits all; a placeholder raises `NotInThisSlice("sitemap_admitted")`) |
-| `src/rovo/_crawl/model.py` | shared, own lines | `SitemapEntry`, `ObservedUrl` and `SitemapSnapshot`; `Frontier.observed_urls` typed and `Frontier.sitemap_snapshots`; the run's implementation state for the sitemaps read this run and the frontier's row count after discovery |
-| `src/rovo/_crawl/run.py` | shared, own lines | `discover` raising the host's sitemaps and llms.txt; `queue_sitemaps`, `read_robots_before_sitemap`, `fetch_sitemap`, `accept_fresh_sitemap`, `reject_non_sitemap`, `skip_unavailable_sitemap`, `expand_sitemap_entries`, `read_llms_txt`, `record_observation`; `drop_stale_observations` with its effect and the discovered count; `dry_run` and `begin_crawl`; `drive_run` ending a dry run at `DryRun` (its `NotInThisSlice("DryRun")` removed); the 3xx guards of Context; `load_frontier` and `save_frontier` reading and writing `observed_urls`; a pure `dry_run_listing(run, frontier)` (the pending rows' identities in `next_pending` order); the module and `save_frontier` docstrings |
+| `src/rovo/_crawl/sitemaps.py` | new | the pure discovery black boxes (Facts): `well_known_sitemaps`, `llms_txt_url`, `is_sitemap_document`, `sitemap_is_index`, `sitemap_entries` (lxml with entities, the network and DTDs off), `resolve_url`, `llms_txt_targets`, `sitemap_admitted` (an empty `sitemap_include` admits all; a placeholder raises `NotInThisSlice("sitemap_admitted")`); the follow-up moves two docstrings' citations to the specification |
+| `src/rovo/_crawl/model.py` | shared, own lines | `SitemapEntry`, `ObservedUrl` and `SitemapSnapshot`; `Frontier.observed_urls` typed and `Frontier.sitemap_snapshots`; the run's implementation state for the sitemaps read this run and the frontier's row count after discovery; the follow-up drops `SiteResponse.may_carry_retry_after` (gone from `crawl.allium` at `ecfa257`) and moves two citations to `ecfa257` |
+| `src/rovo/_crawl/run.py` | shared, own lines | `discover` raising the host's sitemaps and llms.txt; `queue_sitemaps`, `read_robots_before_sitemap`, `fetch_sitemap`, `accept_fresh_sitemap`, `reject_non_sitemap`, `skip_unavailable_sitemap`, `expand_sitemap_entries`, `read_llms_txt`, `record_observation`; `drop_stale_observations` with its effect and the discovered count; `dry_run` and `begin_crawl`; `drive_run` ending a dry run at `DryRun` (its `NotInThisSlice("DryRun")` removed); the 3xx guards of Context; `load_frontier` and `save_frontier` reading and writing `observed_urls`; a pure `dry_run_listing(run, frontier)` (the pending rows' identities in `next_pending` order); the module and `save_frontier` docstrings; the follow-up: an index's children inherit `declared`, `fetch_robots` and a declared sitemap retire the host on a long Retry-After (still `NotInThisSlice`), a speculative probe's long Retry-After pauses the host, `count_retry_after` counts any retryable answer |
 | `src/rovo/_report.py` | shared, own lines | `close_run`'s dry-run branch (no finalise pass; its `NotInThisSlice("CloseRun")` removed) and `discovered` from the run's count |
 | `src/rovo/_commands.py` | shared, own lines | `sync(..., dry_run=False)`: `SyncOptions.dry_run` from it; a dry run prints the listing on standard output, skips `finalise`, saves the manifest and the run, and writes the report |
 | `src/rovo/cli.py` | shared, own lines | `sync_command` gains `--dry-run` |
 | `scripts/wheel_smoke.py` | shared, own lines | `PACKAGE_FILES` gains `rovo/_crawl/sitemaps.py`; the verdict line's count follows |
 | `tests/fakes.py` | shared, own lines | `xml_response(url, text)` beside `html_response` and `text_response`; `fixture_site` answers `.xml` files with it |
-| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3; the re-propagated tests of step 3 |
-| `tests/test_sitemaps.py` | new | hand-written black-box tables (Facts): a urlset, an index, a namespaced and an unnamespaced root, a child without `loc`, `lastmod` present and absent, a document that does not parse, an entity declaration not expanded, a plain-text and an HTML answer; `llms_txt_targets` on inline links, a relative link, a repeated link, text with no link; `sitemap_admitted` on an empty filter and a placeholder |
+| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3; the re-propagated tests of step 3; the follow-up renumbers `rule-failure.ReadRobotsBeforeSitemap.3` to `.5` and `rule-failure.FetchSitemap.3` to `.6` one up, adds the identity guards `.3`, re-propagates T12's `test_rule_success_CountRetryAfter`, `test_rule_failure_CountRetryAfter_3` and `test_entity_fields_SiteResponse`, and adds the pause, retry-count, declaredness and no-identity guarantees |
+| `tests/test_sitemaps.py` | new | hand-written black-box tables (Facts): a urlset, an index, a namespaced and an unnamespaced root, a child without `loc`, `lastmod` present and absent, a document that does not parse, an entity declaration not expanded, a plain-text and an HTML answer; `llms_txt_targets` on inline links, a relative link, a repeated link, text with no link; `sitemap_admitted` on an empty filter and a placeholder; the follow-up adds an empty `loc` skipped and a `lastmod` stripped |
 | `tests/test_mirror.py` | shared, own lines | the mirror obligations of step 3 |
 | `tests/test_report.py` | shared, own lines (re-propagated) | `test_rule_success_CloseRun` gains the dry-run branch and `discovered` after discovery |
-| `tests/test_commands.py` | shared, own lines (re-propagated) | `sync` with `dry_run`; the exact request list at 259 |
+| `tests/test_commands.py` | shared, own lines (re-propagated) | `sync` with `dry_run`; the exact request list at 259; the follow-up moves a docstring's citation to the specification |
 | `tests/test_cli.py` | shared, own lines | `rovo sync --help` names `--dry-run`, only if a test lists sync's options |
 | `tests/test_links.py` | shared, own lines (re-propagated) | the exact request list at 280 |
-| `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_owner_testing_and_dry_runs_stop` loses its dry-run half and `test_a_dry_run_report_and_a_versioned_path_stop` its `close_run` half (both now realised); the three new guards of Context, each asserted |
-| `tests/test_regressions.py` | shared, own lines | one test per divergence planning, weed or review finds: `discovered` counts the rows after discovery, not the rows a link added later; a sitemap entry and an llms.txt target with no identity (a port out of range) leave the run finishing, unobserved and undiscovered |
-| `tests/test_pace.py` | shared, own lines (re-propagated) | only the tests the red run shows red for the three probes (Facts) |
-| `tests/e2e/test_discovery_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and the site-generating helper; not `test_sitemaps.py` or `test_discovery.py`, so no unit test shares its basename |
+| `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_owner_testing_and_dry_runs_stop` loses its dry-run half and `test_a_dry_run_report_and_a_versioned_path_stop` its `close_run` half (both now realised); the three new guards of Context, each asserted; the follow-up adds a declared sitemap's long Retry-After stopping at `RetireHostOnLongRetryAfter`, and re-propagates T12's `test_httpx_fetcher_sends_validators_and_reads_retry_after` (`retryable` for `may_carry_retry_after`) |
+| `tests/test_regressions.py` | shared, own lines | one test per divergence planning, weed or review finds: `discovered` counts the rows after discovery, not the rows a link added later; a sitemap entry and an llms.txt target with no identity (a port out of range) leave the run finishing, unobserved and undiscovered; the follow-up moves two docstrings' citations to the specification |
+| `tests/test_pace.py` | shared, own lines (re-propagated) | only the tests the red run shows red for the three probes (Facts); the follow-up moves its `crawl.allium` citations to `ecfa257` |
+| `tests/test_convert.py` | shared, own lines | the follow-up moves one `crawl.allium` citation to `ecfa257` |
+| `src/rovo/_crawl/pace.py` | shared, own lines | the follow-up: `fetch_resource` counts every honoured Retry-After on a retryable answer and ends its tries on one past `retry_after_cap`, leaving retirement or pause to its caller |
+| `tests/e2e/test_discovery_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and the site-generating helper; not `test_sitemaps.py` or `test_discovery.py`, so no unit test shares its basename; the follow-up adds the speculative probes' pause and silence scenario |
 | `tests/e2e/test_init_sync.py` | shared, own lines (re-propagated) | `test_robots_disallow_skips_the_seed` patches `pace.time.sleep` before its `CliRunner` sync (Facts) |
 | `tests/e2e/test_polite_sync.py` | shared, own lines (re-propagated) | the installed-script scenario's expected log gains the three probes; any other scenario the red run shows red for them |
 | `tests/e2e/test_follow_links.py`, `tests/e2e/test_index_files.py` | shared, own lines (re-propagated) | only where the red run shows an exact log, `discovered` or `bytes_fetched` assertion red for the probes |
-| `docs/reference/cli.md` | shared, own lines | `rovo sync`: discovery from sitemaps and llms.txt, the index children, the observations, the declared-sitemap problems and the silent probes, the sitemap caps; `--dry-run` and its listing; the later-slice sentence gains a redirected sitemap or llms.txt and a profile whose sitemap filter has a placeholder; the usage block |
+| `docs/reference/cli.md` | shared, own lines | `rovo sync`: discovery from sitemaps and llms.txt, the index children, the observations, the declared-sitemap problems and the silent probes, the sitemap caps; `--dry-run` and its listing; the later-slice sentence gains a redirected sitemap or llms.txt and a profile whose sitemap filter has a placeholder; the usage block; the follow-up: retries of sitemaps and `llms.txt`, a probe's long Retry-After pausing the host, children declared as their index, every honoured Retry-After counted |
 | `docs/reference/mirror.md` | shared, own lines | `frontier.json`'s `observed_urls` filled and read back; sitemap snapshots not yet saved (T14); a dry run's files |
 | `docs/reference/testing.md` | shared, own lines | `tests/test_sitemaps.py`, `tests/e2e/test_discovery_sync.py`, `xml_response`, the package-file count |
 | `docs/how-to/test-and-debug.md` | shared, own lines | the package-file count |
 | `docs/explanation/architecture.md` | shared, own lines | `sitemaps` in `_crawl`'s part of the private modules' row |
 | `docs/project/repository-map.md` | shared, own lines | the tree gains `sitemaps.py`, `test_sitemaps.py` and `test_discovery_sync.py` |
 | `AGENTS.md` | shared, own lines | line 10's "today" sentence ("mirror the pages linked from the seeds") becomes false: it names the sitemaps and llms.txt too |
-| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: sitemaps, llms.txt, observations, the sitemap caps and `--dry-run` |
+| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: sitemaps, llms.txt, observations, the sitemap caps and `--dry-run`; the follow-up extends it with the answered behaviour |
 | `tickets/README.md`, `tickets/T13-discovery.md` | ticket | index row, graph, slice bullet, this ticket |
 | `.allium-loop/T13-discovery.json`, `.allium-loop/T13-discovery.witness.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `pyproject.toml`, `uv.lock`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
-`Justfile`, `src/rovo/__init__.py`, `src/rovo/_crawl/pace.py`, `src/rovo/_crawl/fetch.py`,
+`Justfile`, `src/rovo/__init__.py`, `src/rovo/_crawl/fetch.py`,
 `src/rovo/_mirror/`, `src/rovo/_convert/`, `src/rovo/_config.py`, `tests/e2e/conftest.py`,
 `tests/test_import_direction.py`, `docs/decisions/` and `docs/specs/` are read, not
 changed. A file not in this table that turns out to need a change is added to the table
@@ -373,8 +384,8 @@ beyond the black boxes, which `tests/test_sitemaps.py` pins. Weed and the witnes
      `config-default.sitemap_priority`, `config-default.llms_txt_priority`,
      `rule-success.QueueSitemaps`, `rule-failure.QueueSitemaps.1`,
      `rule-failure.QueueSitemaps.2`, `rule-success.ReadRobotsBeforeSitemap`,
-     `rule-failure.ReadRobotsBeforeSitemap.1` to `.5`, `rule-success.FetchSitemap`,
-     `rule-failure.FetchSitemap.1` to `.6`, `rule-success.AcceptFreshSitemap`,
+     `rule-failure.ReadRobotsBeforeSitemap.1` to `.6`, `rule-success.FetchSitemap`,
+     `rule-failure.FetchSitemap.1` to `.7`, `rule-success.AcceptFreshSitemap`,
      `rule-failure.AcceptFreshSitemap.1`, `rule-success.RejectNonSitemap`,
      `rule-failure.RejectNonSitemap.1`, `rule-success.SkipUnavailableSitemap`,
      `rule-failure.SkipUnavailableSitemap.1`, `rule-success.ExpandSitemapEntries`,
@@ -613,7 +624,16 @@ commit.
 
 ## Open points
 
-- **The T13 batched needs-user question: OPEN.** One question to the maintainer, its
+- **The T13 batched needs-user question: ANSWERED** (items 1 to 10; the specification
+  states the answers at `ecfa257`). Item 1: sitemap and llms.txt tries are retried as
+  robots.txt's are; a declared sitemap may retire its host on a long Retry-After (the
+  trip stays T18's), a speculative probe never does (follow-up B: it pauses the host for
+  `retry_after_cap` instead), and an index's children are declared exactly when the
+  index is (follow-up A). Items 2 and 10: a URL with no identity is skipped silently,
+  uncounted, with no problem. Item 3: every honoured Retry-After is counted, on any
+  retryable answer. Items 4 to 9: the interims are accepted as the specification now
+  states them (`FetchSitemap`, `DryRun`, `AcceptFreshSitemap`, `ExpandSitemapEntries`,
+  `ReadLlmsTxt` and `Discover` guidance). The question as asked follows. One question to the maintainer, its
   items numbered so an answer can cite them. Items 1 to 3 are carried from T12
   (`tickets/T12-robots-politeness.md` Open points; `ai_tmp/T12/answers-report.md`,
   Residual risk); items 4 to 7 were found while planning T13, item 8 by propagate.
@@ -699,7 +719,29 @@ commit.
       (`DiscoveryProblem` has no member for it), and does such a child count toward
       `sitemap_children_read`? Interim: skipped, no problem, not counted; the run never
       crashes on one.
-- **The first `crawl.allium` open question** (2136) is on this slice's path: may a
+- **The T13 follow-up batched needs-user question: OPEN.** Gaps the answers leave,
+  found while specifying them; each states the interim the specification at `ecfa257`
+  implies, built and never presented as the answer. Line numbers are at `ecfa257`.
+  1. **One URL falling due twice with different `declared` values** (a robots-declared
+     sitemap that a speculative index also names, or a speculative well-known sitemap
+     a declared index names). Interim: each sitemap is read at most once per run, so
+     the first due wins; declared sitemaps come first in discovery order (`Discover`
+     guidance, 742 to 756).
+  2. **The speculative pause's length.** A speculative probe's Retry-After past the cap
+     pauses the host for `retry_after_cap`, not for the longer time the server asked
+     (`FetchSitemap` 999 to 1001, `ReadLlmsTxt` 1193 to 1195), and further discovery to
+     that host carries on after it. Interim: `retry_after_cap`, as stated.
+  3. **Speculative children and `sitemap_children_read`.** A speculative index's
+     children count toward the per-host `sitemap_max_children` cap shared with declared
+     ones, so a speculative index can use the cap up with silent probes. Interim: they
+     count (`ExpandSitemapEntries`, 1143 to 1173).
+  4. **Carried to T17: `mslearn`'s `sitemap_include`** (`*/{section}_{locale}_*.xml`,
+     `convert.allium` 381). Until a decision fills `{section}` and `{locale}`, a run
+     under it stops at `NotInThisSlice("sitemap_admitted")` at its first sitemap.
+  5. **Carried to T18: a retired host's remaining discovery.** Once a host is retired,
+     its remaining sitemaps and llms.txt are still requested as the rules stand. Interim:
+     unchanged; retirement itself is still `NotInThisSlice` here.
+- **The first `crawl.allium` open question** (2272 at `ecfa257`) is on this slice's path: may a
   sitemap index on an allowed host point at child sitemaps on other hosts? It stays
   open; its interim, children read only on the host that served the index, is built and
   tested (Acceptance criteria, the second server's empty log).

@@ -533,12 +533,12 @@ def test_robots_rules_match_as_rfc_9309_says(
     """RFC 9309 matching as protego 0.7 implements it (crawl.allium fa096c4).
 
     In RFC 9309's terms the longest matching path wins, Allow wins a tie, and `*` and a
-    final `$` are wildcards (crawl.allium FetchSitemap guidance, 963 to 1003 at fa096c4).
-    The index.html fold (978 to 986, review T12-2-r2 B2): an Allow path ending in
+    final `$` are wildcards (crawl.allium FetchSitemap guidance, 1037 to 1077 at ecfa257).
+    The index.html fold (1052 to 1060, review T12-2-r2 B2): an Allow path ending in
     "/index.html" with no final `$` also allows its directory, as though "index.html"
     were replaced by `$`, so the directory's identity is allowed while a query on it is
     not. Nothing else folds: not "index.htm", not "INDEX.HTML", not an Allow with a final
-    `$`, and never a Disallow line. The literal-$ copy (987 to 1003, review T12-2-r3 C1):
+    `$`, and never a Disallow line. The literal-$ copy (1061 to 1077, review T12-2-r3 C1):
     a line ending in `$` also matches as a prefix with that `$` written "%24", and a `$`
     in a request path is compared as "%24", so "Allow: /guide/private/$" allows
     "/guide/private/$secret" and "Disallow: /guide/x$" denies "/guide/x$y"; the line the

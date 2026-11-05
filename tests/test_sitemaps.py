@@ -6,7 +6,8 @@ is `urlset` or `sitemapindex` in any namespace, `sitemap_is_index` the latter;
 order, a child without `loc` skipped; the parser expands no entity and reads no DTD.
 `llms_txt_targets` is every inline Markdown link, resolved against llms.txt, each once;
 `resolve_url` is `urljoin`; an empty `sitemap_include` admits every sitemap, and a
-placeholder stops at `NotInThisSlice("sitemap_admitted")` (Open points, item 4).
+placeholder stops at `NotInThisSlice("sitemap_admitted")` (FetchSitemap guidance; the
+mslearn placeholder is carried to T17).
 """
 
 import pytest
@@ -165,6 +166,21 @@ def test_sitemap_entries_of_a_urlset() -> None:
     )
 
 
+def test_sitemap_entries_skip_an_empty_loc_and_strip_the_lastmod() -> None:
+    """AcceptFreshSitemap guidance (crawl.allium ecfa257): only a non-empty loc is an entry.
+
+    An empty or blank loc is no entry; a lastmod is stripped as the loc is.
+    """
+    text = (
+        f'<urlset xmlns="{NS}"><url><loc></loc></url><url><loc>  \n </loc></url>'
+        f"<url><loc> {SITE}/guide/a.html </loc><lastmod>\n 2026-10-01 \n</lastmod></url>"
+        "</urlset>"
+    )
+    assert sitemap_entries(xml_response(MAP, text)) == (
+        SitemapEntry(loc=f"{SITE}/guide/a.html", lastmod="2026-10-01"),
+    )
+
+
 def test_sitemap_entries_of_an_index() -> None:
     """Each sitemap child's loc and lastmod, in document order."""
     assert sitemap_entries(xml_response(MAP, INDEX)) == (
@@ -224,7 +240,7 @@ def test_an_empty_sitemap_filter_admits_every_sitemap() -> None:
 
 
 def test_a_sitemap_filter_placeholder_stops_at_sitemap_admitted() -> None:
-    """The mslearn {section} and {locale} are unstated (Open points, item 4): a later slice."""
+    """The mslearn {section} and {locale} are unstated (FetchSitemap guidance): T17's."""
     with pytest.raises(NotInThisSlice) as stopped:
         sitemap_admitted(f"{SITE}/sitemapindex.xml", profiles.MSLEARN, scope())
     assert stopped.value.rule == "sitemap_admitted"
