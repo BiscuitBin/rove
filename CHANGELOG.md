@@ -130,3 +130,11 @@ policy.
   when a page link, a sitemap or `llms.txt` names it again, once per sync. A directory
   under `pages/<host>/` keeps one spelling: a new page whose directory differs only in
   case from one a page already uses takes that spelling.
+- Errors and the report: `rovo sync` settles an answer that is not HTML as
+  `skipped_not_html` instead of stopping; refuses, in the specification's order and
+  before any request, an invalid configuration, a changed root without the new `--yes`,
+  an off-host `--url` and an unknown `--path`, each with a refused `crawl-report.json`;
+  ends an interrupted or crashed run `interrupted`, publishing what it stored and
+  writing the report with its `error`; prints progress as JSON lines under `--json`;
+  reads `ROVO_<SECTION>__<FIELD>` variables and `--set SECTION.FIELD=VALUE` flags over
+  `rovo.toml`. The new `rovo report OUT_DIR` prints the last report.

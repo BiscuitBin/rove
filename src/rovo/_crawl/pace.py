@@ -143,6 +143,8 @@ def back_off(host: Host, try_: int, retry_after: timedelta | None) -> HostBacked
     host.paused_until = until if host.paused_until is None else max(host.paused_until, until)
     backed_off = HostBackedOff(host=host, until=until)
     run.backoffs.append(backed_off)
+    if run.on_backoff is not None:  # The root's AnnounceBackoff, live.
+        run.on_backoff(backed_off)
     return backed_off
 
 
@@ -171,6 +173,8 @@ def pause_for_cap(host: Host) -> HostBackedOff:
     host.paused_until = until if host.paused_until is None else max(host.paused_until, until)
     backed_off = HostBackedOff(host=host, until=until)
     run.backoffs.append(backed_off)
+    if run.on_backoff is not None:  # The root's AnnounceBackoff, live.
+        run.on_backoff(backed_off)
     return backed_off
 
 

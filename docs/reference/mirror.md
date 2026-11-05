@@ -71,9 +71,13 @@ in the last column. The standard library reads the file with `tomllib`.
 | `mirror.prune` | `false`: a removed page's file is archived under `_removed/`; `true` deletes it | `config.prune`, `mirror.allium` |
 | `unblocking.provider` | absent; any value is a configuration problem | `Configuration`, `rovo.allium` |
 
-An unknown section or key, a value of the wrong type or outside its choices, a profile
-the catalogue lacks, or a file that does not parse makes the configuration invalid, and
-`rovo sync` names every bad key path on standard error. The configuration's `hash`, in
+The file is the second of four layers, a later one winning key by key: the built-in
+defaults, `rovo.toml`, the `ROVO_<SECTION>__<FIELD>` environment variables, then the
+`--set` flags of `rovo sync`; the [command-line reference](cli.md#rovo-sync) gives the
+variable and flag syntax. An unknown section or key, a value of the wrong type or
+outside its choices, a profile the catalogue lacks, or a file that does not parse, from
+any layer, makes the configuration invalid, and `rovo sync` names every bad key path on
+standard error and in the refused report. The configuration's `hash`, in
 the report, is the first 16 hex digits of the SHA-256 of the resolved values as
 canonical JSON.
 
@@ -127,6 +131,9 @@ discovery ends, once it has gone unrequested for more than
 An absent file holds no snapshot. `runs.json` holds `runs`, one row per run, oldest
 first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
 `finished_at` and `unresolved_urls`. A run's id is one more than the highest id there.
+A sync that crashes after its run ended still records the run's row, though it saves
+neither the manifest nor the frontier, so its id is never reused; a refused sync records
+none.
 Both files are written only after the manifest, so a frontier row marked `done` always
 has its page in the manifest; a sync that stops before then saves neither. A dry run
 (`rovo sync --dry-run`) saves the manifest, the frontier with the rows its discovery
@@ -377,8 +384,15 @@ pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` th
 `changed`, `unchanged`, `moved` (with the old path in `moved_from`), `removed` (once per
 removal, with the path the record keeps) or `failed`. Every list is
 sorted by URL or path, durations are seconds, and `started_at` and `finished_at` are
-the only times. `rovo sync` writes it once, when the report is ranked; a refused sync
-writes none yet.
+the only times. `rovo sync` writes it once, when the report is ranked, an interrupted or
+crashed sync included: its `report_status` is `interrupted` and `error` holds a crash's
+`"<ExceptionType>: <message>"` (`null` for an operator interrupt). A refused sync
+writes a refused report instead: `report_status: refused`, `run_id: null`,
+`exit_code: usage`, `refusal_reason` naming the refusal, `effective_policy: null` and
+every count and list empty. `options` records what the sync asked for, `targeted`
+included (true when a `--url` or `--path` was named). `rovo report` prints the file.
+A sync that stops at a branch a later slice implements, or that finds no mirror,
+leaves the previous report in place.
 
 ## Related pages
 

@@ -528,7 +528,9 @@ class Run:
     # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns;
     # the sitemaps read this run (FetchSitemap reads each at most once), the frontier's
     # row count when discovery ended (rovo.allium CloseRun's discovered_count), and the
-    # limiter of each host name a robots.txt hop reached before OpenHost opened it.
+    # limiter of each host name a robots.txt hop reached before OpenHost opened it; and
+    # the root's sinks: its progress sink (start and page) and its AnnounceBackoff, which
+    # the run hands each HostBackedOff as it is raised.
     timer: "Timer" = field(repr=False)
     draw: Callable[[float, float], float] = field(repr=False)
     discovery_failures: list["DiscoveryFailed"] = field(default_factory=list, repr=False)
@@ -536,6 +538,8 @@ class Run:
     sitemaps_read: set[str] = field(default_factory=set, repr=False)
     discovered_count: int = field(default=0, repr=False)
     pending_limiters: dict[str, "Host"] = field(default_factory=dict, repr=False)
+    progress: Callable[["ProgressEvent"], None] | None = field(default=None, repr=False)
+    on_backoff: Callable[["HostBackedOff"], None] | None = field(default=None, repr=False)
 
     @property
     def tripped_hosts(self) -> list["Host"]:
@@ -830,6 +834,27 @@ class HostBackedOff:
 
     host: Host
     until: datetime
+
+
+@dataclass(frozen=True, kw_only=True)
+class UrlSkippedBlocked:
+    """The UrlSkippedBlocked trigger (crawl.allium SelectBatch's all-tripped branch, T18)."""
+
+    run: Run
+    url: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ProgressEvent:
+    """rovo.allium's ProgressReported, as the progress sink receives it.
+
+    `event` is one of start, page, host_backoff, breaker_tripped, owner_testing_warning
+    and done; `host` and `until` are null where the event names none.
+    """
+
+    event: str
+    host: str | None
+    until: datetime | None
 
 
 @dataclass(frozen=True, kw_only=True)

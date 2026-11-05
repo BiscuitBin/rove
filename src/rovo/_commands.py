@@ -1,17 +1,19 @@
-"""The root's rules (rovo.allium): init, sync and index, composing config, crawl, mirror, report.
+"""The root's rules (rovo.allium): init, sync, index and report, over config, crawl, mirror.
 
 Each command returns the ExitCode the process exits with and writes its problems to
 standard error. `sync` takes the Fetcher and the Timer it runs and paces with, so tests
 drive it without the network and without sleeping; `rovo.cli` builds the real ones.
-Only the mirror's modules load with this one: `index` never crawls, so `init` and `sync`
-import the configuration, the crawl and the report inside their bodies, and `rovo index`
-loads neither httpx nor rovo._crawl.
+Only the mirror's modules load with this one: `index` and `report` never crawl, so `init`
+and `sync` import the configuration, the crawl and the report inside their bodies, and
+`rovo index` and `rovo report` load neither httpx nor rovo._crawl.
 """
 
 import importlib.metadata
 import importlib.util
+import json
+import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,16 +26,20 @@ from rovo._mirror.state import (
     ManifestError,
     load_mirror,
     manifest_path,
+    report_path,
     save_mirror,
     write_text,
 )
-from rovo._mirror.urls import is_http_url
+from rovo._mirror.urls import hostname_of, is_http_url
 from rovo._unfinished import NotInThisSlice
 
 if TYPE_CHECKING:
-    from rovo._config import Configuration
+    from rovo._config import Configuration, SyncOptions
     from rovo._crawl.fetch import Fetcher
+    from rovo._crawl.model import ProgressEvent, Run
     from rovo._crawl.pace import Timer
+    from rovo._crawl.run import CrawlResult
+    from rovo._report import CrawlReport
 
 
 def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitCode:
@@ -69,27 +75,37 @@ def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitC
     return ExitCode.ok
 
 
-def sync(
+def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     out_dir: Path,
     *,
     fetcher: "Fetcher",
     clock: "Timer",
     tier_installed: Callable[[Tier], bool] | None = None,
     dry_run: bool = False,
+    confirmed: bool = False,
+    urls: Sequence[str] = (),
+    paths: Sequence[str] = (),
+    overrides: Sequence[str] = (),
+    json_events: bool = False,
+    progress: "Callable[[ProgressEvent], None] | None" = None,
 ) -> ExitCode:
-    """Realises rovo.allium RefuseSyncWithoutDirectory, StartSync and the report's rules.
+    """Realises rovo.allium's sync refusals in order, ReportRefusal, StartSync and the rest.
 
-    A dry run discovers, prints the identity of each row it would fetch, one a line on
-    standard output, and fetches, converts and writes no page; it saves the manifest,
-    the frontier and the run, and writes the report. A missing directory or a missing or
-    unparsable manifest exits usage with no report.
-    Until the refusals slice, every other failed StartSync guard does too, rather than
-    writing a refused report. A branch a later slice implements exits partial and
-    leaves the previous report in place.
+    A missing directory or a missing or unparsable manifest exits usage with no report
+    (RefuseSyncWithoutDirectory). The configuration is resolved from rovo.toml, the
+    process's ROVO_<SECTION>__<FIELD> variables and the `overrides` (--set). Every later
+    refusal, the first that applies, writes a refused report and exits usage, with no
+    request. A dry run discovers, prints the identity of each row it would fetch, one a
+    line on standard output, and fetches, converts and writes no page; it saves the
+    manifest, the frontier and the run, and writes the report. `progress` receives the
+    run's progress events, done last. A branch a later slice implements exits partial
+    and leaves the previous report in place.
     """
     from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        SyncOptions,
         resolve_config,
     )
+    from rovo._report import report_refusal  # noqa: PLC0415  It loads rovo._crawl.
 
     installed = tier_installed or _tier_installed
     if not out_dir.is_dir():
@@ -98,63 +114,113 @@ def sync(
         mirror = load_mirror(out_dir)
     except ManifestError as error:
         return _refuse(f"sync: no mirror in {out_dir} ({error})")
-    settings = resolve_config(out_dir)
-    problem = _start_problem(mirror, settings, installed)
+    settings = resolve_config(out_dir, os.environ, overrides)
+    options = SyncOptions(
+        dry_run=dry_run,
+        confirmed=confirmed,
+        interactive=sys.stdin.isatty(),
+        json_events=json_events,
+        urls=tuple(urls),
+        paths=tuple(paths),
+    )
+    problem = _start_problem(mirror, settings, options, installed)
     if problem is not None:
-        return _refuse(f"sync: {problem}")
+        reason, detail = problem
+        report_refusal(mirror, Operator(), options, settings, reason, clock=clock)
+        return _refuse(f"sync: {detail}")
     try:
-        return _start_sync(mirror, settings, fetcher, clock, dry_run=dry_run)
+        return _start_sync(mirror, settings, options, fetcher, clock, progress=progress)
     except NotInThisSlice as stopped:
         sys.stderr.write(f"rovo: sync stopped: {stopped}\n")
         return ExitCode.partial
 
 
 def _start_problem(
-    mirror: Mirror, settings: "Configuration", installed: Callable[[Tier], bool]
-) -> str | None:
-    """The first StartSync guard that fails, in the refusals' order, else None."""
+    mirror: Mirror,
+    settings: "Configuration",
+    options: "SyncOptions",
+    installed: Callable[[Tier], bool],
+) -> tuple[str, str] | None:
+    """The first refusal that applies, in the specification's order: (reason, detail).
+
+    The reason is the refused report's refusal_reason; the detail is standard error's.
+    """
     from rovo._crawl.model import RobotsMode  # noqa: PLC0415  Only a sync loads the crawl.
 
+    bad_config = "invalid configuration"
+    tier_missing = "configured tier is not installed"
+    robots = "robots = ignore is only for an owner-testing run"
+    off_host = [
+        url
+        for url in options.urls
+        if not is_http_url(url) or hostname_of(url) not in settings.allowed_hosts
+    ]
+    unknown = [path for path in options.paths if path not in mirror.page_paths]
     problems = (
-        (not settings.valid, "invalid configuration: " + "; ".join(settings.problems)),
-        (not settings.has_seeds, "invalid configuration: no root URL and no start URL"),
+        (not settings.valid, bad_config, f"{bad_config}: " + "; ".join(settings.problems)),
+        (not settings.has_seeds, bad_config, f"{bad_config}: no root URL and no start URL"),
         (
             settings.unblocking_provider is not None,
-            "invalid configuration: unblocking.provider is reserved",
+            bad_config,
+            f"{bad_config}: unblocking.provider is reserved",
         ),
         (
-            settings.root_changed(mirror.recorded_root_url),
-            "the root URL changed since the last run and needs confirmation",
+            settings.root_changed(mirror.recorded_root_url) and not options.confirmed,
+            "changed root requires confirmation",
+            "the root URL changed since the last run and needs confirmation (--yes)",
+        ),
+        (
+            bool(off_host),
+            "invalid or off-host target",
+            f"not an http(s) URL on an allowed host: {', '.join(off_host)}",
+        ),
+        (
+            bool(unknown),
+            "unknown target path",
+            f"not a written page's path: {', '.join(unknown)}",
         ),
         (
             settings.needs_browser and not installed(Tier.browser),
+            tier_missing,
             "the configured browser tier is not installed",
         ),
         (
             settings.needs_stealth and not installed(Tier.stealth),
+            tier_missing,
             "the configured stealth tier is not installed",
         ),
-        (
-            settings.robots is not RobotsMode.respect,
-            "robots = ignore is only for an owner-testing run",
-        ),
+        (settings.robots is not RobotsMode.respect, robots, robots),
     )
-    return next((problem for failed, problem in problems if failed), None)
+    return next(
+        ((reason, detail) for failed, reason, detail in problems if failed),
+        None,
+    )
 
 
-def _start_sync(
-    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: "Timer", *, dry_run: bool
+def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progress sink.
+    mirror: Mirror,
+    settings: "Configuration",
+    options: "SyncOptions",
+    fetcher: "Fetcher",
+    clock: "Timer",
+    *,
+    progress: "Callable[[ProgressEvent], None] | None",
 ) -> ExitCode:
-    """StartSync, then the run, CloseRun, the finalise pass and RankAndWriteReport."""
+    """StartSync, then the run, CloseRun, the finalise pass and RankAndWriteReport.
+
+    An operator interrupt or an error during the run ends it interrupted (InterruptSync,
+    RecordCrash); one after it (RecordCrashAfterRun) writes the open report as it stands,
+    saves neither the manifest nor the frontier, and records the run in runs.json.
+    """
     # Only a sync loads the configuration, the crawl and the report (rovo index never).
     from rovo._config import (  # noqa: PLC0415  Only a sync loads the crawl.
-        SyncOptions,
         effective_policy,
         scope_hash,
         scope_of,
         signature_of,
     )
     from rovo._crawl.model import (  # noqa: PLC0415  Only a sync loads the crawl.
+        ProgressEvent,
         RobotsMode,
         RunKind,
         RunMode,
@@ -162,34 +228,20 @@ def _start_sync(
     )
     from rovo._crawl.run import (  # noqa: PLC0415  Only a sync loads the crawl.
         drive_run,
-        dry_run_listing,
         load_frontier,
         next_run_id,
-        save_run,
+        record_run,
     )
     from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
         CrawlReport,
         CrawlReportStatus,
         ReportStatus,
-        close_run,
-        finalise_run_report,
+        announce_backoff,
         rank_and_write_report,
-        take_broken_links,
-        tally_discovery_problem,
-        tally_failed_url,
-        tally_finalised_page,
-        tally_removal,
+        record_crash_after_run,
     )
 
     operator = Operator()
-    options = SyncOptions(
-        dry_run=dry_run,
-        confirmed=False,
-        interactive=sys.stdin.isatty(),
-        json_events=False,
-        urls=(),
-        paths=(),
-    )
     seed = settings.root_url or settings.start_urls[0]
     profile = profile_for(seed, settings.profile_name) or GENERIC
     scope = scope_of(settings, profile)
@@ -201,6 +253,10 @@ def _start_sync(
     mirror.recorded_root_url = settings.root_url
     mirror.prune = settings.prune
     mirror.processing_signature = signature_of(scope, profile)
+    held = {page.path: page.identity for page in mirror.written_pages}
+    targets = frozenset(scope.identity_of(url) for url in options.urls) | frozenset(
+        held[path] for path in options.paths
+    )  # resolve_targets: each named URL normalised, each named path its page's identity.
     report = CrawlReport(
         mirror=mirror,
         operator=operator,
@@ -216,6 +272,7 @@ def _start_sync(
         status=CrawlReportStatus.open,
         effective_policy=policy,
         robots_ignored=policy.robots is RobotsMode.ignore,
+        targets=targets,
     )
     request = RunRequest(
         operator=operator,
@@ -232,9 +289,53 @@ def _start_sync(
         stealth_mode=settings.stealth_mode,
         max_age=settings.max_age,
         refollow_unchanged_links=settings.refollow_unchanged_links,
-        targets=frozenset(),
+        targets=targets,
     )
-    result = drive_run(request, load_frontier(mirror), fetcher, clock)
+    result = drive_run(
+        request,
+        load_frontier(mirror),
+        fetcher,
+        clock,
+        progress=progress,
+        on_backoff=None if progress is None else lambda event: progress(announce_backoff(event)),
+        on_failure=_failure_handler(mirror),
+    )
+    saved = False
+    try:
+        saved = _after_run(report, result, clock)
+    except NotInThisSlice:
+        raise
+    except (KeyboardInterrupt, Exception) as error:  # Interim (T16 Open points items 4, 5).
+        if not record_crash_after_run(mirror, result.run, report, _error_text(error)):
+            raise
+        if not saved:
+            record_run(result.run)
+    code = rank_and_write_report(report, result.run, clock)
+    if code is not None and progress is not None:
+        progress(ProgressEvent(event="done", host=None, until=None))
+    return ExitCode.partial if code is None else code
+
+
+def _after_run(report: "CrawlReport", result: "CrawlResult", clock: "Timer") -> bool:
+    """The run's events tallied, CloseRun, the finalise pass and the saves.
+
+    True once the run is saved (save_run), so a later crash does not record it twice.
+    """
+    from rovo._crawl.run import (  # noqa: PLC0415  Only a sync loads the crawl.
+        dry_run_listing,
+        save_run,
+    )
+    from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        close_run,
+        finalise_run_report,
+        take_broken_links,
+        tally_discovery_problem,
+        tally_failed_url,
+        tally_finalised_page,
+        tally_removal,
+    )
+
+    mirror = report.mirror
     for problem in result.discovery_failed:
         tally_discovery_problem(report, problem)
     for failed in result.failed:
@@ -242,26 +343,43 @@ def _start_sync(
     for removed in result.removed:
         tally_removal(report, removed)
     close_run(report, result.run, result.frontier)
-    if not options.dry_run:  # CloseRun requested the finalise pass.
-        finalised = finalise(operator, mirror, result.run.id, clock)
-        for removed in finalised.removed:
-            tally_removal(report, removed)
-        for event in finalised.finalised:
-            tally_finalised_page(report, event)
-        if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.
-            take_broken_links(report, finalised.rewritten)
-        save_mirror(mirror)
-        save_run(result)  # Only now: a done frontier row must have its page saved.
-        if finalised.indexes is not None:  # BuildIndexes completes every pending pass.
-            finalise_run_report(finalised.indexes.pass_, result.run)
-    else:  # CloseRun raised ReportReady at once; the dry run's listing is printed.
+    if report.options.dry_run:  # CloseRun raised ReportReady at once; the listing is printed.
         sys.stdout.writelines(
             f"{identity}\n" for identity in dry_run_listing(result.run, result.frontier)
         )
         save_mirror(mirror)
         save_run(result)
-    code = rank_and_write_report(report, result.run, clock)
-    return ExitCode.partial if code is None else code
+        return True
+    finalised = finalise(report.operator, mirror, result.run.id, clock)  # CloseRun's pass.
+    for removed in finalised.removed:
+        tally_removal(report, removed)
+    for event in finalised.finalised:
+        tally_finalised_page(report, event)
+    if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.
+        take_broken_links(report, finalised.rewritten)
+    if finalised.indexes is not None:  # BuildIndexes completes every pending pass.
+        finalise_run_report(finalised.indexes.pass_, result.run)
+    save_mirror(mirror)
+    save_run(result)  # Only now: a done frontier row must have its page saved.
+    return True
+
+
+def _failure_handler(mirror: Mirror) -> "Callable[[Run, BaseException], None]":
+    """The root's InterruptSync and RecordCrash, as the run's failure callable."""
+    from rovo._report import interrupt_sync, record_crash  # noqa: PLC0415  It loads rovo._crawl.
+
+    def handle(run: "Run", error: BaseException) -> None:
+        if isinstance(error, KeyboardInterrupt):
+            interrupt_sync(mirror, run)
+        else:
+            record_crash(mirror, run, _error_text(error))
+
+    return handle
+
+
+def _error_text(error: BaseException) -> str:
+    """The crash's error text: "<ExceptionType>: <message>"."""
+    return f"{type(error).__name__}: {error}"
 
 
 def index(out_dir: Path) -> ExitCode:
@@ -283,6 +401,29 @@ def index(out_dir: Path) -> ExitCode:
         return _refuse(f"index: the page file {unreadable} is missing or not UTF-8")
     code = finish_index_command(index_pass(Operator(), mirror))
     return ExitCode.partial if code is None else code
+
+
+def report(out_dir: Path) -> ExitCode:
+    """Realises rovo.allium ShowReport and RefuseShowReport.
+
+    Prints crawl-report.json as written, with a final newline, on standard output. With
+    no directory, no loadable manifest, or no report file that reads as JSON
+    (latest_report is null), the problem goes to standard error and it exits usage.
+    """
+    if not out_dir.is_dir():
+        return _refuse(f"report: {out_dir} is not a directory")
+    try:
+        load_mirror(out_dir)
+    except ManifestError as error:
+        return _refuse(f"report: no mirror in {out_dir} ({error})")
+    path = report_path(out_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+        json.loads(text)
+    except (OSError, ValueError) as error:
+        return _refuse(f"report: no readable report at {path} ({error})")
+    sys.stdout.write(text if text.endswith("\n") else f"{text}\n")
+    return ExitCode.ok
 
 
 def finish_index_command(written: IndexesWritten | None) -> ExitCode | None:

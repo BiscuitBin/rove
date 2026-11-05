@@ -150,7 +150,11 @@ redirects with `script=` and `always=`, and syncs them to check a page's lifecyc
 page answering 404 archived under `_removed/` and revived, a redirected page moved with
 an alias, a page redirected out of scope removed and a second URL settled as a
 duplicate, a narrowed scope retiring a page, and robots.txt and a sitemap reached
-through redirects.
+through redirects. `tests/e2e/test_errors_report_sync.py` generates its sites likewise
+and checks the error paths: the refusals in order with their refused reports, a
+non-HTML answer skipped and a failing URL reported on every sync, `rovo report`, an
+interrupted and a crashed sync, `--json` progress and `ROVO_MIRROR__PRUNE` from the
+environment.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

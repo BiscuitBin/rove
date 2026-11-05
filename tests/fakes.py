@@ -5,6 +5,8 @@ when; a URL it has no answer for comes back 404, as the fixture server would ans
 `ScriptedFetcher` answers a URL from its script first, one answer per request, then from
 the map: an answer that must hold every time goes in the map, a sequence in the script.
 `StampingFetcher` wraps any fetcher and stamps each request with its timer's time.
+`RaisingFetcher` wraps any fetcher and raises a given exception, an operator interrupt
+or a crash, on the request for a given URL.
 
 `FixedClock` and `SteppingTimer` both satisfy the crawl's Timer seam (`now()` and
 `sleep(seconds)`) and both record every sleep they are asked for; neither sleeps for
@@ -160,6 +162,32 @@ class StampingFetcher:
     def fetch(self, url: str, *, validators: Validators | None = None) -> SiteResponse:
         """Stamp the request, then pass it on."""
         self.stamps.append((url, self.timer.now()))
+        return self.fetcher.fetch(url, validators=validators)
+
+
+class RaisingFetcher:
+    """Wraps a Fetcher and raises `error` instead of passing on the request for `url`.
+
+    Every other request is passed on. `requests` records every request it saw, in
+    order, the one that raised included, and `raised` the ones that raised, so a test
+    can tell the interrupt or crash happened where it meant it to and that no request
+    followed it (T16).
+    """
+
+    def __init__(self, fetcher: Fetcher, url: str, error: BaseException) -> None:
+        """Pass requests to `fetcher`; raise `error` on the request for `url`."""
+        self.fetcher = fetcher
+        self.url = url
+        self.error = error
+        self.requests: list[str] = []
+        self.raised: list[str] = []
+
+    def fetch(self, url: str, *, validators: Validators | None = None) -> SiteResponse:
+        """Record the request; raise the error for the URL, else pass the request on."""
+        self.requests.append(url)
+        if url == self.url:
+            self.raised.append(url)
+            raise self.error
         return self.fetcher.fetch(url, validators=validators)
 
 

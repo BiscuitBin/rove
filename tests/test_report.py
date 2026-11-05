@@ -9,26 +9,35 @@ and the report does not change.
 
 import dataclasses
 import importlib.metadata
+import itertools
 import json
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from fakes import START, FakeFetcher, FixedClock, fixture_site, html_response, text_response
-from rovo import _config
+from rovo import _commands, _config
 from rovo._config import Configuration, SyncOptions
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag, QualityGate
 from rovo._crawl import model
 from rovo._crawl.model import (
+    Breaker,
+    BreakerStatus,
     DiscoveryFailed,
     DiscoveryProblem,
+    HostBackedOff,
+    ProgressEvent,
     RenderMode,
     RobotsMode,
     Run,
     RunKind,
     RunMode,
     RunRequest,
+    RunStatus,
     StealthMode,
+    UrlSkippedBlocked,
     standard_policy,
 )
 from rovo._crawl.run import CrawlResult, run_crawl
@@ -47,7 +56,7 @@ from rovo._mirror.model import (
     StoreOutcome,
     Tier,
 )
-from rovo._mirror.state import save_mirror
+from rovo._mirror.state import save_mirror, timestamp
 from rovo._report import (
     BlockedUrl,
     Change,
@@ -62,20 +71,26 @@ from rovo._report import (
     LowConfidencePage,
     QualitySummary,
     ReportStatus,
+    announce_backoff,
     close_run,
+    event_line,
     finalise_run_report,
     host_reports,
     most_severe,
     rank_and_write_report,
+    record_crash_after_run,
     report_path,
+    report_refusal,
     summarise,
     take_broken_links,
     tally_discovery_problem,
     tally_failed_url,
     tally_finalised_page,
     tally_removal,
+    tally_skipped_url,
 )
 from spec_values import spec_enum, spec_float
+from test_crawl import new_mirror
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -94,6 +109,7 @@ PERCENTILE = 0.1
 FORBIDDEN = 403
 SERVICE_UNAVAILABLE = 503
 ROBOTS = f"{SITE}/robots.txt"
+OTHER = f"{SITE}/guide/other.html"
 
 # Every CrawlReport field but the mirror, the operator and the open/written status.
 REPORT_KEYS = {
@@ -928,3 +944,401 @@ def test_entity_fields_FailedUrl(tmp_path: Path) -> None:
     assert isinstance(row.error, str)
     assert row.error
     assert row.attempts == model.CONFIG.http_attempts
+
+
+# --- T16: the refused report, crashes, skipped URLs, progress and the ranking -------------
+
+BAD_CONFIG = "invalid configuration"
+CRASH = "RuntimeError: late"
+REFUSED_OPTIONS = dataclasses.replace(OPTIONS, confirmed=True, urls=(SEED,))
+
+
+def refusal(out_dir: Path, mirror: Mirror | None = None) -> CrawlReport:
+    """ReportRefusal for a mirror (a crawled one unless given), refused for its config."""
+    target = mirror if mirror is not None else crawled(out_dir).run.target
+    return report_refusal(
+        target,
+        Operator(),
+        REFUSED_OPTIONS,
+        configuration(),
+        BAD_CONFIG,
+        clock=FixedClock(LATER),
+    )
+
+
+def crashed_after_run(out_dir: Path) -> tuple[CrawlReport, Run]:
+    """A finished run whose finalisation crashed: RecordCrashAfterRun, then ranked."""
+    report, run, _ = tallied(out_dir)
+    assert record_crash_after_run(run.target, run, report, CRASH)
+    assert rank_and_write_report(report, run, FixedClock(LATER)) is ExitCode.partial
+    return report, run
+
+
+def test_entity_optional_CrawlReport_error(tmp_path: Path) -> None:
+    """Verify optional field CrawlReport.error accepts null and non-null values."""
+    report, run, _ = tallied(tmp_path / "clean")
+    rank_and_write_report(report, run, FixedClock())
+    assert written(tmp_path / "clean")["error"] is None
+    crashed, _ = crashed_after_run(tmp_path / "crashed")
+    assert crashed.error == CRASH
+    assert written(tmp_path / "crashed")["error"] == CRASH
+
+
+def test_entity_optional_CrawlReport_refusal_reason(tmp_path: Path) -> None:
+    """Verify optional field CrawlReport.refusal_reason accepts null and non-null values."""
+    report, run, _ = tallied(tmp_path / "run")
+    rank_and_write_report(report, run, FixedClock())
+    assert written(tmp_path / "run")["refusal_reason"] is None
+    refused = refusal(tmp_path / "refused")
+    assert refused.refusal_reason == BAD_CONFIG
+    assert written(tmp_path / "refused")["refusal_reason"] == BAD_CONFIG
+
+
+def test_entity_optional_CrawlReport_effective_policy(tmp_path: Path) -> None:
+    """Verify optional field CrawlReport.effective_policy accepts null and non-null values."""
+    report, run, _ = tallied(tmp_path / "run")
+    rank_and_write_report(report, run, FixedClock())
+    assert isinstance(written(tmp_path / "run")["effective_policy"], dict)
+    refused = refusal(tmp_path / "refused")
+    assert refused.effective_policy is None
+    assert written(tmp_path / "refused")["effective_policy"] is None
+
+
+def test_rule_success_ReportRefusal(tmp_path: Path) -> None:
+    """Verify rule ReportRefusal succeeds when all preconditions are met.
+
+    The refused report is created written, exits usage and replaces crawl-report.json;
+    its kind is initial for an empty mirror and update for one holding a written page.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    assert not empty.is_populated
+    report = refusal(tmp_path / "empty", empty)
+    assert report.status is CrawlReportStatus.written
+    assert report.exit_code is ExitCode.usage
+    assert report.kind is RunKind.initial
+    data = written(tmp_path / "empty")
+    assert (data["report_status"], data["exit_code"]) == ("refused", "usage")
+
+    _, run, _ = tallied(tmp_path / "populated")
+    assert run.target.is_populated
+    populated = refusal(tmp_path / "populated", run.target)
+    assert populated.kind is RunKind.update
+    assert written(tmp_path / "populated")["kind"] == "update"
+
+
+def test_rule_entity_creation_ReportRefusal_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule ReportRefusal ensures clause produces the specified fields."""  # noqa: E501  The obligation's description, quoted.
+    mirror = crawled(tmp_path).run.target
+    operator = Operator()
+    settings = configuration()
+    report = report_refusal(
+        mirror, operator, REFUSED_OPTIONS, settings, BAD_CONFIG, clock=FixedClock(LATER)
+    )
+    assert report.mirror is mirror
+    assert report.operator is operator
+    assert report.run_id is None
+    assert report.mode is RunMode.standard
+    assert report.report_status is ReportStatus.refused
+    assert report.error is None
+    assert report.refusal_reason == BAD_CONFIG
+    assert report.configuration == settings
+    assert report.options == REFUSED_OPTIONS
+    assert report.tool_version == importlib.metadata.version("rovo")
+    assert report.targets == frozenset()
+    assert report.declared_owned_hosts == frozenset()
+    assert report.baseline_run_id is None
+    assert report.preceding_run_id is None
+    assert report.requested_owner_test is None
+    assert report.effective_policy is None
+    assert report.unresolved_urls == frozenset()
+    assert report.robots_ignored is False
+    counts = (
+        report.discovered,
+        report.fetched,
+        report.converted,
+        report.skipped_unchanged,
+        report.bytes_fetched,
+    )
+    assert counts == (0, 0, 0, 0, 0)
+    assert report.budget_stopped is False
+    assert report.breaker_tripped is False
+    assert report.per_host == []
+    assert report.quality_summary == QualitySummary(
+        mean_score=0.0, p10_score=0.0, gate_failures=()
+    )
+    lists = (
+        report.scores,
+        report.blocked_urls,
+        report.failed_urls,
+        report.skipped_urls,
+        report.discovery_problems,
+        report.low_confidence_pages,
+        report.broken_links,
+        report.changes,
+    )
+    assert all(rows == [] for rows in lists)
+    assert report.started_at == LATER
+    assert report.finished_at == LATER
+    data = written(tmp_path)
+    assert set(data) == REPORT_KEYS
+    assert data["started_at"] == data["finished_at"]
+
+
+def test_rule_success_TallySkippedUrl(tmp_path: Path) -> None:
+    """Verify rule TallySkippedUrl succeeds when all preconditions are met.
+
+    On unit inputs: UrlSkippedBlocked is raised by SelectBatch's all-tripped branch (T18).
+    The open report of the run gains the URL in skipped_urls, written sorted.
+    """
+    report, run, _ = tallied(tmp_path)
+    assert tally_skipped_url(report, UrlSkippedBlocked(run=run, url=OTHER))
+    assert tally_skipped_url(report, UrlSkippedBlocked(run=run, url=SEED))
+    assert report.skipped_urls == [OTHER, SEED]
+    rank_and_write_report(report, run, FixedClock())
+    assert written(tmp_path)["skipped_urls"] == sorted([OTHER, SEED])
+
+
+def test_rule_failure_TallySkippedUrl_1(tmp_path: Path) -> None:
+    """Verify rule TallySkippedUrl is rejected when requires clause fails.
+
+    requires: exists report and report.status = open: another run's report, or a
+    written one.
+    """
+    report, run, _ = tallied(tmp_path)
+    other = opened(run)
+    other.run_id = run.id + 1
+    assert not tally_skipped_url(other, UrlSkippedBlocked(run=run, url=SEED))
+    assert other.skipped_urls == []
+    report.status = CrawlReportStatus.written
+    assert not tally_skipped_url(report, UrlSkippedBlocked(run=run, url=SEED))
+    assert report.skipped_urls == []
+
+
+def test_rule_success_AnnounceBackoff(tmp_path: Path) -> None:
+    """Verify rule AnnounceBackoff succeeds when all preconditions are met.
+
+    HostBackedOff becomes the host_backoff progress event naming the host and its until.
+    """
+    run = crawled(tmp_path).run
+    host = run.host(HOST)
+    assert host is not None
+    event = announce_backoff(HostBackedOff(host=host, until=LATER))
+    assert event == ProgressEvent(event="host_backoff", host=HOST, until=LATER)
+
+
+def test_a_progress_event_is_one_json_line_with_sorted_keys() -> None:
+    """ProgressOnRequest: one JSON object a line: event, host and until, until ISO 8601."""
+    line = event_line(ProgressEvent(event="host_backoff", host=HOST, until=LATER))
+    assert line.rstrip("\n").count("\n") == 0
+    assert json.loads(line) == {"event": "host_backoff", "host": HOST, "until": timestamp(LATER)}
+    assert line.index('"event"') < line.index('"host"') < line.index('"until"')
+    done = json.loads(event_line(ProgressEvent(event="done", host=None, until=None)))
+    assert done == {"event": "done", "host": None, "until": None}
+
+
+def test_invariant_RefusedReportsHaveNoRun(tmp_path: Path) -> None:
+    """Verify invariant RefusedReportsHaveNoRun holds after every state-changing rule that touches constrained entities."""  # noqa: E501  The obligation's description, quoted.
+    report = refusal(tmp_path)
+    assert report.report_status is ReportStatus.refused
+    assert report.run_id is None
+    assert report.exit_code is ExitCode.usage
+    data = written(tmp_path)
+    assert (data["report_status"], data["run_id"], data["exit_code"]) == (
+        "refused",
+        None,
+        "usage",
+    )
+
+
+def test_invariant_RunReportsNameTheirRun(tmp_path: Path) -> None:
+    """Verify invariant RunReportsNameTheirRun holds after every state-changing rule that touches constrained entities."""  # noqa: E501  The obligation's description, quoted.
+    report, run, _ = tallied(tmp_path / "finished")
+    rank_and_write_report(report, run, FixedClock())
+    dry = crawled(tmp_path / "dry", dry_run=True)
+    dry_report = opened(dry.run)
+    dry_report.options = dataclasses.replace(OPTIONS, dry_run=True)
+    close_run(dry_report, dry.run, dry.frontier)
+    rank_and_write_report(dry_report, dry.run, FixedClock())
+    crashed_after_run(tmp_path / "crashed")
+    for name in ("finished", "dry", "crashed"):
+        data = written(tmp_path / name)
+        assert data["report_status"] != "refused", name
+        assert data["run_id"] is not None, name
+        assert data["effective_policy"] is not None, name
+
+
+def test_invariant_OneOpenReportPerMirror(tmp_path: Path) -> None:
+    """Verify invariant OneOpenReportPerMirror holds after every state-changing rule that touches constrained entities.
+
+    A refused report is created written; a run's report is open until it is ranked and
+    written, a crashed one included; so a later report of the mirror never meets an
+    open one.
+    """  # noqa: E501  The obligation's description, quoted.
+    assert refusal(tmp_path / "refused").status is CrawlReportStatus.written
+    report, run, _ = tallied(tmp_path / "run")
+    statuses = [report.status]
+    rank_and_write_report(report, run, FixedClock())
+    statuses.append(report.status)
+    assert statuses == [CrawlReportStatus.open, CrawlReportStatus.written]
+    crashed, _ = crashed_after_run(tmp_path / "crashed")
+    assert crashed.status is CrawlReportStatus.written
+    later = refusal(tmp_path / "run", run.target)
+    assert later.status is CrawlReportStatus.written
+
+
+# Every item ReportView exposes, as a path into crawl-report.json.
+EXPOSED = (
+    ("run_id",),
+    ("kind",),
+    ("mode",),
+    ("report_status",),
+    ("exit_code",),
+    ("error",),
+    ("refusal_reason",),
+    ("configuration", "hash"),
+    ("configuration", "fail_on_low_quality"),
+    ("options", "dry_run"),
+    ("options", "json_events"),
+    ("options", "targeted"),
+    ("tool_version",),
+    ("targets",),
+    ("declared_owned_hosts",),
+    ("baseline_run_id",),
+    ("preceding_run_id",),
+    ("requested_owner_test",),
+    ("effective_policy",),
+    ("unresolved_urls",),
+    ("robots_ignored",),
+    ("discovered",),
+    ("fetched",),
+    ("converted",),
+    ("skipped_unchanged",),
+    ("bytes_fetched",),
+    ("budget_stopped",),
+    ("breaker_tripped",),
+    ("per_host",),
+    ("quality_summary",),
+    ("blocked_urls",),
+    ("failed_urls",),
+    ("skipped_urls",),
+    ("discovery_problems",),
+    ("low_confidence_pages",),
+    ("broken_links",),
+    ("changes",),
+    ("started_at",),
+    ("finished_at",),
+)
+
+
+def exposed(data: dict[str, object], path: tuple[str, ...]) -> object:
+    """The value at `path` in the report; KeyError when it is absent."""
+    value: object = data
+    for key in path:
+        assert isinstance(value, dict), path
+        value = value[key]
+    return value
+
+
+def test_surface_exposure_ReportView(tmp_path: Path) -> None:
+    """Verify each exposed item on ReportView is accessible.
+
+    Every exposed item is in crawl-report.json, options.targeted included (false for a
+    full run), for a run's report and a refused one.
+    """
+    report, run, _ = tallied(tmp_path / "run")
+    rank_and_write_report(report, run, FixedClock())
+    refusal(tmp_path / "refused")
+    for name in ("run", "refused"):
+        data = written(tmp_path / name)
+        for path in EXPOSED:
+            assert path[0] in data, path
+            exposed(data, path)
+    assert exposed(written(tmp_path / "run"), ("options", "targeted")) is False
+    assert exposed(written(tmp_path / "refused"), ("options", "targeted")) is True
+    assert exposed(written(tmp_path / "run"), ("configuration", "fail_on_low_quality")) is False
+
+
+def test_surface_actor_ReportView(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify surface ReportView is accessible only to the specified actor.
+
+    The report is the operator's whose sync wrote it (report.operator is the run's
+    operator), and the operator reads it through rovo report, as written.
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    report, run, _ = tallied(out_dir)
+    assert report.operator is run.operator
+    rank_and_write_report(report, run, FixedClock())
+    capsys.readouterr()
+    assert _commands.report(out_dir) is ExitCode.ok
+    assert json.loads(capsys.readouterr().out) == written(out_dir)
+
+
+# Each input of RankAndWriteReport's ranking, and the code it ranks alone (SyncExitCodes).
+RANKED = {
+    "failed-url": ExitCode.partial,
+    "error": ExitCode.partial,
+    "interrupted": ExitCode.partial,
+    "budget-stopped": ExitCode.partial,
+    "target-skipped": ExitCode.partial,
+    "owner-unresolved": ExitCode.partial,
+    "tripped-host": ExitCode.blocked,
+    "low-quality": ExitCode.quality,
+}
+
+
+def with_input(report: CrawlReport, run: Run, name: str) -> None:
+    """Make one ranking input hold, on unit inputs (blocked and owner testing: T18, T20)."""
+    if name == "failed-url":
+        report.failed_urls.append(FailedUrl(url=SEED, error="boom", attempts=1))
+    elif name == "error":
+        report.error = CRASH
+    elif name == "interrupted":
+        run.status = RunStatus.interrupted
+    elif name == "budget-stopped":
+        run.budget_stopped = True
+    elif name == "target-skipped":
+        run.targets = frozenset({SEED})
+        report.skipped_urls.append(SEED)
+    elif name == "owner-unresolved":
+        run.mode = RunMode.owner_testing
+        run.unresolved_urls = frozenset({SEED})
+    elif name == "tripped-host":
+        host = run.host(HOST)
+        assert host is not None
+        host.breaker = Breaker(
+            host=host,
+            tier=Tier.http,
+            highest_tier=Tier.http,
+            outcomes=[True],
+            escalations=0,
+            since_escalation=0,
+            status=BreakerStatus.tripped,
+        )
+    else:
+        report.configuration = configuration(fail_on_low_quality=True)
+        report.broken_links = list(BROKEN)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [(), *((name,) for name in RANKED), *itertools.combinations(RANKED, 2)],
+    ids=lambda names: "+".join(names) or "nothing",
+)
+def test_SyncExitCodes_the_most_severe_ranking_input_wins(
+    tmp_path: Path, names: tuple[str, ...]
+) -> None:
+    """rovo.allium SyncExitCodes and RankAndWriteReport: every input alone and in pairs.
+
+    ok with none; partial for a failure, an error, an interrupt, a budget stop, a skipped
+    target or an owner run's unresolved URL; blocked for a tripped host; quality for
+    fail_on_low_quality with a broken link; of two, the higher code wins. Usage comes
+    only from a refusal, never from the ranking.
+    """
+    report, run, _ = tallied(tmp_path)
+    for name in names:
+        with_input(report, run, name)
+    expected = most_severe(RANKED[name] for name in names)
+    assert rank_and_write_report(report, run, FixedClock()) is expected
+    assert written(tmp_path)["exit_code"] == expected.value
+    assert expected is not ExitCode.usage

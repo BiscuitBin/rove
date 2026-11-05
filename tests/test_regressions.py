@@ -130,15 +130,18 @@ def test_a_stopped_finalisation_persists_no_done_row(tmp_path: Path) -> None:
     A sync whose finalisation stops saves neither the frontier nor the run, so the next
     sync fetches and stores the page again. Re-propagated by T15 (origin T09): the stop
     was next.html's 404, which T15 settles silently (AcceptAbsentWithoutPage); next.html
-    now answers a non-HTML document, whose skipped_not_html branch still stops the run.
+    then answered a non-HTML document. Re-propagated by T16 (origin T09): T16 settles a
+    non-HTML answer skipped_not_html, so next.html now serves a login wall, whose soft
+    verdict (classify_block, T18) still stops the run.
     """
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
     following = f"{SITE}/guide/next.html"
+    login_wall = LINKED.replace("</main>", '<input type="password"></main>')
     fetcher = FakeFetcher(
         {
             SEED: html_response(SEED, LINKED),
-            following: text_response(following, "Not a page.\n"),
+            following: html_response(following, login_wall),
         }
     )
     stopped = _commands.sync(

@@ -64,7 +64,7 @@ def init_command(
 
 
 @app.command("sync")
-def sync_command(
+def sync_command(  # noqa: PLR0913  One parameter per sync option.
     out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
     *,
     dry_run: Annotated[
@@ -73,15 +73,51 @@ def sync_command(
             "--dry-run", help="Discover, list the pages it would fetch and fetch none of them."
         ),
     ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm a root URL changed since the last run.")
+    ] = False,
+    json_events: Annotated[
+        bool, typer.Option("--json", help="Print progress as one JSON event a line.")
+    ] = False,
+    url: Annotated[
+        list[str] | None,
+        typer.Option("--url", metavar="URL", help="Name a URL to sync; repeatable."),
+    ] = None,
+    path: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--path", metavar="PATH", help="Name a written page's mirror path; repeatable."
+        ),
+    ] = None,
+    set_: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            metavar="SECTION.FIELD=VALUE",
+            help="Override one rovo.toml key, as a TOML value; repeatable.",
+        ),
+    ] = None,
 ) -> None:
     """Fetch the mirror's pages, publish them as Markdown and write crawl-report.json."""
     from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
     from rovo._crawl.fetch import HttpxFetcher  # noqa: PLC0415  Loaded only when the command runs.
     from rovo._crawl.pace import SystemTimer  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._report import event_line  # noqa: PLC0415  Loaded only when the command runs.
 
     timer = SystemTimer()
     with HttpxFetcher(clock=timer) as fetcher:
-        code = _commands.sync(out_dir, fetcher=fetcher, clock=timer, dry_run=dry_run)
+        code = _commands.sync(
+            out_dir,
+            fetcher=fetcher,
+            clock=timer,
+            dry_run=dry_run,
+            confirmed=yes,
+            urls=tuple(url or ()),
+            paths=tuple(path or ()),
+            overrides=tuple(set_ or ()),
+            json_events=json_events,
+            progress=(lambda event: typer.echo(event_line(event))) if json_events else None,
+        )
     raise typer.Exit(code.number)
 
 
@@ -93,3 +129,13 @@ def index_command(
     from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
 
     raise typer.Exit(_commands.index(out_dir).number)
+
+
+@app.command("report")
+def report_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Print the mirror's last crawl-report.json."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.report(out_dir).number)

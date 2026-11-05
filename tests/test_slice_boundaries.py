@@ -158,7 +158,6 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
     "responses",
     [
         pytest.param({SEED: html_response(SEED, "", status=FORBIDDEN)}, id="blocked-page"),
-        pytest.param({SEED: text_response(SEED, "plain")}, id="not-html"),
         pytest.param(
             {SEED: html_response(SEED, PAGE.replace("</main>", '<input type="password"></main>'))},
             id="login-wall",
@@ -184,8 +183,9 @@ def test_a_later_slices_answer_stops_the_run(
 
     A refused robots.txt and a retryable answer are no longer here: T12 realises them.
     T15 realises redirects and absent pages, so its re-propagation drops the
-    robots-redirect, absent-page and page-redirect cases; a non-HTML answer and a soft
-    verdict (the login wall) still stop.
+    robots-redirect, absent-page and page-redirect cases. T16 realises a non-HTML answer
+    (skipped_not_html), so its re-propagation drops the not-html case; a soft verdict
+    (the login wall) still stops.
     """
     with pytest.raises(NotInThisSlice):
         crawl(tmp_path, responses)
@@ -475,19 +475,26 @@ def test_a_canonical_merging_a_known_page_into_another_settles(tmp_path: Path) -
     assert mirror.known_page(SEED) is stored[1]
 
 
-def test_a_known_pages_non_html_answer_stops(tmp_path: Path) -> None:
-    """A known page answering with another raw document that is not HTML stops (not T14's).
+def test_a_known_pages_non_html_answer_settles_skipped_not_html(tmp_path: Path) -> None:
+    """A known page answering with another raw document that is not HTML is skipped.
 
-    DisposeFetch's skipped_not_html branch keeps its NotInThisSlice.
+    Re-propagated by T16 (origin T14, test_a_known_pages_non_html_answer_stops): DisposeFetch's
+    skipped_not_html branch settles the row; the page keeps its record, no candidate is
+    delivered and no URL fails, and the run finishes.
     """
     mirror = new_mirror(tmp_path)
     run_crawl(request(mirror), None, FakeFetcher({SEED: html_response(SEED, PAGE)}), FixedClock())
+    (page,) = mirror.pages
     again = FakeFetcher({SEED: text_response(SEED, "plain")})
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(
-            request(mirror, id=2, kind=RunKind.update), load_frontier(mirror), again, FixedClock()
-        )
-    assert stopped.value.rule == "DisposeFetch"
+    result = run_crawl(
+        request(mirror, id=2, kind=RunKind.update), load_frontier(mirror), again, FixedClock()
+    )
+    assert again.requests[-1] == SEED
+    rows = {entry.identity: entry.status for entry in result.frontier.entries}
+    assert rows[SEED] is FrontierStatus.skipped_not_html
+    assert result.failed == ()
+    assert mirror.pages == [page]
+    assert page.status is PageStatus.written
 
 
 def page_content(html: str) -> ConvertedContent:

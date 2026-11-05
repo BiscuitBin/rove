@@ -53,6 +53,7 @@ from rovo._crawl.model import (
     HostBackedOff,
     LadderWalk,
     ObservedUrl,
+    ProgressEvent,
     RedirectStop,
     RenderMode,
     RenderReason,
@@ -1392,7 +1393,8 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     document (unchanged), a 404 or 410 (absent, no validators) or a known page redirected
     out of scope (redirected_out, done, the target carried); True when any other ok,
     unblocked HTML answer counts as fetched and raises PageFetched; False when the guards
-    do not hold. A block verdict, a soft verdict and a non-HTML answer are later slices'.
+    do not hold, or when an ok answer that is not HTML counts as fetched and settles its
+    row skipped_not_html. A block verdict and a soft verdict are later slices'.
     """
     attempt = walk.standing
     entry = walk.entry
@@ -1427,13 +1429,15 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     unchanged = (
         raw_unchanged and entry.identity not in run.forced_refetch and run.mode is RunMode.standard
     )
-    # A soft verdict and a non-HTML answer (skipped_not_html) are later slices'.
-    if attempt.verdict.kind is not BlockKind.none or not (unchanged or response.is_html):
+    # A soft verdict is a later slice's (classify_block, T18).
+    if attempt.verdict.kind is not BlockKind.none:
         raise NotInThisSlice(rule="DisposeFetch")
     walk.host.fetched += 1
     if unchanged:
         return _unchanged(walk, attempt, response.raw_digest)
-    return True
+    if not response.is_html:
+        entry.status = FrontierStatus.skipped_not_html
+    return response.is_html
 
 
 def _settled_answer(
@@ -1600,6 +1604,20 @@ def finish_run(run: Run, frontier: Frontier) -> bool:
     return True
 
 
+def interrupt_run(run: Run, frontier: Frontier) -> bool:
+    """Realises crawl.allium InterruptRun; False when the run is not running.
+
+    Every in-progress row returns to pending and the unresolved snapshot is taken; the
+    caller then ends the run (EndRun), interrupted. No challenge waits in this slice.
+    """
+    if run.status is not RunStatus.running:
+        return False
+    for entry in frontier.in_progress_entries:
+        entry.status = FrontierStatus.pending
+    run.unresolved_urls = _unresolved_urls(run, frontier)
+    return True
+
+
 def end_run(run: Run, clock: Clock) -> bool:
     """Realises crawl.allium EndRun."""
     if run.status is not RunStatus.running:
@@ -1680,34 +1698,47 @@ def run_crawl(
     return result
 
 
-def drive_run(
-    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Timer
+def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the root's sinks.
+    request: RunRequest,
+    persisted: Frontier | None,
+    fetcher: Fetcher,
+    clock: Timer,
+    *,
+    progress: Callable[[ProgressEvent], None] | None = None,
+    on_backoff: Callable[[HostBackedOff], None] | None = None,
+    on_failure: Callable[[Run, BaseException], None] | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, saving nothing.
 
     A caller that finalises the mirror saves the run with `save_run` only once the
     mirror is saved: a done row always has a page in the mirror (SettleStoredEntry).
+    `progress` receives the start event once the run exists and a page event per row a
+    fetch settles; `on_backoff` receives each HostBackedOff as it is raised. Once the run
+    exists, an operator interrupt or any other error but NotInThisSlice goes to
+    `on_failure` (the root's InterruptSync or RecordCrash); when that requested the
+    interrupt, InterruptRun and EndRun end the run interrupted, else the error escapes.
     """
     run = start_run(request, clock)
     if run is None:
         raise NotInThisSlice(rule="StartRun")
+    run.progress = progress
+    run.on_backoff = on_backoff
     frontier = (
         create_frontier(run, persisted) if persisted is None else attach_frontier(run, persisted)
     )
-    prepare_run(run, frontier)
     removals = len(run.target.removals)
     failed: list[UrlFailed] = []
-    discover(run, frontier, fetcher)
-    drop_stale_observations(run, frontier)
-    if not dry_run(run):  # DryRun raises RunEnding at once: no batch, no FinishRun.
-        begin_crawl(run)
-        while next_batch(run, frontier):
-            batch = select_batch(run, frontier)
-            if not batch:
-                break
-            handled = [_handle_entry(run, frontier, entry, fetcher, clock) for entry in batch]
-            failed.extend(url_failed for url_failed in handled if url_failed is not None)
-        finish_run(run, frontier)
+    try:  # From the start event on, so a failing sink is recorded too (ReportOnEveryExit).
+        if progress is not None:
+            progress(ProgressEvent(event="start", host=None, until=None))
+        _crawl(run, frontier, fetcher, clock, failed)
+    except NotInThisSlice:
+        raise
+    except (KeyboardInterrupt, Exception) as error:
+        if on_failure is not None:
+            on_failure(run, error)
+        if not run.interrupt_requested or not interrupt_run(run, frontier):
+            raise
     end_run(run, clock)
     return CrawlResult(
         run=run,
@@ -1719,10 +1750,40 @@ def drive_run(
     )
 
 
+def _crawl(
+    run: Run, frontier: Frontier, fetcher: Fetcher, clock: Timer, failed: list[UrlFailed]
+) -> None:
+    """PrepareRun to FinishRun, collecting each UrlFailed into `failed` as it is raised."""
+    prepare_run(run, frontier)
+    discover(run, frontier, fetcher)
+    drop_stale_observations(run, frontier)
+    if dry_run(run):  # DryRun raises RunEnding at once: no batch, no FinishRun.
+        return
+    begin_crawl(run)
+    while next_batch(run, frontier):
+        batch = select_batch(run, frontier)
+        if not batch:
+            break
+        for entry in batch:
+            url_failed = _handle_entry(run, frontier, entry, fetcher, clock)
+            if url_failed is not None:
+                failed.append(url_failed)
+    finish_run(run, frontier)
+
+
 def save_run(result: CrawlResult) -> None:
     """Save the ended run's frontier to frontier.json and append it to runs.json."""
     save_frontier(result.frontier)
-    _append_run(result.run)
+    record_run(result.run)
+
+
+def record_run(run: Run) -> None:
+    """Append the ended run to runs.json alone, so its id is never reused.
+
+    For a sync that crashed after its run (rovo.allium RecordCrashAfterRun): its
+    frontier is not saved, since its pages were not.
+    """
+    _append_run(run)
 
 
 def _handle_entry(
@@ -1742,6 +1803,8 @@ def _handle_entry(
         return None
     _settle(walk, fetcher)
     disposed = dispose_fetch(walk)
+    if run.progress is not None:  # Interim (T16 Open points item 2): one page event a row.
+        run.progress(ProgressEvent(event="page", host=walk.host.name, until=None))
     if isinstance(disposed, EntryFailed):
         return entry_fails(disposed)
     if isinstance(disposed, CandidateDelivered):
@@ -1753,7 +1816,8 @@ def _handle_entry(
         if isinstance(settled, Page):
             refollow_unchanged_links(run, frontier, candidate, settled)
         return None
-    return _store(run, frontier, walk, clock)
+    # PageFetched (True); False when the row settled skipped_not_html or the guards failed.
+    return _store(run, frontier, walk, clock) if disposed else None
 
 
 def _settle(walk: LadderWalk, fetcher: Fetcher) -> None:

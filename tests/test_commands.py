@@ -1,10 +1,12 @@
-"""rovo.allium's command obligations: init, the sync refusal this slice owns, and StartSync.
+"""rovo.allium's command obligations: init, the sync refusals, StartSync, report, crashes.
 
 Each test is named after the obligation id `just plan-spec rovo` emits, dots and hyphens
 as underscores, and its docstring quotes the obligation. `rovo._commands.sync` takes a
-Fetcher and a Clock; a refused command makes no request and writes no report. Until the
-refusals slice, a failed StartSync guard other than the missing mirror exits usage with
-no report too (the ticket's Deviation row).
+Fetcher and a Clock; a refused command makes no request. With no directory or no
+loadable manifest it writes no report (RefuseSyncWithoutDirectory); every later refusal
+writes a refused crawl-report.json (ReportRefusal), in the specification's order
+(RefusalsInOrder). Re-propagated by T16 (origin T09): until T16 every failed StartSync
+guard exited usage with no report.
 """
 
 import dataclasses
@@ -20,20 +22,37 @@ from fakes import (
     START,
     FakeFetcher,
     FixedClock,
+    RaisingFetcher,
+    ScriptedFetcher,
     SteppingTimer,
     fixture_site,
     html_response,
     text_response,
 )
 from rovo import _commands
-from rovo._config import initial_scope, resolve_config, scope_of, signature_of
+from rovo._config import SyncOptions, initial_scope, resolve_config, scope_of, signature_of
 from rovo._convert import profiles
 from rovo._crawl.model import CONFIG as CRAWL
+from rovo._crawl.model import ProgressEvent, Run
+from rovo._crawl.run import end_run, finish_run
 from rovo._mirror.finalise import request_pass
 from rovo._mirror.indexes import index_pass
 from rovo._mirror.model import IndexesWritten, Operator, PassKind, Tier
 from rovo._mirror.state import load_mirror, manifest_path
-from rovo._report import ExitCode, report_path
+from rovo._report import (
+    CrawlReport,
+    CrawlReportStatus,
+    ExitCode,
+    ReportStatus,
+    interrupt_sync,
+    rank_and_write_report,
+    record_crash,
+    record_crash_after_run,
+    report_path,
+)
+from rovo._unfinished import NotInThisSlice
+from test_crawl import started
+from test_report import opened
 
 SITE = "http://docs.example"
 SEED = f"{SITE}/guide/start.html"
@@ -45,6 +64,7 @@ DISCOVERY = [ROBOTS, f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml", f"{SITE
 SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 PAGE = (SITES / "one-page" / "guide" / "start.html").read_text(encoding="utf-8")
 DISALLOW_GUIDE = (SITES / "robots-disallow" / "robots.txt").read_text(encoding="utf-8")
+SERVICE_UNAVAILABLE = 503
 
 
 def site() -> FakeFetcher:
@@ -110,6 +130,34 @@ def report(out_dir: Path) -> dict[str, object]:
     loaded = json.loads(report_path(out_dir).read_text(encoding="utf-8"))
     assert isinstance(loaded, dict)
     return loaded
+
+
+# The refusal reasons, rovo.allium's text exactly (T16).
+BAD_CONFIG = "invalid configuration"
+CHANGED_ROOT = "changed root requires confirmation"
+OFF_HOST = "invalid or off-host target"
+UNKNOWN_PATH = "unknown target path"
+MISSING_ENGINE = "configured tier is not installed"
+
+
+def refused(out_dir: Path) -> dict[str, object]:
+    """The refused crawl-report.json ReportRefusal wrote: no run, usage, no policy."""
+    data = report(out_dir)
+    assert data["report_status"] == "refused"
+    assert data["run_id"] is None
+    assert data["exit_code"] == "usage"
+    assert data["effective_policy"] is None
+    assert data["error"] is None
+    return data
+
+
+def with_provider(out_dir: Path) -> Path:
+    """The mirror's rovo.toml with an [unblocking] provider, which is always invalid."""
+    path = out_dir / "rovo.toml"
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"(?m)^\[unblocking\]\n(?:#.*\n|\s*\n)*", "", text)
+    path.write_text(text + '\n[unblocking]\nprovider = "paid"\n', encoding="utf-8")
+    return out_dir
 
 
 # --- init ---------------------------------------------------------------------------
@@ -343,25 +391,25 @@ def test_rule_failure_StartSync_2(tmp_path: Path) -> None:
     """Verify rule StartSync is rejected when requires clause fails.
 
     requires: settings.valid and settings.has_seeds and no unblocking provider.
+    Re-propagated by T16 (origin T09): each is refused with a refused report naming
+    "invalid configuration" (RefuseSyncOnBadConfig, ReportRefusal).
     """
     fetcher = site()
     out_dir = initialised(tmp_path / "out")
     set_key(out_dir, "render_mode", '"sometimes"')
     assert synced(out_dir, fetcher) is ExitCode.usage
     assert fetcher.requests == []
-    assert not report_path(out_dir).exists()
+    assert refused(out_dir)["refusal_reason"] == BAD_CONFIG
 
     no_seeds = initialised(tmp_path / "no-seeds")
     set_key(no_seeds, "start_urls", "[]")
     drop_key(no_seeds, "root_url")
     assert synced(no_seeds, fetcher) is ExitCode.usage
+    assert refused(no_seeds)["refusal_reason"] == BAD_CONFIG
 
-    provider = initialised(tmp_path / "provider")
-    path = provider / "rovo.toml"
-    text = path.read_text(encoding="utf-8")
-    text = re.sub(r"(?m)^\[unblocking\]\n(?:#.*\n|\s*\n)*", "", text)
-    path.write_text(text + '\n[unblocking]\nprovider = "paid"\n', encoding="utf-8")
+    provider = with_provider(initialised(tmp_path / "provider"))
     assert synced(provider, fetcher) is ExitCode.usage
+    assert refused(provider)["refusal_reason"] == BAD_CONFIG
     assert fetcher.requests == []
 
 
@@ -369,7 +417,8 @@ def test_rule_failure_StartSync_3(tmp_path: Path) -> None:
     """Verify rule StartSync is rejected when requires clause fails.
 
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed:
-    the root recorded by the last run differs, and this slice has no --yes.
+    the root recorded by the last run differs and --yes was not passed. Re-propagated by
+    T16 (origin T09): the refusal writes a refused report (RefuseSyncOnChangedRoot).
     """
     out_dir = initialised(tmp_path / "out")
     assert synced(out_dir, disallowing()) is ExitCode.ok
@@ -378,21 +427,25 @@ def test_rule_failure_StartSync_3(tmp_path: Path) -> None:
     fetcher = disallowing()
     assert synced(out_dir, fetcher) is ExitCode.usage
     assert fetcher.requests == []
+    assert refused(out_dir)["refusal_reason"] == CHANGED_ROOT
 
 
 def test_rule_failure_StartSync_6(tmp_path: Path) -> None:
     """Verify rule StartSync is rejected when requires clause fails.
 
     requires: a configured browser or stealth tier is installed; tier_installed is
-    injected, so the test does not depend on what the machine has.
+    injected, so the test does not depend on what the machine has. Re-propagated by T16
+    (origin T09): ReportRefusal writes the refused report for RefuseMissingEngine too.
     """
     fetcher = site()
     out_dir = initialised(tmp_path / "out")
     set_key(out_dir, "render_mode", '"auto"')
     assert synced(out_dir, fetcher) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == MISSING_ENGINE
     stealthy = initialised(tmp_path / "stealthy")
     set_key(stealthy, "stealth_mode", '"on"')
     assert synced(stealthy, fetcher) is ExitCode.usage
+    assert refused(stealthy)["refusal_reason"] == MISSING_ENGINE
     assert fetcher.requests == []
 
 
@@ -400,13 +453,17 @@ def test_rule_failure_StartSync_7(tmp_path: Path) -> None:
     """Verify rule StartSync is rejected when requires clause fails.
 
     requires: owner_request_problem(...) = null; with no owner test, only robots =
-    respect is accepted.
+    respect is accepted. Re-propagated by T16 (origin T09): ReportRefusal writes the
+    refused report for RefuseInvalidOwnerRequest too, its reason the problem it names.
     """
     fetcher = site()
     out_dir = initialised(tmp_path / "out")
     set_key(out_dir, "robots", '"ignore"')
     assert synced(out_dir, fetcher) is ExitCode.usage
     assert fetcher.requests == []
+    reason = refused(out_dir)["refusal_reason"]
+    assert isinstance(reason, str)
+    assert "robots" in reason
 
 
 def test_rule_entity_creation_StartSync_1(tmp_path: Path) -> None:
@@ -800,3 +857,1052 @@ def test_sync_retires_a_page_a_narrowed_scope_no_longer_admits(tmp_path: Path) -
     ]
     assert manifest_page(out, SEED)["status"] == "written"
     assert manifest_page(out, KEEP)["status"] == "written"
+
+
+# --- T16: SyncOptions -------------------------------------------------------------------
+
+OTHER_PATH = "pages/docs.example/other.md"
+MISSING_PATH = "pages/docs.example/missing.md"
+OFF_HOST_URL = "http://elsewhere.invalid/x.html"
+NOT_HTTP_URL = "ftp://docs.example/guide/x.html"
+# An on-host URL outside the path prefixes: a named URL waives them (RefuseOffHostTarget).
+ON_HOST_OUTSIDE = f"{SITE}/outside/x.html"
+
+
+def first_synced(out_dir: Path) -> Path:
+    """A mirror synced once over the fixture site: START_PATH written, the root recorded."""
+    initialised(out_dir)
+    assert synced(out_dir, site()) is ExitCode.ok
+    return out_dir
+
+
+def state_files(out_dir: Path) -> dict[str, bytes]:
+    """Every file under .rovo/, which a refusal never writes."""
+    return {
+        str(path.relative_to(out_dir)): path.read_bytes()
+        for path in sorted((out_dir / ".rovo").rglob("*"))
+        if path.is_file()
+    }
+
+
+def requesting(  # noqa: PLR0913  One keyword per sync option a test varies.
+    out_dir: Path,
+    fetcher: FakeFetcher,
+    *,
+    confirmed: bool = False,
+    urls: tuple[str, ...] = (),
+    paths: tuple[str, ...] = (),
+    installed: bool = False,
+) -> ExitCode:
+    """One rovo sync with the named options; `installed` installs every engine."""
+    return _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=(lambda tier: tier is not Tier.http) if installed else never_installed,
+        confirmed=confirmed,
+        urls=urls,
+        paths=paths,
+    )
+
+
+def target_stops(
+    out_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    urls: tuple[str, ...] = (),
+    paths: tuple[str, ...] = (),
+) -> None:
+    """A sync naming targets that pass the refusals stops at PrepareRun's targeted raise.
+
+    The ticket (Facts, "The options"): the targeted run is a later slice's, so the sync
+    stops, exits 1, makes no request and leaves the previous report and runs.json as they
+    were. Re-propagated by T16 tick 4 (implement tick 3): _commands.sync has caught
+    NotInThisSlice and exited partial since T09, so the stop is its exit and stderr.
+    """
+    previous = report_path(out_dir).read_bytes()
+    runs = (out_dir / ".rovo" / "runs.json").read_bytes()
+    fetcher = site()
+    capsys.readouterr()
+    assert requesting(out_dir, fetcher, urls=urls, paths=paths) is ExitCode.partial
+    assert "sync stopped: PrepareRun" in capsys.readouterr().err
+    assert fetcher.requests == []
+    assert report_path(out_dir).read_bytes() == previous
+    assert (out_dir / ".rovo" / "runs.json").read_bytes() == runs
+
+
+def root_changed(out_dir: Path) -> Path:
+    """The synced mirror's rovo.toml names another root URL than the one recorded."""
+    set_key(out_dir, "root_url", json.dumps(f"{SITE}/other/"))
+    return out_dir
+
+
+def test_value_equality_SyncOptions() -> None:
+    """Verify value type SyncOptions has structural equality."""
+    options = SyncOptions(
+        dry_run=False,
+        confirmed=True,
+        interactive=False,
+        json_events=True,
+        urls=(SEED,),
+        paths=(START_PATH,),
+    )
+    same = SyncOptions(
+        dry_run=False,
+        confirmed=True,
+        interactive=False,
+        json_events=True,
+        urls=(SEED,),
+        paths=(START_PATH,),
+    )
+    assert options == same
+    assert hash(options) == hash(same)
+    assert options != dataclasses.replace(options, confirmed=False)
+    assert options != dataclasses.replace(options, urls=())
+
+
+def test_entity_fields_SyncOptions(tmp_path: Path) -> None:
+    """Verify all declared fields on SyncOptions are present with correct types.
+
+    The fields and the derived targeted and is_owner_testing; a sync records confirmed
+    (--yes), json_events (--json), urls (--url) and paths (--path) as asked, here in the
+    refused report of a sync named an unknown path.
+    """
+    options = SyncOptions(
+        dry_run=True,
+        confirmed=True,
+        interactive=False,
+        json_events=False,
+        urls=(SEED,),
+        paths=(),
+    )
+    assert options.dry_run is True
+    assert options.confirmed is True
+    assert options.interactive is False
+    assert options.json_events is False
+    assert options.urls == (SEED,)
+    assert options.paths == ()
+    assert options.owner_test is None
+    assert options.targeted is True
+    assert options.is_owner_testing is False
+    assert dataclasses.replace(options, urls=()).targeted is False
+
+    out_dir = first_synced(tmp_path / "out")
+    code = requesting(out_dir, site(), confirmed=True, urls=(SEED,), paths=(MISSING_PATH,))
+    assert code is ExitCode.usage
+    recorded = refused(out_dir)["options"]
+    assert isinstance(recorded, dict)
+    assert recorded["confirmed"] is True
+    assert recorded["json_events"] is False
+    assert recorded["urls"] == [SEED]
+    assert recorded["paths"] == [MISSING_PATH]
+    assert recorded["targeted"] is True
+
+
+# --- T16: the refusals, in order --------------------------------------------------------
+
+
+def test_rule_success_RefuseSyncOnBadConfig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify rule RefuseSyncOnBadConfig succeeds when all preconditions are met.
+
+    An invalid configuration (a bad value from rovo.toml, from a ROVO_ variable or from
+    --set), no seeds, or an unblocking provider: refused "invalid configuration", no
+    request, the refused report's configuration naming the bad key, .rovo/ untouched.
+    """
+    fetcher = site()
+    out_dir = initialised(tmp_path / "out")
+    before = state_files(out_dir)
+    set_key(out_dir, "max_depth", '"deep"')
+    assert synced(out_dir, fetcher) is ExitCode.usage
+    data = refused(out_dir)
+    assert data["refusal_reason"] == BAD_CONFIG
+    assert data["kind"] == "initial"
+    configuration = data["configuration"]
+    assert isinstance(configuration, dict)
+    assert configuration["valid"] is False
+    assert any("scope.max_depth" in str(problem) for problem in configuration["problems"])
+    assert state_files(out_dir) == before
+
+    variable = initialised(tmp_path / "variable")
+    monkeypatch.setenv("ROVO_SCOPE__MAX_DEPTH", "deep")
+    assert synced(variable, fetcher) is ExitCode.usage
+    assert refused(variable)["refusal_reason"] == BAD_CONFIG
+    monkeypatch.delenv("ROVO_SCOPE__MAX_DEPTH")
+
+    flagged = initialised(tmp_path / "flagged")
+    code = _commands.sync(
+        flagged,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        overrides=("scope.max_depth=deep",),
+    )
+    assert code is ExitCode.usage
+    assert refused(flagged)["refusal_reason"] == BAD_CONFIG
+
+    provider = with_provider(initialised(tmp_path / "provider"))
+    assert synced(provider, fetcher) is ExitCode.usage
+    assert refused(provider)["refusal_reason"] == BAD_CONFIG
+    assert fetcher.requests == []
+
+
+def test_rule_failure_RefuseSyncOnBadConfig_1(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnBadConfig is rejected when requires clause fails.
+
+    requires: directory_exists(out_dir) and exists target: a directory holding only a bad
+    rovo.toml has no mirror, so RefuseSyncWithoutDirectory exits usage and no report is
+    written.
+    """
+    fetcher = site()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "rovo.toml").write_text('[scope]\nmax_depth = "deep"\n', encoding="utf-8")
+    assert synced(out_dir, fetcher) is ExitCode.usage
+    assert not report_path(out_dir).exists()
+    assert fetcher.requests == []
+
+
+def test_rule_failure_RefuseSyncOnBadConfig_2(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnBadConfig is rejected when requires clause fails.
+
+    requires: not settings.valid or not has_seeds or an unblocking provider: a valid
+    configuration with seeds and no provider is not refused; the run's report is no
+    refusal.
+    """
+    out_dir = initialised(tmp_path / "out")
+    assert synced(out_dir, site()) is ExitCode.ok
+    data = report(out_dir)
+    assert data["report_status"] == "finished"
+    assert data["refusal_reason"] is None
+
+
+def test_rule_success_RefuseSyncOnChangedRoot(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnChangedRoot succeeds when all preconditions are met.
+
+    The root URL differs from the one recorded and --yes was not passed: refused
+    "changed root requires confirmation", no request, .rovo/ untouched, kind update.
+    """
+    out_dir = root_changed(first_synced(tmp_path / "out"))
+    before = state_files(out_dir)
+    fetcher = site()
+    assert synced(out_dir, fetcher) is ExitCode.usage
+    data = refused(out_dir)
+    assert data["refusal_reason"] == CHANGED_ROOT
+    assert data["kind"] == "update"
+    assert fetcher.requests == []
+    assert state_files(out_dir) == before
+
+
+def test_rule_failure_RefuseSyncOnChangedRoot_1(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnChangedRoot is rejected when requires clause fails.
+
+    requires: directory_exists(out_dir) and exists target: no directory, no report.
+    """
+    missing = tmp_path / "missing"
+    assert requesting(missing, site(), confirmed=False) is ExitCode.usage
+    assert not missing.exists()
+
+
+def test_rule_failure_RefuseSyncOnChangedRoot_2(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnChangedRoot is rejected when requires clause fails.
+
+    requires: settings valid, with seeds and no provider: a bad configuration with a
+    changed root is refused for the configuration, the earlier refusal.
+    """
+    out_dir = root_changed(first_synced(tmp_path / "out"))
+    set_key(out_dir, "max_depth", '"deep"')
+    assert synced(out_dir, site()) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == BAD_CONFIG
+
+
+def test_rule_failure_RefuseSyncOnChangedRoot_3(tmp_path: Path) -> None:
+    """Verify rule RefuseSyncOnChangedRoot is rejected when requires clause fails.
+
+    requires: settings.root_changed(recorded) and not options.confirmed: with --yes the
+    changed root is accepted, the run starts and records the new root.
+    """
+    out_dir = root_changed(first_synced(tmp_path / "out"))
+    set_key(out_dir, "path_prefixes", '["/guide/", "/other/"]')
+    assert requesting(out_dir, site(), confirmed=True) is ExitCode.ok
+    data = report(out_dir)
+    assert data["report_status"] == "finished"
+    assert data["run_id"] == len(["first", "confirmed"])
+    assert load_mirror(out_dir).recorded_root_url == f"{SITE}/other/"
+
+
+def test_rule_success_RefuseOffHostTarget(tmp_path: Path) -> None:
+    """Verify rule RefuseOffHostTarget succeeds when all preconditions are met.
+
+    A named URL that is not http(s), or not on an allowed host: refused "invalid or
+    off-host target", no request, .rovo/ untouched, the options as asked.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    before = state_files(out_dir)
+    fetcher = site()
+    for url in (OFF_HOST_URL, NOT_HTTP_URL):
+        assert requesting(out_dir, fetcher, urls=(SEED, url)) is ExitCode.usage
+        data = refused(out_dir)
+        assert data["refusal_reason"] == OFF_HOST
+        options = data["options"]
+        assert isinstance(options, dict)
+        assert options["urls"] == sorted([SEED, url])
+    assert fetcher.requests == []
+    assert state_files(out_dir) == before
+
+
+def test_rule_failure_RefuseOffHostTarget_1(tmp_path: Path) -> None:
+    """Verify rule RefuseOffHostTarget is rejected when requires clause fails.
+
+    requires: directory_exists(out_dir) and exists target: no directory, no report.
+    """
+    missing = tmp_path / "missing"
+    assert requesting(missing, site(), urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert not missing.exists()
+
+
+def test_rule_failure_RefuseOffHostTarget_2(tmp_path: Path) -> None:
+    """Verify rule RefuseOffHostTarget is rejected when requires clause fails.
+
+    requires: settings valid, with seeds and no provider: refused for the configuration.
+    """
+    out_dir = with_provider(first_synced(tmp_path / "out"))
+    assert requesting(out_dir, site(), urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == BAD_CONFIG
+
+
+def test_rule_failure_RefuseOffHostTarget_3(tmp_path: Path) -> None:
+    """Verify rule RefuseOffHostTarget is rejected when requires clause fails.
+
+    requires: not root_changed or options.confirmed: a changed root without --yes is
+    refused for the root, the earlier refusal.
+    """
+    out_dir = root_changed(first_synced(tmp_path / "out"))
+    assert requesting(out_dir, site(), urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == CHANGED_ROOT
+
+
+def test_rule_failure_RefuseOffHostTarget_4(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify rule RefuseOffHostTarget is rejected when requires clause fails.
+
+    requires: some named URL is not http(s) on an allowed host: every URL here is, one of
+    them outside the path prefixes, which a named URL waives. The sync is not refused:
+    StartSync hands the targets to the run and PrepareRun's targeted branch stops it (a
+    later slice's, the ticket's scope note), no request made and the previous report kept.
+    Re-propagated by T16 tick 3 (weed tick 2): the targets were dropped and a full sync ran.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    target_stops(out_dir, capsys, urls=(SEED, ON_HOST_OUTSIDE))
+
+
+def test_rule_success_RefuseUnknownTargetPath(tmp_path: Path) -> None:
+    """Verify rule RefuseUnknownTargetPath succeeds when all preconditions are met.
+
+    A named path that is no written page's mirror-relative path, a removed page's path
+    included: refused "unknown target path", no request, .rovo/ untouched.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, linking("other.html")), OTHER: html_response(OTHER, PAGE)}
+    )
+    assert synced(out_dir, fetcher) is ExitCode.ok
+    del fetcher.responses[OTHER]
+    assert synced(out_dir, fetcher) is ExitCode.ok
+    assert manifest_page(out_dir, OTHER)["status"] == "removed"
+    before = state_files(out_dir)
+    asked = len(fetcher.requests)
+    for path in (MISSING_PATH, OTHER_PATH, "start.md"):
+        assert requesting(out_dir, fetcher, paths=(START_PATH, path)) is ExitCode.usage
+        assert refused(out_dir)["refusal_reason"] == UNKNOWN_PATH
+    assert len(fetcher.requests) == asked
+    assert state_files(out_dir) == before
+
+
+def test_rule_failure_RefuseUnknownTargetPath_1(tmp_path: Path) -> None:
+    """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
+
+    requires: directory_exists(out_dir) and exists target: no directory, no report.
+    """
+    missing = tmp_path / "missing"
+    assert requesting(missing, site(), paths=(MISSING_PATH,)) is ExitCode.usage
+    assert not missing.exists()
+
+
+def test_rule_failure_RefuseUnknownTargetPath_2(tmp_path: Path) -> None:
+    """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
+
+    requires: settings valid, with seeds and no provider: refused for the configuration.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    set_key(out_dir, "max_depth", '"deep"')
+    assert requesting(out_dir, site(), paths=(MISSING_PATH,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == BAD_CONFIG
+
+
+def test_rule_failure_RefuseUnknownTargetPath_3(tmp_path: Path) -> None:
+    """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
+
+    requires: not root_changed or options.confirmed: refused for the changed root.
+    """
+    out_dir = root_changed(first_synced(tmp_path / "out"))
+    assert requesting(out_dir, site(), paths=(MISSING_PATH,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == CHANGED_ROOT
+
+
+def test_rule_failure_RefuseUnknownTargetPath_4(tmp_path: Path) -> None:
+    """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
+
+    requires: every named URL is http(s) on an allowed host: an off-host URL is refused
+    for the URL, the earlier refusal.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    code = requesting(out_dir, site(), urls=(OFF_HOST_URL,), paths=(MISSING_PATH,))
+    assert code is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == OFF_HOST
+
+
+def test_rule_failure_RefuseUnknownTargetPath_5(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
+
+    requires: some named path is not a written page's path: START_PATH is one, so the
+    sync is not refused; PrepareRun's targeted branch stops it, the previous report kept.
+    Re-propagated by T16 tick 3 (weed tick 2): the targets were dropped and a full sync ran.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    target_stops(out_dir, capsys, paths=(START_PATH,))
+
+
+def test_rule_failure_StartSync_4(tmp_path: Path) -> None:
+    """Verify rule StartSync is rejected when requires clause fails.
+
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in allowed_hosts):
+    an off-host URL starts no run, makes no request and records no run.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    runs = (out_dir / ".rovo" / "runs.json").read_bytes()
+    fetcher = site()
+    assert requesting(out_dir, fetcher, urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert fetcher.requests == []
+    assert (out_dir / ".rovo" / "runs.json").read_bytes() == runs
+    assert refused(out_dir)["refusal_reason"] == OFF_HOST
+
+
+def test_rule_failure_StartSync_5(tmp_path: Path) -> None:
+    """Verify rule StartSync is rejected when requires clause fails.
+
+    requires: options.paths.all(p => p in target.page_paths): an unknown path starts no
+    run, makes no request and records no run.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    runs = (out_dir / ".rovo" / "runs.json").read_bytes()
+    fetcher = site()
+    assert requesting(out_dir, fetcher, paths=(MISSING_PATH,)) is ExitCode.usage
+    assert fetcher.requests == []
+    assert (out_dir / ".rovo" / "runs.json").read_bytes() == runs
+    assert refused(out_dir)["refusal_reason"] == UNKNOWN_PATH
+
+
+@pytest.mark.parametrize(
+    ("problems", "reason"),
+    [
+        pytest.param(("bad-config", "changed-root"), BAD_CONFIG, id="config-before-root"),
+        pytest.param(("changed-root", "off-host"), CHANGED_ROOT, id="root-before-url"),
+        pytest.param(("off-host", "unknown-path"), OFF_HOST, id="url-before-path"),
+        pytest.param(("unknown-path", "no-engine"), UNKNOWN_PATH, id="path-before-engine"),
+        pytest.param(("no-engine", "robots-ignore"), MISSING_ENGINE, id="engine-before-owner"),
+    ],
+)
+def test_RefusalsInOrder_a_sync_is_refused_once_for_its_first_problem(
+    tmp_path: Path, problems: tuple[str, str], reason: str
+) -> None:
+    """rovo.allium RefusalsInOrder: each adjacent pair of refusals, both problems at once.
+
+    The sync is refused for the first, makes no request and leaves .rovo/ untouched.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    urls: tuple[str, ...] = ()
+    paths: tuple[str, ...] = ()
+    for problem in problems:
+        if problem == "bad-config":
+            set_key(out_dir, "max_depth", '"deep"')
+        elif problem == "changed-root":
+            root_changed(out_dir)
+        elif problem == "off-host":
+            urls = (OFF_HOST_URL,)
+        elif problem == "unknown-path":
+            paths = (MISSING_PATH,)
+        elif problem == "no-engine":
+            set_key(out_dir, "render_mode", '"auto"')
+        else:
+            set_key(out_dir, "robots", '"ignore"')
+    before = state_files(out_dir)
+    fetcher = site()
+    assert requesting(out_dir, fetcher, urls=urls, paths=paths) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == reason
+    assert fetcher.requests == []
+    assert state_files(out_dir) == before
+
+
+def test_RefusalsInOrder_no_directory_comes_first_and_writes_no_report(tmp_path: Path) -> None:
+    """RefuseSyncWithoutDirectory before RefuseSyncOnBadConfig: no manifest, no report."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "rovo.toml").write_text('[unblocking]\nprovider = "paid"\n', encoding="utf-8")
+    fetcher = site()
+    assert requesting(out_dir, fetcher, urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert not report_path(out_dir).exists()
+    assert fetcher.requests == []
+
+
+# --- T16: interrupts and crashes ----------------------------------------------------------
+
+THIRD = f"{SITE}/guide/third.html"
+
+
+def two_link_site() -> FakeFetcher:
+    """The seed linking other.html and third.html, both pages."""
+    return FakeFetcher(
+        {
+            SEED: html_response(SEED, linking("other.html", "third.html")),
+            OTHER: html_response(OTHER, PAGE),
+            THIRD: html_response(THIRD, PAGE),
+        }
+    )
+
+
+def raising_sync(out_dir: Path, fetcher: RaisingFetcher) -> ExitCode:
+    """One sync over `fetcher`; an operator interrupt escaping the sync fails the test."""
+    try:
+        return _commands.sync(
+            out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+        )
+    except KeyboardInterrupt:
+        pytest.fail("the operator interrupt escaped the sync")
+
+
+def frontier_rows(out_dir: Path) -> dict[str, str]:
+    """frontier.json's status by identity."""
+    frontier = json.loads((out_dir / ".rovo" / "frontier.json").read_text(encoding="utf-8"))
+    return {row["identity"]: row["status"] for row in frontier["entries"]}
+
+
+def ended_run(tmp_path: Path) -> tuple[Run, CrawlReport]:
+    """A finished run of the fixture site and the open report StartSync made for it."""
+    run, frontier = started(tmp_path)
+    assert finish_run(run, frontier)
+    assert end_run(run, FixedClock())
+    return run, opened(run)
+
+
+def test_rule_success_InterruptSync(tmp_path: Path) -> None:
+    """Verify rule InterruptSync succeeds when all preconditions are met.
+
+    A running run of the mirror: interrupt_requested becomes true. Through the command,
+    an operator interrupt (KeyboardInterrupt) during a fetch ends the run interrupted:
+    exit partial, a report with report_status interrupted and no error, the stored seed
+    published, the interrupted row back to pending.
+    """
+    run, _ = started(tmp_path / "unit")
+    assert interrupt_sync(run.target, run)
+    assert run.interrupt_requested is True
+    assert run.error is None
+
+    out_dir = initialised(tmp_path / "out")
+    fetcher = RaisingFetcher(two_link_site(), OTHER, KeyboardInterrupt())
+    assert raising_sync(out_dir, fetcher) is ExitCode.partial
+    assert fetcher.raised == [OTHER]
+    data = report(out_dir)
+    assert data["report_status"] == "interrupted"
+    assert data["error"] is None
+    assert data["exit_code"] == "partial"
+    assert data["run_id"] == 1
+    assert (out_dir / START_PATH).is_file()
+    assert frontier_rows(out_dir)[OTHER] == "pending"
+
+
+def test_rule_failure_InterruptSync_1(tmp_path: Path) -> None:
+    """Verify rule InterruptSync is rejected when requires clause fails.
+
+    requires: exists target: no mirror, nothing changes.
+    """
+    run, _ = started(tmp_path)
+    assert not interrupt_sync(None, run)
+    assert run.interrupt_requested is False
+
+
+def test_rule_failure_InterruptSync_2(tmp_path: Path) -> None:
+    """Verify rule InterruptSync is rejected when requires clause fails.
+
+    requires: exists run and run.status = running: no run, or one that has ended.
+    """
+    run, _ = ended_run(tmp_path)
+    assert not interrupt_sync(run.target, None)
+    assert not interrupt_sync(run.target, run)
+    assert run.interrupt_requested is False
+
+
+def test_rule_success_RecordCrash(tmp_path: Path) -> None:
+    """Verify rule RecordCrash succeeds when all preconditions are met.
+
+    A running run: its error is recorded and interrupt_requested becomes true. Through the
+    command, an uncaught error during a fetch ends the run interrupted with the error
+    text "<ExceptionType>: <message>", exit partial, the stored seed published.
+    """
+    run, _ = started(tmp_path / "unit")
+    assert record_crash(run.target, run, "RuntimeError: boom")
+    assert run.error == "RuntimeError: boom"
+    assert run.interrupt_requested is True
+
+    out_dir = initialised(tmp_path / "out")
+    fetcher = RaisingFetcher(two_link_site(), OTHER, RuntimeError("boom"))
+    assert raising_sync(out_dir, fetcher) is ExitCode.partial
+    data = report(out_dir)
+    assert data["report_status"] == "interrupted"
+    assert data["error"] == "RuntimeError: boom"
+    assert data["exit_code"] == "partial"
+    assert (out_dir / START_PATH).is_file()
+    assert frontier_rows(out_dir)[OTHER] == "pending"
+
+
+class FailingOnce:
+    """A progress sink that raises `error` on its first event and records every later one."""
+
+    def __init__(self, error: BaseException) -> None:
+        """Raise `error` once, on the first event."""
+        self.error: BaseException | None = error
+        self.events: list[ProgressEvent] = []
+
+    def __call__(self, event: ProgressEvent) -> None:
+        """Raise the error the first time; record the event every later time."""
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        self.events.append(event)
+
+
+@pytest.mark.parametrize(
+    ("error", "text"),
+    [
+        (BrokenPipeError("pipe closed"), "BrokenPipeError: pipe closed"),
+        (KeyboardInterrupt(), None),
+    ],
+    ids=["crash", "interrupt"],
+)
+def test_an_error_on_the_start_event_is_recorded_and_the_report_written(
+    tmp_path: Path, error: BaseException, text: str | None
+) -> None:
+    """RecordCrash and InterruptSync from the moment the run exists (ReportOnEveryExit).
+
+    The start event's sink fails (`rovo sync --json | true`) or the operator interrupts
+    there, before the frontier is attached: the run still ends interrupted, no request is
+    made, crawl-report.json records it (the crash's error text) and done comes last.
+    Added by T16 tick 3 (weed tick 2): the error escaped drive_run and left no report.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = site()
+    sink = FailingOnce(error)
+    try:
+        code = _commands.sync(
+            out_dir,
+            fetcher=fetcher,
+            clock=FixedClock(),
+            tier_installed=never_installed,
+            json_events=True,
+            progress=sink,
+        )
+    except KeyboardInterrupt:
+        pytest.fail("the operator interrupt escaped the sync")
+    assert code is ExitCode.partial
+    assert fetcher.requests == []
+    data = report(out_dir)
+    assert (data["run_id"], data["report_status"], data["error"]) == (1, "interrupted", text)
+    assert data["exit_code"] == "partial"
+    assert [event.event for event in sink.events][-1:] == ["done"]
+
+
+def test_rule_failure_RecordCrash_1(tmp_path: Path) -> None:
+    """Verify rule RecordCrash is rejected when requires clause fails.
+
+    requires: exists target: no mirror, nothing changes.
+    """
+    run, _ = started(tmp_path)
+    assert not record_crash(None, run, "RuntimeError: boom")
+    assert run.error is None
+    assert run.interrupt_requested is False
+
+
+def test_rule_failure_RecordCrash_2(tmp_path: Path) -> None:
+    """Verify rule RecordCrash is rejected when requires clause fails.
+
+    requires: exists run and run.status = running: no run, or one that has ended.
+    """
+    run, _ = ended_run(tmp_path)
+    assert not record_crash(run.target, None, "RuntimeError: boom")
+    assert not record_crash(run.target, run, "RuntimeError: boom")
+    assert run.error is None
+    assert run.interrupt_requested is False
+
+
+def test_rule_success_RecordCrashAfterRun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify rule RecordCrashAfterRun succeeds when all preconditions are met.
+
+    No running run, an open report with a run id and its ended run: the report records
+    the error and becomes interrupted, and RankAndWriteReport ranks it partial. Through
+    the command, an error in the finalise pass leaves that report (exit partial), writes
+    no page file, and records the run in runs.json so its id is never reused.
+    """
+    run, report_open = ended_run(tmp_path / "unit")
+    assert record_crash_after_run(run.target, run, report_open, "RuntimeError: late")
+    assert report_open.error == "RuntimeError: late"
+    assert report_open.report_status is ReportStatus.interrupted
+    assert rank_and_write_report(report_open, run, FixedClock()) is ExitCode.partial
+
+    def late(*args: object) -> None:
+        del args
+        message = "late"
+        raise RuntimeError(message)
+
+    out_dir = initialised(tmp_path / "out")
+    monkeypatch.setattr(_commands, "finalise", late)
+    assert synced(out_dir, site()) is ExitCode.partial
+    data = report(out_dir)
+    assert data["report_status"] == "interrupted"
+    assert data["error"] == "RuntimeError: late"
+    assert data["exit_code"] == "partial"
+    assert data["run_id"] == 1
+    assert not (out_dir / "pages").exists()
+    runs = json.loads((out_dir / ".rovo" / "runs.json").read_text(encoding="utf-8"))["runs"]
+    assert [row["id"] for row in runs] == [1]
+    monkeypatch.undo()
+    assert synced(out_dir, site()) is ExitCode.ok
+    assert report(out_dir)["run_id"] == len(["crashed", "next"])
+
+
+def test_rule_failure_RecordCrashAfterRun_1(tmp_path: Path) -> None:
+    """Verify rule RecordCrashAfterRun is rejected when requires clause fails.
+
+    requires: exists target: no mirror, the report does not change.
+    """
+    run, report_open = ended_run(tmp_path)
+    assert not record_crash_after_run(None, run, report_open, "RuntimeError: late")
+    assert report_open.error is None
+    assert report_open.report_status is ReportStatus.finished
+
+
+def test_rule_failure_RecordCrashAfterRun_2(tmp_path: Path) -> None:
+    """Verify rule RecordCrashAfterRun is rejected when requires clause fails.
+
+    requires: not exists a running run of the mirror: a crash during the run is
+    RecordCrash's.
+    """
+    run, _ = started(tmp_path)
+    report_open = opened(run)
+    assert not record_crash_after_run(run.target, run, report_open, "RuntimeError: late")
+    assert report_open.error is None
+    assert report_open.report_status is ReportStatus.finished
+
+
+def test_rule_failure_RecordCrashAfterRun_3(tmp_path: Path) -> None:
+    """Verify rule RecordCrashAfterRun is rejected when requires clause fails.
+
+    requires: exists report and report.run_id != null: no open report (written), or one
+    with no run id.
+    """
+    run, report_open = ended_run(tmp_path)
+    report_open.status = CrawlReportStatus.written
+    assert not record_crash_after_run(run.target, run, report_open, "RuntimeError: late")
+    assert report_open.error is None
+    no_run = opened(run)
+    no_run.run_id = None
+    assert not record_crash_after_run(run.target, run, no_run, "RuntimeError: late")
+    assert no_run.error is None
+    assert not record_crash_after_run(run.target, run, None, "RuntimeError: late")
+
+
+def test_rule_failure_RecordCrashAfterRun_4(tmp_path: Path) -> None:
+    """Verify rule RecordCrashAfterRun is rejected when requires clause fails.
+
+    requires: exists run (Run{target, id: report.run_id}): no run, or another run.
+    """
+    run, report_open = ended_run(tmp_path)
+    assert not record_crash_after_run(run.target, None, report_open, "RuntimeError: late")
+    report_open.run_id = run.id + 1
+    assert not record_crash_after_run(run.target, run, report_open, "RuntimeError: late")
+    assert report_open.error is None
+    assert report_open.report_status is ReportStatus.finished
+
+
+def test_a_later_slices_stop_inside_the_run_still_propagates_with_no_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NotInThisSlice is a development guard, not a crash: it passes every handler.
+
+    The sync stops (exit partial), the previous report stays in place and no run is
+    recorded; the guard is not taken for RecordCrash or RecordCrashAfterRun.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    previous = report_path(out_dir).read_bytes()
+    runs = (out_dir / ".rovo" / "runs.json").read_bytes()
+
+    def stopped(*args: object) -> None:
+        del args
+        raise NotInThisSlice(rule="AnyLaterRule")
+
+    monkeypatch.setattr(_commands, "finalise", stopped)
+    assert synced(out_dir, site()) is ExitCode.partial
+    assert report_path(out_dir).read_bytes() == previous
+    assert (out_dir / ".rovo" / "runs.json").read_bytes() == runs
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "error_text"),
+    [
+        pytest.param(KeyboardInterrupt(), "interrupted", None, id="interrupted"),
+        pytest.param(RuntimeError("boom"), "interrupted", "RuntimeError: boom", id="crashed"),
+    ],
+)
+def test_ReportableOutcome_no_fetch_starts_after_an_interrupt_and_the_next_sync_retries(
+    tmp_path: Path, error: BaseException, status: str, error_text: str | None
+) -> None:
+    """crawl.allium ReportableOutcome and NoResume through the command.
+
+    The interrupt or crash on other.html is the last request of the run (no fetch starts
+    after it), no row is left in progress, and the next sync, with no resume flag,
+    fetches other.html again and finishes.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = RaisingFetcher(two_link_site(), OTHER, error)
+    assert raising_sync(out_dir, fetcher) is ExitCode.partial
+    assert fetcher.requests[-1] == OTHER
+    assert fetcher.raised == [OTHER]
+    data = report(out_dir)
+    assert (data["report_status"], data["error"]) == (status, error_text)
+    rows = frontier_rows(out_dir)
+    assert "in_progress" not in rows.values()
+    assert rows[OTHER] == "pending"
+    again = two_link_site()
+    assert synced(out_dir, again) is ExitCode.ok
+    assert OTHER in again.requests
+    assert report(out_dir)["report_status"] == "finished"
+    assert (out_dir / OTHER_PATH).is_file()
+
+
+@pytest.mark.parametrize("kind", ["refused", "dry", "interrupted", "crashed", "crashed-after"])
+def test_ReportOnEveryExit_every_sync_of_a_mirror_leaves_a_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """rovo.allium ReportOnEveryExit: refused, dry, interrupted, crashed in or after the run.
+
+    Each leaves crawl-report.json with its exit code, run kind, status and, for a crash,
+    the error text.
+    """
+    out_dir = initialised(tmp_path / "out")
+    expected: tuple[str, str, str, str | None]
+    if kind == "refused":
+        set_key(out_dir, "max_depth", '"deep"')
+        code = synced(out_dir, site())
+        expected = ("usage", "initial", "refused", None)
+    elif kind == "dry":
+        code = _commands.sync(
+            out_dir,
+            fetcher=site(),
+            clock=FixedClock(),
+            tier_installed=never_installed,
+            dry_run=True,
+        )
+        expected = ("ok", "initial", "finished", None)
+    elif kind in {"interrupted", "crashed"}:
+        error = KeyboardInterrupt() if kind == "interrupted" else RuntimeError("boom")
+        code = raising_sync(out_dir, RaisingFetcher(two_link_site(), OTHER, error))
+        text = None if kind == "interrupted" else "RuntimeError: boom"
+        expected = ("partial", "initial", "interrupted", text)
+    else:
+
+        def late(*args: object) -> None:
+            del args
+            message = "late"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(_commands, "finalise", late)
+        code = synced(out_dir, site())
+        expected = ("partial", "initial", "interrupted", "RuntimeError: late")
+    data = report(out_dir)
+    assert code.value == expected[0]
+    assert (data["exit_code"], data["kind"], data["report_status"], data["error"]) == expected
+
+
+# --- T16: progress ------------------------------------------------------------------------
+
+
+def test_ProgressOnRequest_the_sink_gets_start_page_backoff_and_one_done_last(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """rovo.allium ProgressOnRequest and AnnounceBackoff, live, through the command.
+
+    The seed answers 503 once, then the page: the sink receives start first, a
+    host_backoff naming the host with its until, a page event per settled row, and
+    exactly one done, last. Nothing is printed: the sink is the caller's.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = ScriptedFetcher(
+        {SEED: html_response(SEED, PAGE)},
+        {SEED: [html_response(SEED, "", status=SERVICE_UNAVAILABLE)]},
+    )
+    events: list[ProgressEvent] = []
+    capsys.readouterr()
+    code = _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=SteppingTimer(),
+        tier_installed=never_installed,
+        json_events=True,
+        progress=events.append,
+    )
+    assert code is ExitCode.ok
+    kinds = [event.event for event in events]
+    assert kinds[0] == "start"
+    assert kinds[-1] == "done"
+    assert kinds.count("done") == 1
+    assert "page" in kinds
+    backoffs = [event for event in events if event.event == "host_backoff"]
+    assert backoffs
+    assert {event.host for event in backoffs} == {"docs.example"}
+    assert all(event.until is not None for event in backoffs)
+    assert capsys.readouterr().out == ""
+    options = report(out_dir)["options"]
+    assert isinstance(options, dict)
+    assert options["json_events"] is True
+
+
+def test_ProgressOnRequest_no_sink_prints_nothing_and_a_dry_run_still_lists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without json_events nothing is printed; a dry run's listing stays plain text.
+
+    With a sink, the dry run's events end with its one done event, and its listing is
+    still the identities, one a line, on standard output.
+    """
+    out_dir = initialised(tmp_path / "out")
+    capsys.readouterr()
+    assert synced(out_dir, site()) is ExitCode.ok
+    assert capsys.readouterr().out == ""
+
+    dry = initialised(tmp_path / "dry")
+    events: list[ProgressEvent] = []
+    capsys.readouterr()
+    code = _commands.sync(
+        dry,
+        fetcher=site(),
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        dry_run=True,
+        json_events=True,
+        progress=events.append,
+    )
+    assert code is ExitCode.ok
+    assert capsys.readouterr().out == f"{SEED}\n"
+    assert [event.event for event in events].count("done") == 1
+    assert events[-1].event == "done"
+
+
+def test_a_refusal_raises_no_progress_event(tmp_path: Path) -> None:
+    """A refused sync starts no run: the sink receives nothing, not even done."""
+    out_dir = initialised(tmp_path / "out")
+    set_key(out_dir, "max_depth", '"deep"')
+    events: list[ProgressEvent] = []
+    code = _commands.sync(
+        out_dir,
+        fetcher=site(),
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        json_events=True,
+        progress=events.append,
+    )
+    assert code is ExitCode.usage
+    assert events == []
+
+
+# --- T16: rovo report ---------------------------------------------------------------------
+
+
+def test_rule_success_ShowReport(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule ShowReport succeeds when all preconditions are met.
+
+    A mirror with a report: its JSON is printed on standard output as written, with a
+    final newline, nothing on standard error, exit ok.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    capsys.readouterr()
+    assert _commands.report(out_dir) is ExitCode.ok
+    printed = capsys.readouterr()
+    assert printed.err == ""
+    assert printed.out.endswith("\n")
+    assert json.loads(printed.out) == report(out_dir)
+
+
+def test_rule_failure_ShowReport_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule ShowReport is rejected when requires clause fails.
+
+    requires: exists target: a report file in a directory with no manifest is not shown.
+    """
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    report_path(out_dir).write_text('{"run_id": 1}\n', encoding="utf-8")
+    capsys.readouterr()
+    assert _commands.report(out_dir) is ExitCode.usage
+    assert capsys.readouterr().out == ""
+
+
+def test_rule_failure_ShowReport_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule ShowReport is rejected when requires clause fails.
+
+    requires: latest_report(target) != null: no report file, or one that is not JSON.
+    """
+    out_dir = initialised(tmp_path / "out")
+    capsys.readouterr()
+    assert _commands.report(out_dir) is ExitCode.usage
+    assert capsys.readouterr().out == ""
+    report_path(out_dir).write_text("{not json", encoding="utf-8")
+    assert _commands.report(out_dir) is ExitCode.usage
+    assert capsys.readouterr().out == ""
+
+
+def test_rule_success_RefuseShowReport(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule RefuseShowReport succeeds when all preconditions are met.
+
+    No mirror (no directory, no manifest, an unparsable one) or no readable report: exit
+    usage, the problem on standard error, nothing on standard output, nothing written.
+    """
+    missing = tmp_path / "missing"
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    damaged = first_synced(tmp_path / "damaged")
+    manifest_path(damaged).write_text("{not json", encoding="utf-8")
+    fresh = initialised(tmp_path / "fresh")
+    for out_dir in (missing, empty, damaged, fresh):
+        before = snapshot(out_dir) if out_dir.exists() else {}
+        capsys.readouterr()
+        assert _commands.report(out_dir) is ExitCode.usage, out_dir
+        printed = capsys.readouterr()
+        assert printed.out == ""
+        assert printed.err.startswith("rovo: report: ")
+        assert (snapshot(out_dir) if out_dir.exists() else {}) == before
+    assert not missing.exists()
+
+
+def test_rule_failure_RefuseShowReport_1(tmp_path: Path) -> None:
+    """Verify rule RefuseShowReport is rejected when requires clause fails.
+
+    requires: not exists target or latest_report(target) = null: a mirror with a report,
+    a refused one included, is shown.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    assert _commands.report(out_dir) is ExitCode.ok
+    set_key(out_dir, "max_depth", '"deep"')
+    assert synced(out_dir, site()) is ExitCode.usage
+    assert _commands.report(out_dir) is ExitCode.ok

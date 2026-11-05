@@ -7,10 +7,11 @@ are ISO 8601 UTC. May import the modules below it; never rovo._commands or rovo.
 """
 
 import enum
+import importlib.metadata
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from rovo._config import CONFIG, Configuration, SyncOptions, encode_configuration
 from rovo._convert.model import QualityFlag, QualityGate
@@ -20,12 +21,15 @@ from rovo._crawl.model import (
     DiscoveryProblem,
     Frontier,
     Host,
+    HostBackedOff,
+    ProgressEvent,
     RobotsMode,
     Run,
     RunKind,
     RunMode,
     RunStatus,
     UrlFailed,
+    UrlSkippedBlocked,
 )
 from rovo._exit import ExitCode as ExitCode  # noqa: PLC0414  An explicit re-export: callers import it from here.
 from rovo._mirror.model import (
@@ -41,9 +45,9 @@ from rovo._mirror.model import (
     Tier,
 )
 from rovo._mirror.state import Clock, timestamp, write_json
+from rovo._mirror.state import report_path as report_path  # noqa: PLC0414  An explicit re-export: callers import it from here.
 
 _SCORE_PLACES = 4
-_REPORT_FILE = "crawl-report.json"
 
 
 class ChangeKind(enum.Enum):
@@ -228,11 +232,6 @@ class CrawlReport:
         )
 
 
-def report_path(out_dir: Path) -> Path:
-    """<out>/crawl-report.json."""
-    return out_dir / _REPORT_FILE
-
-
 def tally_finalised_page(report: CrawlReport, finalised: PageFinalised) -> bool:
     """Realises rovo.allium TallyFinalisedPage."""
     pass_ = finalised.pass_
@@ -292,6 +291,104 @@ def tally_failed_url(report: CrawlReport, failed: UrlFailed) -> bool:
     report.changes.append(
         Change(kind=ChangeKind.failed, url=failed.url, path=None, moved_from=None)
     )
+    return True
+
+
+def tally_skipped_url(report: CrawlReport, skipped: UrlSkippedBlocked) -> bool:
+    """Realises rovo.allium TallySkippedUrl: a skipped_urls row; False when its guard fails."""
+    if not report.is_open_for(skipped.run.target, skipped.run.id):
+        return False
+    report.skipped_urls.append(skipped.url)
+    return True
+
+
+def announce_backoff(backed_off: HostBackedOff) -> ProgressEvent:
+    """Realises rovo.allium AnnounceBackoff: the host_backoff event, naming the host."""
+    return ProgressEvent(event="host_backoff", host=backed_off.host.name, until=backed_off.until)
+
+
+def event_line(event: ProgressEvent) -> str:
+    """One --json progress line: {"event", "host", "until"}, keys sorted, until ISO 8601."""
+    until = None if event.until is None else timestamp(event.until)
+    return json.dumps({"event": event.event, "host": event.host, "until": until}, sort_keys=True)
+
+
+def report_refusal(  # noqa: PLR0913  The SyncRefused trigger's parameters, and the clock.
+    target: Mirror,
+    operator: Operator,
+    options: SyncOptions,
+    settings: Configuration,
+    reason: str,
+    *,
+    clock: Clock,
+) -> CrawlReport:
+    """Realises rovo.allium ReportRefusal: the refused report, written, and returned.
+
+    It starts no run and records none: only crawl-report.json is replaced.
+    """
+    now = clock.now()
+    report = CrawlReport(
+        mirror=target,
+        operator=operator,
+        run_id=None,
+        kind=RunKind.update if target.is_populated else RunKind.initial,
+        mode=RunMode.standard,
+        report_status=ReportStatus.refused,
+        exit_code=ExitCode.usage,
+        refusal_reason=reason,
+        configuration=settings,
+        options=options,
+        tool_version=importlib.metadata.version("rovo"),
+        started_at=now,
+        status=CrawlReportStatus.written,
+        finished_at=now,
+    )
+    write_json(report_path(target.out_dir), encode_report(report))
+    return report
+
+
+def _running_run_of(mirror: Mirror | None, run: Run | None) -> Run | None:
+    """crawl/Run{target: mirror, status: running}, when it exists."""
+    if mirror is None or run is None or run.target is not mirror:
+        return None
+    return run if run.status is RunStatus.running else None
+
+
+def interrupt_sync(mirror: Mirror | None, run: Run | None) -> bool:
+    """Realises rovo.allium InterruptSync: True when it set run.interrupt_requested."""
+    running = _running_run_of(mirror, run)
+    if running is None:
+        return False
+    running.interrupt_requested = True
+    return True
+
+
+def record_crash(mirror: Mirror | None, run: Run | None, error: str) -> bool:
+    """Realises rovo.allium RecordCrash: True when it set run.error and interrupt_requested."""
+    running = _running_run_of(mirror, run)
+    if running is None:
+        return False
+    running.error = error
+    running.interrupt_requested = True
+    return True
+
+
+def record_crash_after_run(
+    mirror: Mirror | None, run: Run | None, report: CrawlReport | None, error: str
+) -> bool:
+    """Realises rovo.allium RecordCrashAfterRun: True when it raised ReportReady.
+
+    The open report records the error and becomes interrupted; the caller then ranks
+    and writes it (RankAndWriteReport).
+    """
+    if mirror is None or run is None or report is None:
+        return False
+    if run.target is not mirror or run.status is RunStatus.running:
+        return False
+    if not report.is_open_for(mirror, run.id):
+        return False
+    report.error = error
+    report.report_status = ReportStatus.interrupted
     return True
 
 
@@ -436,6 +533,7 @@ def encode_report(report: CrawlReport) -> dict[str, object]:
             "confirmed": report.options.confirmed,
             "interactive": report.options.interactive,
             "json_events": report.options.json_events,
+            "targeted": report.options.targeted,
             "urls": sorted(report.options.urls),
             "paths": sorted(report.options.paths),
             "owner_test": None,

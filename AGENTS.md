@@ -9,8 +9,8 @@ a documentation mirror, specified under `docs/specs/` and implemented slice by s
 (decision 0012, tickets T09 onward); nothing may invent beyond the specification:
 today `rovo init` and `rovo sync` mirror the pages linked from the seeds and named by the
 sites' sitemaps and llms.txt and write the mirror's indexes, `rovo index` rebuilds them,
-the public API is still only the placeholder `rovo.__version__`, and `rovo --version`
-and `rovo version` print it.
+`rovo report` prints the last report, the public API is still only the placeholder
+`rovo.__version__`, and `rovo --version` and `rovo version` print it.
 New behaviour arrives only through a ticket or a decision record, and is stated in an
 Allium specification under `docs/specs/` before it is built: the specifications decide
 *what* the code does and win wherever the code and a specification disagree; this file

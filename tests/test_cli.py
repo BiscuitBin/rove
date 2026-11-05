@@ -11,6 +11,7 @@ import pytest
 from typer import rich_utils
 from typer.testing import CliRunner
 
+from rovo._exit import ExitCode
 from rovo.cli import app
 
 # Click's exit status for a usage error, and Typer's for `no_args_is_help`.
@@ -117,12 +118,14 @@ def test_python_m_rovo_prints_the_version() -> None:
     ("command", "arguments"),
     [
         ("init", ("SITE_URL", "OUT_DIR", "--profile")),
-        ("sync", ("OUT_DIR", "--dry-run")),  # T13: --dry-run
+        # T13: --dry-run; T16: --yes, --json, --url, --path and --set.
+        ("sync", ("OUT_DIR", "--dry-run", "--yes", "--json", "--url", "--path", "--set")),
         ("index", ("OUT_DIR",)),
+        ("report", ("OUT_DIR",)),  # T16
     ],
 )
 def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> None:
-    """`rovo init --help`, `rovo sync --help` and `rovo index --help` name their arguments."""
+    """`rovo init`, `sync`, `index` and `report --help` name their arguments and options."""
     result = runner().invoke(app, [command, "--help"], prog_name="rovo")
 
     assert result.exit_code == 0, result.output
@@ -131,9 +134,9 @@ def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> 
         assert argument in result.stdout
 
 
-@pytest.mark.parametrize("command", ["init", "sync", "index"])
+@pytest.mark.parametrize("command", ["init", "sync", "index", "report"])
 def test_mirror_commands_without_arguments_are_usage_errors(command: str) -> None:
-    """`rovo init`, `rovo sync` and `rovo index` with no arguments exit 2, usage on stderr."""
+    """`rovo init`, `sync`, `index` and `report` with no arguments exit 2, usage on stderr."""
     result = runner().invoke(app, [command], prog_name="rovo")
 
     assert result.exit_code == USAGE_ERROR, result.output
@@ -201,3 +204,139 @@ def test_index_loads_neither_httpx_nor_the_crawl(tmp_path: Path) -> None:
     out_dir = initialised(tmp_path / "out")
     assert probe_modules("index", str(out_dir)) == [0, False, False]
     assert probe_modules("sync", str(tmp_path / "missing")) == [USAGE_ERROR, True, True]
+
+
+# --- rovo sync's options and rovo report (T16) ----------------------------------------------
+
+SEED_URL = "http://127.0.0.1:9/guide/start.html"
+WRITTEN_REPORT = {"report_status": "finished", "run_id": 1}
+
+
+def recording_sync(monkeypatch: pytest.MonkeyPatch, calls: list[dict[str, object]]) -> None:
+    """Replace rovo._commands.sync: record its keywords, raise one progress event, exit ok."""
+    from rovo import _commands  # noqa: PLC0415  The module the command imports at run time.
+    from rovo._crawl.model import ProgressEvent  # noqa: PLC0415  Only a sync loads the crawl.
+
+    def fake(out_dir: Path, **keywords: object) -> ExitCode:
+        calls.append({"out_dir": out_dir, **keywords})
+        progress = keywords.get("progress")
+        if callable(progress):
+            progress(ProgressEvent(event="done", host=None, until=None))
+        return ExitCode.ok
+
+    monkeypatch.setattr(_commands, "sync", fake)
+
+
+def test_sync_passes_its_options_to_the_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--yes, --json, --url, --path (each repeatable) and --set reach rovo._commands.sync.
+
+    Under --json the progress sink prints each event as one JSON line on standard output.
+    """
+    calls: list[dict[str, object]] = []
+    recording_sync(monkeypatch, calls)
+    out_dir = tmp_path / "out"
+    arguments = [
+        "sync",
+        str(out_dir),
+        "--yes",
+        "--json",
+        "--url",
+        SEED_URL,
+        "--url",
+        "http://127.0.0.1:9/guide/b.html",
+        "--path",
+        "pages/127.0.0.1_9/start.md",
+        "--set",
+        "scope.max_depth=3",
+        "--set",
+        "mirror.prune=true",
+    ]
+    result = runner().invoke(app, arguments, prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["out_dir"] == out_dir
+    assert call["confirmed"] is True
+    assert call["json_events"] is True
+    assert strings(call["urls"]) == (SEED_URL, "http://127.0.0.1:9/guide/b.html")
+    assert strings(call["paths"]) == ("pages/127.0.0.1_9/start.md",)
+    assert strings(call["overrides"]) == ("scope.max_depth=3", "mirror.prune=true")
+    assert callable(call["progress"])
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [
+        {"event": "done", "host": None, "until": None}
+    ]
+
+
+def test_sync_without_options_asks_for_nothing_and_prints_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without --json there is no sink and nothing on standard output; no option is set."""
+    calls: list[dict[str, object]] = []
+    recording_sync(monkeypatch, calls)
+    result = runner().invoke(app, ["sync", str(tmp_path)], prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call.get("confirmed", False) is False
+    assert call.get("json_events", False) is False
+    assert call.get("progress") is None
+    assert strings(call.get("urls", ())) == ()
+    assert strings(call.get("paths", ())) == ()
+    assert strings(call.get("overrides", ())) == ()
+    assert result.stdout == ""
+
+
+def strings(value: object) -> tuple[str, ...]:
+    """A sequence the fake recorded, as a tuple of strings."""
+    assert isinstance(value, (list, tuple))
+    return tuple(str(item) for item in value)
+
+
+def with_report(out_dir: Path) -> Path:
+    """An initialised mirror holding a crawl-report.json."""
+    initialised(out_dir)
+    (out_dir / "crawl-report.json").write_text(
+        json.dumps(WRITTEN_REPORT, indent=1) + "\n", encoding="utf-8"
+    )
+    return out_dir
+
+
+def test_report_prints_the_last_report(tmp_path: Path) -> None:
+    """`rovo report OUT_DIR` prints crawl-report.json as JSON and exits 0."""
+    out_dir = with_report(tmp_path / "out")
+    result = runner().invoke(app, ["report", str(out_dir)], prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == WRITTEN_REPORT
+    assert result.stderr == ""
+
+
+def test_report_without_a_report_exits_2(tmp_path: Path) -> None:
+    """`rovo report` on a mirror with no report exits 2, nothing on standard output."""
+    out_dir = initialised(tmp_path / "out")
+    result = runner().invoke(app, ["report", str(out_dir)], prog_name="rovo")
+
+    assert result.exit_code == USAGE_ERROR, result.output
+    assert result.stdout == ""
+    assert result.stderr.startswith("rovo: report: ")
+
+
+def test_report_runs_through_the_installed_script(tmp_path: Path) -> None:
+    """The installed `rovo` script runs `rovo report` and prints the report."""
+    script = shutil.which("rovo", path=str(Path(sys.executable).parent))
+    assert script is not None, f"no rovo console script beside {sys.executable}"
+    out_dir = with_report(tmp_path / "out")
+    completed = subprocess.run(
+        [script, "report", str(out_dir)], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == WRITTEN_REPORT
+
+
+def test_report_loads_neither_httpx_nor_the_crawl(tmp_path: Path) -> None:
+    """`rovo report` reads the report with rovo._mirror.state alone, like `rovo index`."""
+    out_dir = with_report(tmp_path / "out")
+    assert probe_modules("report", str(out_dir)) == [0, False, False]

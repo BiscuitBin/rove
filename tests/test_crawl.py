@@ -34,6 +34,7 @@ from fakes import (
     text_response,
     xml_response,
 )
+from rovo import _commands
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag
 from rovo._crawl import model, sitemaps
@@ -96,12 +97,14 @@ from rovo._crawl.run import (
     enqueue_page_links,
     entry_fails,
     expand_sitemap_entries,
+    fail_discarded_entry,
     feed_breaker,
     fetch_entry,
     fetch_robots,
     fetch_sitemap,
     finish_run,
     http_retry,
+    interrupt_run,
     load_frontier,
     load_runs,
     next_batch,
@@ -136,6 +139,7 @@ from rovo._crawl.run import (
 from rovo._mirror.intake import admit_candidate, take_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
+    CandidateDiscarded,
     CandidateDuplicate,
     CandidateOutcome,
     CrawlScope,
@@ -151,8 +155,9 @@ from rovo._mirror.model import (
     RemovalReason,
     Tier,
 )
-from rovo._mirror.state import save_mirror
+from rovo._mirror.state import load_mirror, save_mirror
 from rovo._mirror.urls import hostname_of
+from rovo._report import ExitCode, record_crash
 from spec_values import spec_duration, spec_enum, spec_float, spec_int
 
 SITE = "http://docs.example"
@@ -236,6 +241,7 @@ GONE = 410
 FORBIDDEN = 403
 MOVED = 301
 SECOND_RUN = 2
+LATER_INSTANT = START + timedelta(minutes=5)
 TWO_TRIES = 2
 THIRD_RUN = 3
 SITEMAP = f"{SITE}/sitemap.xml"
@@ -6230,3 +6236,247 @@ def test_CrawlResult_carries_the_intakes_removals(tmp_path: Path) -> None:
     ]
     assert isinstance(merged.removed[0], PageRemoved)
     assert merging.known_page(SEED) is merging.page(OTHER)
+
+
+# --- T16: a non-HTML answer, interrupts and crashes, a discarded candidate ----------------
+
+PLAIN_TEXT = "Not a page.\n"
+
+
+def never_installed(tier: Tier) -> bool:
+    """No engine beyond http is installed."""
+    del tier
+    return False
+
+
+def command_synced(out_dir: Path, fetcher: FakeFetcher) -> ExitCode:
+    """One rovo sync of the mirror in out_dir over `fetcher`, on a FixedClock."""
+    return _commands.sync(
+        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+    )
+
+
+def test_transition_edge_FrontierEntry_in_progress_skipped_not_html(tmp_path: Path) -> None:
+    """Verify transition in_progress -> skipped_not_html on FrontierEntry.status is reachable via a witnessing rule.
+
+    DisposeFetch's last branch: an ok answer that is neither HTML nor raw-unchanged
+    counts toward the host's fetched and settles its row skipped_not_html; no candidate
+    is delivered and no failure is raised. Through the driver the run finishes with the
+    row settled, no page, no failed URL and no unresolved URL.
+    """  # noqa: E501  The obligation's description, quoted.
+    plain = FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})
+    run, _, walk = settled(tmp_path / "unit", plain)
+    fetched = walk.host.fetched
+    disposed = dispose_fetch(walk)
+    assert not isinstance(disposed, (EntryFailed, CandidateDelivered))
+    assert walk.entry.status is FrontierStatus.skipped_not_html
+    assert walk.host.fetched == fetched + 1
+    assert run.target.pages == []
+
+    result = crawl_once(tmp_path / "driven", FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)}))
+    rows = {entry.identity: entry.status for entry in result.frontier.entries}
+    assert rows == {SEED: FrontierStatus.skipped_not_html}
+    assert result.failed == ()
+    assert result.run.status is RunStatus.finished
+    assert result.run.unresolved_urls == frozenset()
+    assert result.run.target.pages == []
+
+
+def test_transition_edge_FrontierEntry_skipped_not_html_pending(tmp_path: Path) -> None:
+    """Verify transition skipped_not_html -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    PrepareRun's written-page recheck: a known page whose URL answered non-HTML keeps its
+    record and its file, its row settles skipped_not_html, and the next full run
+    re-pends the row as a written page.
+    """  # noqa: E501  The obligation's description, quoted.
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    assert command_synced(out_dir, site()) is ExitCode.ok
+    page_file = out_dir / "pages" / HOST / "start.md"
+    published = page_file.read_bytes()
+    assert command_synced(out_dir, FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})) is (
+        ExitCode.ok
+    )
+    assert page_file.read_bytes() == published
+    mirror = load_mirror(out_dir)
+    (page,) = mirror.pages
+    assert page.status is PageStatus.written
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    assert frontier.entry(SEED) is not None
+    assert frontier.entry(SEED).status is FrontierStatus.skipped_not_html  # type: ignore[union-attr]  # Asserted above.
+    run = start_run(request(mirror, run_id=THIRD_RUN, kind=RunKind.update), FixedClock())
+    assert run is not None
+    assert prepare_run(run, frontier)
+    assert frontier.entry(SEED).status is FrontierStatus.pending  # type: ignore[union-attr]  # Asserted above.
+
+
+def test_a_url_with_no_page_that_answered_non_html_is_not_fetched_again(tmp_path: Path) -> None:
+    """Open points item 3, interim: skipped_not_html is in no retry set.
+
+    A linked URL with no page that answered non-HTML stays skipped_not_html across a
+    full run; the next sync does not request it (crawl.allium Frontier retry_entries,
+    PrepareRun at bad753c).
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    linking_page = PAGE.replace("</main>", '<p><a href="other.html">other</a></p></main>')
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, linking_page), OTHER: text_response(OTHER, PLAIN_TEXT)}
+    )
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    assert fetcher.requests.count(OTHER) == 1
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    assert fetcher.requests.count(OTHER) == 1
+    frontier = load_frontier(load_mirror(out_dir))
+    assert frontier is not None
+    row = frontier.entry(OTHER)
+    assert row is not None
+    assert row.status is FrontierStatus.skipped_not_html
+
+
+def test_transition_edge_FrontierEntry_in_progress_pending(tmp_path: Path) -> None:
+    """Verify transition in_progress -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    InterruptRun: every in-progress row returns to pending.
+    """  # noqa: E501  The obligation's description, quoted.
+    run, frontier, entry = selected(tmp_path, site())
+    assert [entry.status] == [FrontierStatus.in_progress]
+    run.interrupt_requested = True
+    assert interrupt_run(run, frontier)
+    assert entry.status is FrontierStatus.pending
+
+
+def test_transition_edge_Run_running_interrupted(tmp_path: Path) -> None:
+    """Verify transition running -> interrupted on Run.status is reachable via a witnessing rule.
+
+    InterruptRun raises RunEnding; EndRun ends a run whose interrupt was requested as
+    interrupted, with its finished_at.
+    """
+    run, frontier, _ = selected(tmp_path, site())
+    run.interrupt_requested = True
+    assert interrupt_run(run, frontier)
+    assert [run.status] == [RunStatus.running]
+    assert end_run(run, FixedClock(LATER_INSTANT))
+    assert run.status is RunStatus.interrupted
+    assert run.finished_at == LATER_INSTANT
+
+
+def test_entity_optional_Run_error(tmp_path: Path) -> None:
+    """Verify optional field Run.error accepts null and non-null values.
+
+    Null from StartRun; RecordCrash (the root's) sets it, and an interrupted run keeps it.
+    """
+    run, frontier, _ = selected(tmp_path, site())
+    assert [run.error] == [None]
+    assert record_crash(run.target, run, "RuntimeError: boom")
+    assert run.error == "RuntimeError: boom"
+    assert interrupt_run(run, frontier)
+    assert end_run(run, FixedClock())
+    assert run.status is RunStatus.interrupted
+    assert run.error == "RuntimeError: boom"
+
+
+def test_rule_success_InterruptRun(tmp_path: Path) -> None:
+    """Verify rule InterruptRun succeeds when all preconditions are met.
+
+    Every in-progress row returns to pending, the other rows keep their status, and the
+    unresolved snapshot is taken (the pending rows are unresolved).
+    """
+    run, frontier, entry = selected(tmp_path, site())
+    other = in_progress(run, frontier, OTHER)
+    done = enqueue(run, frontier, B_PAGE, depth=1, via=DiscoverySource.link, priority=0)
+    done.status = FrontierStatus.done
+    run.interrupt_requested = True
+    assert interrupt_run(run, frontier)
+    assert (entry.status, other.status) == (FrontierStatus.pending, FrontierStatus.pending)
+    assert done.status is FrontierStatus.done
+    assert {SEED, OTHER} <= run.unresolved_urls
+    assert B_PAGE not in run.unresolved_urls
+    assert frontier.in_progress_entries == []
+
+
+def test_rule_failure_InterruptRun_1(tmp_path: Path) -> None:
+    """Verify rule InterruptRun is rejected when requires clause fails.
+
+    requires: run.status = running: an ended run is not interrupted again.
+    """
+    run, frontier, entry = selected(tmp_path, site())
+    run.status = RunStatus.finished
+    run.interrupt_requested = True
+    assert not interrupt_run(run, frontier)
+    assert entry.status is FrontierStatus.in_progress
+    assert run.unresolved_urls == frozenset()
+
+
+def discarded(tmp_path: Path) -> tuple[Run, Frontier, LadderWalk, CandidateDiscarded]:
+    """The seed converted and admitted, then discarded by the mirror for a stated reason."""
+    run, frontier, walk = settled(tmp_path, site())
+    assert dispose_fetch(walk)
+    handed = convert_fetched(run, walk.entry, walk)
+    assert handed is not None
+    candidate = admit_candidate(handed)
+    return run, frontier, walk, CandidateDiscarded(candidate=candidate, reason="no free path")
+
+
+def test_rule_success_FailDiscardedEntry(tmp_path: Path) -> None:
+    """Verify rule FailDiscardedEntry succeeds when all preconditions are met.
+
+    The row in progress and a running run: EntryFailed with the discard's reason as the
+    error and the row's attempts.
+    """
+    run, frontier, walk, discard = discarded(tmp_path)
+    failed = fail_discarded_entry(run, frontier, discard)
+    assert failed is not None
+    assert failed.run is run
+    assert failed.entry is walk.entry
+    assert failed.error == "no free path"
+    assert failed.attempts == walk.entry.attempts
+
+
+def test_rule_failure_FailDiscardedEntry_1(tmp_path: Path) -> None:
+    """Verify rule FailDiscardedEntry is rejected when requires clause fails.
+
+    requires: exists entry and entry.status = in_progress: the row already settled.
+    """
+    run, frontier, walk, discard = discarded(tmp_path)
+    walk.entry.status = FrontierStatus.done
+    assert fail_discarded_entry(run, frontier, discard) is None
+    assert walk.entry.status is FrontierStatus.done
+
+
+def test_rule_failure_FailDiscardedEntry_2(tmp_path: Path) -> None:
+    """Verify rule FailDiscardedEntry is rejected when requires clause fails.
+
+    requires: exists run (Run{target, status: running}): no run, or one that ended.
+    """
+    run, frontier, walk, discard = discarded(tmp_path)
+    assert fail_discarded_entry(None, frontier, discard) is None
+    run.status = RunStatus.interrupted
+    assert fail_discarded_entry(run, frontier, discard) is None
+    assert walk.entry.status is FrontierStatus.in_progress
+
+
+def test_NoResume_an_interrupted_runs_rows_are_fetched_by_the_next_run(tmp_path: Path) -> None:
+    """crawl.allium NoResume and ReportableOutcome on unit inputs.
+
+    After InterruptRun and EndRun no row is in progress, so no fetch is under way; the
+    next run's PrepareRun, with no resume flag, keeps the interrupted row pending and
+    its driver fetches it.
+    """
+    run, frontier, entry = selected(tmp_path, site())
+    run.interrupt_requested = True
+    assert interrupt_run(run, frontier)
+    assert end_run(run, FixedClock())
+    assert frontier.in_progress_entries == []
+    assert entry.status is FrontierStatus.pending
+    save_frontier(frontier)
+    fetcher = site()
+    mirror = run.target
+    result = run_crawl(
+        request(mirror, run_id=SECOND_RUN), load_frontier(mirror), fetcher, FixedClock()
+    )
+    assert SEED in fetcher.requests
+    assert result.run.status is RunStatus.finished
+    rows = {row.identity: row.status for row in result.frontier.entries}
+    assert rows[SEED] is FrontierStatus.done

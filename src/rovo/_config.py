@@ -1,7 +1,7 @@
 """Configuration layers for the command (rovo.allium): serves the command and the root.
 
-The layers in this slice are the built-in defaults, then `<out>/rovo.toml`; the
-environment and flag layers arrive with the configuration slice. May import the
+The layers are the built-in defaults, `<out>/rovo.toml`, the ROVO_<SECTION>__<FIELD>
+environment variables and the --set flags, a later layer winning key by key. May import the
 modules below it; never rovo._commands or rovo.cli.
 """
 
@@ -11,7 +11,7 @@ import ipaddress
 import json
 import math
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -33,6 +33,7 @@ from rovo._mirror.urls import hostname_of, is_http_url
 
 _HASH_CHARS = 16
 _CONFIG_FILE = "rovo.toml"
+_ENV_PREFIX = "ROVO_"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -173,12 +174,21 @@ prune = {_toml(MIRROR_CONFIG.prune)}  # Delete a removed page's file instead of 
 """
 
 
-def resolve_config(out_dir: Path) -> Configuration:
-    """Realises rovo.allium resolve_config: built-in defaults, then rovo.toml.
+def resolve_config(
+    out_dir: Path,
+    environ: Mapping[str, str] | None = None,
+    overrides: Sequence[str] = (),
+) -> Configuration:
+    """Realises rovo.allium resolve_config: defaults, rovo.toml, variables, then flags.
 
-    Invalid, with every bad key path in `problems`, for an unreadable or unparsable
-    file, an unknown section or key, a value of the wrong type or outside its enum, or
-    a profile the catalogue lacks.
+    The layers merge key by key, a later one winning: the built-in defaults, rovo.toml,
+    each `ROVO_<SECTION>__<FIELD>` variable of `environ` (section and field matched
+    case-insensitively; a ROVO_ name without `__` is not a configuration variable), then
+    each `SECTION.FIELD=VALUE` override (--set). A variable or flag value is read as one
+    TOML value, else as the raw string. Invalid, with every bad key path in `problems`,
+    for an unreadable or unparsable file, an unknown section or key, a value of the
+    wrong type or outside its enum from any layer, a malformed --set, or a profile the
+    catalogue lacks.
     """
     problems: list[str] = []
     try:
@@ -186,21 +196,9 @@ def resolve_config(out_dir: Path) -> Configuration:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         document = {}
         problems.append(f"{_CONFIG_FILE}: {error}")
-    values: dict[str, Any] = {}
-    for section, table in document.items():
-        keys = _SCHEMA.get(section)
-        if keys is None or not isinstance(table, dict):
-            problems.append(f"{section}: unknown section")
-            continue
-        for key, value in table.items():
-            reader = keys.get(key)
-            parsed = reader[1](value) if reader is not None else _BAD
-            if reader is None:
-                problems.append(f"{section}.{key}: unknown key")
-            elif parsed is _BAD:
-                problems.append(f"{section}.{key}: invalid value {value!r}")
-            else:
-                values[reader[0]] = parsed
+    entries = [*_file_entries(document), *_variable_entries(environ or {})]
+    entries.extend(_flag_entries(overrides, problems))
+    values = _read_entries(entries, problems)
     settings = _with_defaults(values)
     if profile_named(settings["profile_name"]) is None:
         problems.append(f"conversion.profile: no profile named {settings['profile_name']!r}")
@@ -306,6 +304,71 @@ def encode_configuration(settings: Configuration) -> dict[str, object]:
 # --- Reading rovo.toml ----------------------------------------------------------------
 
 _BAD = object()
+
+
+# One layer's setting: its section, its key (None for a section that is no table), its value.
+_Entry = tuple[str, str | None, object]
+
+
+def _file_entries(document: dict[str, Any]) -> list[_Entry]:
+    """rovo.toml's settings, in file order."""
+    entries: list[_Entry] = []
+    for section, table in document.items():
+        if isinstance(table, dict):
+            entries.extend((section, key, value) for key, value in table.items())
+        else:
+            entries.append((section, None, table))
+    return entries
+
+
+def _variable_entries(environ: Mapping[str, str]) -> list[_Entry]:
+    """Each ROVO_<SECTION>__<FIELD> variable; any other name is ignored."""
+    entries: list[_Entry] = []
+    for name, raw in environ.items():
+        section, separator, key = name.partition("__")
+        if separator and section.upper().startswith(_ENV_PREFIX):
+            entries.append((section[len(_ENV_PREFIX) :].lower(), key.lower(), _value(raw)))
+    return entries
+
+
+def _flag_entries(overrides: Sequence[str], problems: list[str]) -> list[_Entry]:
+    """Each --set SECTION.FIELD=VALUE; a malformed one is a problem."""
+    entries: list[_Entry] = []
+    for flag in overrides:
+        path, equals, raw = flag.partition("=")
+        section, dot, key = path.partition(".")
+        if equals and dot:
+            entries.append((section, key, _value(raw)))
+        else:
+            problems.append(f"--set {flag!r}: expected SECTION.FIELD=VALUE")
+    return entries
+
+
+def _read_entries(entries: Sequence[_Entry], problems: list[str]) -> dict[str, Any]:
+    """The settings by field, a later entry winning; each bad one named in `problems`."""
+    values: dict[str, Any] = {}
+    for section, key, value in entries:
+        keys = _SCHEMA.get(section)
+        if keys is None or key is None:
+            problems.append(f"{section}: unknown section")
+            continue
+        reader = keys.get(key)
+        parsed = reader[1](value) if reader is not None else _BAD
+        if reader is None:
+            problems.append(f"{section}.{key}: unknown key")
+        elif parsed is _BAD:
+            problems.append(f"{section}.{key}: invalid value {value!r}")
+        else:
+            values[reader[0]] = parsed
+    return values
+
+
+def _value(raw: str) -> object:
+    """A variable's or flag's value: one TOML value, else the raw string."""
+    try:
+        return tomllib.loads(f"value = {raw}")["value"]
+    except tomllib.TOMLDecodeError:
+        return raw
 
 
 def _string(value: object) -> object:

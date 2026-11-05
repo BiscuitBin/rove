@@ -39,6 +39,7 @@ from rovo._mirror.model import (
 
 STATE_DIRECTORY = ".rovo"
 _MANIFEST = "manifest.json"
+_REPORT_FILE = "crawl-report.json"
 # The mode an ordinary new file gets before the umask: read and write for everyone.
 _FILE_MODE = 0o666
 
@@ -105,6 +106,11 @@ def state_path(out_dir: Path, name: str) -> Path:
 def manifest_path(out_dir: Path) -> Path:
     """<out>/.rovo/manifest.json."""
     return state_path(out_dir, _MANIFEST)
+
+
+def report_path(out_dir: Path) -> Path:
+    """<out>/crawl-report.json."""
+    return out_dir / _REPORT_FILE
 
 
 def timestamp(moment: datetime) -> str:

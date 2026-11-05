@@ -12,9 +12,9 @@ The `rovo` command is the Typer application `rovo.cli:app`. `python -m rovo` run
 same application under the same program name. The implementation of the specification
 under `docs/specs/` is under way: `rovo init` creates a mirror, `rovo sync` mirrors
 its seed pages, the pages its sitemaps and `llms.txt` name and the pages they link to
-over HTTP and writes the mirror's indexes, and
-`rovo index` rebuilds the indexes offline; the later commands (`verify`, `report`,
-`fetch`) arrive with their slices. Every example on this page was run from a checkout as
+over HTTP and writes the mirror's indexes,
+`rovo index` rebuilds the indexes offline and `rovo report` prints the last report; the
+later commands (`verify`, `fetch`) arrive with their slices. Every example on this page was run from a checkout as
 `uv run --frozen rovo ...`; an installed command behaves the same.
 
 ## `rovo`
@@ -81,6 +81,27 @@ Fetch the mirror's pages, publish them as Markdown and write crawl-report.json.
 | --- | --- |
 | `OUT_DIR` | The mirror's directory, made by `rovo init`. |
 | `--dry-run` | Discover as a sync does, print the pages it would fetch and fetch none of them. |
+| `--yes` | Confirm a root URL that changed since the last run (`options.confirmed`). |
+| `--json` | Print progress on standard output, one JSON event a line (`options.json_events`). |
+| `--url URL` | Name a URL to sync; repeatable (`options.urls`). |
+| `--path PATH` | Name a written page by its mirror-relative path, `pages/<host>/...`; repeatable (`options.paths`). |
+| `--set SECTION.FIELD=VALUE` | Override one `rovo.toml` key; repeatable, a later one winning. |
+
+The configuration is resolved key by key from four layers, a later one winning: the
+built-in defaults, `rovo.toml`, the environment variables named
+`ROVO_<SECTION>__<FIELD>` (section and field are `rovo.toml`'s `[section] field` names,
+matched case-insensitively, so `ROVO_MIRROR__PRUNE=true` sets `mirror.prune` and
+`ROVO_CRAWL__REFOLLOW_UNCHANGED_LINKS=false` sets `crawl.refollow_unchanged_links`), then
+each `--set`. A variable's or flag's value is read as one TOML value (`3`, `true`,
+`["/a/"]`, `"x"`), and a value that is not one is the raw string. A bad value, an
+unknown section or an unknown key from any layer, and a `--set` with no `=` or no `.`,
+make the configuration invalid, each named by its key path in `configuration.problems`
+(`scope.max_depth: invalid value 'deep'`). A `ROVO_` variable with no `__` is not a
+configuration variable and is ignored. The configuration's `hash` covers the resolved
+values, so it moves with a variable or a flag.
+
+A `--url` or a `--path` that passes the refusals below names a targeted run, which a
+later slice implements: the sync stops there (exit 1, the previous report kept).
 
 `rovo sync OUT_DIR` reads `rovo.toml`, reads each allowed host's `/robots.txt`, fetches
 each seed page the robots rules allow once over HTTP with the user agent
@@ -223,21 +244,56 @@ silently, with no retry, and pauses the host for `retry_after_cap` (never shorte
 longer pause); the sync then carries on. A page
 whose tries run out is listed under `failed_urls` with its tries and makes the sync exit
 1; a page robots.txt disallows is listed under `unresolved_urls` but alone leaves the
-exit 0. Retries and waits print nothing; progress output is a later slice's.
+exit 0. Retries and waits print nothing unless `--json` is given.
+
+An ok answer that is not HTML (a `.txt` served `text/plain`, say) counts as fetched and
+settles its frontier row `skipped_not_html`: no page is written and nothing is reported
+for it, and the exit code is unaffected. A URL with no page that answered so is not
+requested again by a later sync; a page in the mirror whose URL now answers so keeps its
+record and its file, and the next sync fetches it again. A page whose tries run out, or
+that answers an error, is listed under `failed_urls` and as a `failed` change, and every
+later sync requests it again.
+
+With `--json`, progress goes to standard output as one JSON object a line,
+`{"event": ..., "host": ..., "until": ...}`, keys sorted, `until` an ISO 8601 UTC
+timestamp or `null`: `start` when the run begins, `page` once for each row a fetch
+settles (naming its host), `host_backoff` as a host is paused for a retry (naming the
+host and when the pause ends), and one `done`, last, once the report is written. A dry
+run's listing stays plain text, ahead of its `done`. Without `--json` nothing is printed
+for progress, and a refused sync prints no event.
+
+An operator interrupt (Ctrl-C) or an uncaught error during the run ends it
+`interrupted`: the rows being fetched go back to pending, the pages stored so far are
+published, links and indexes are rewritten, and `crawl-report.json` is written with
+`report_status: interrupted`, `error` `null` for an interrupt or
+`"<ExceptionType>: <message>"` for an error, and exit 1; the next sync fetches the rows
+again. An error or an interrupt after the run (while finalising, saving or assembling
+the report) writes the report as it stands with that `error`, `report_status:
+interrupted` and exit 1; the manifest and the frontier are not saved, but the run is
+recorded in `.rovo/runs.json`, so the next sync takes the next run id.
 
 It exits 2 and writes no report when `OUT_DIR` is not a directory, holds no manifest or
-holds one that does not parse, or when the configuration is invalid (a value of the
+holds one that does not parse. Otherwise a sync is refused, once, for the first of these
+problems, in this order, before any request: an invalid configuration (a value of the
 wrong type, a root or start URL that is not an http or https URL, a host that does not
-parse, a `max_age` that is not a finite number of seconds), names no root or
-start URL, sets `unblocking.provider`, changes the root URL the last run recorded,
-needs a browser or stealth engine that is not installed, or sets `robots = "ignore"`.
-The refusal is printed on standard error; the specification's refused report arrives
-with a later slice. When a run reaches a branch a later slice implements (a block, a
+parse, a `max_age` that is not a finite number of seconds, a bad variable or `--set`),
+no root or start URL, or `unblocking.provider` set (`"invalid configuration"`); a root
+URL that differs from the one the last run recorded, without `--yes` (`"changed root
+requires confirmation"`); a `--url` that is not http or https, or not on an allowed host
+(`"invalid or off-host target"`); a `--path` that is not a written page's path, a removed
+page's included (`"unknown target path"`); a browser or stealth engine the configuration
+needs that is not installed (`"configured tier is not installed"`); `robots = "ignore"`
+(`"robots = ignore is only for an owner-testing run"`). The refusal is printed on
+standard error, and `crawl-report.json` is replaced by a refused report:
+`report_status: refused`, `run_id: null`, `exit_code: usage`, `refusal_reason` the text
+quoted above, the resolved `configuration` (with its `problems`), the `options` asked
+for, `effective_policy: null` and every count and list empty; it exits 2. A refused
+sync saves no manifest, frontier or run. When a run reaches a branch a later slice
+implements (a block, a
 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-non-HTML answer for a page in the mirror, a link to a URL that answers with a non-HTML
-file, a profile other
+named `--url` or `--path`, a profile other
 than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
 a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.
@@ -262,13 +318,27 @@ It exits 2, writing nothing, when `OUT_DIR` is not a directory, holds no manifes
 holds one that does not parse, or when a written page's file is missing or is not
 UTF-8; standard error names the problem, and the page file's path.
 
+## `rovo report`
+
+```text
+Usage: rovo report [OPTIONS] OUT_DIR
+
+Print the mirror's last crawl-report.json.
+```
+
+`rovo report OUT_DIR` prints `OUT_DIR/crawl-report.json` as the last sync wrote it, a
+refused one included, on standard output and exits 0. It exits 2, printing the problem
+on standard error and nothing on standard output, when `OUT_DIR` is not a directory,
+holds no manifest or holds one that does not parse, or has no report that reads as
+JSON. It makes no request and writes nothing.
+
 ## Exit codes
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, or the indexes were rebuilt. |
-| 1 | Partial: a sync recorded a failure, or stopped at a branch a later slice implements. |
-| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, or a refused `init`, `sync` or `index`; for the parser's errors, the usage line and the error go to standard error. |
+| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, the indexes were rebuilt, or the report was printed. |
+| 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements. |
+| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync` or `index`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
 | 3 | Blocked: a host's breaker tripped (reached by a later slice). |
 | 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken. |
 

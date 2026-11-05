@@ -11,6 +11,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from rovo import _commands, _config
 from rovo._config import Configuration, initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
@@ -257,3 +259,106 @@ def test_resolve_config_rejects_an_unreadable_file(tmp_path: Path) -> None:
     assert resolve_config(out_dir).valid is False
     rovo_toml(out_dir).unlink()
     assert resolve_config(out_dir).valid is False
+
+
+# --- T16: the environment and flag layers ------------------------------------------------
+
+
+def test_resolve_config_layers_win_key_by_key_flag_over_variable_over_file(
+    tmp_path: Path,
+) -> None:
+    """rovo.allium Configuration: defaults, rovo.toml, ROVO_ variables, then flags.
+
+    A key set in all four layers takes the flag's value; without the flag, the
+    variable's; without the variable, the file's; without the file's line, the default.
+    Each layer alone moves only its own key.
+    """
+    out_dir = initialised(tmp_path)
+    set_key(out_dir, "max_depth", "3")
+    environ = {"ROVO_SCOPE__MAX_DEPTH": "4"}
+    flags = ("scope.max_depth=5",)
+    assert resolve_config(out_dir, environ=environ, overrides=flags).max_depth == 5  # noqa: PLR2004  The flag's value.
+    assert resolve_config(out_dir, environ=environ).max_depth == 4  # noqa: PLR2004  The variable's value.
+    assert resolve_config(out_dir).max_depth == 3  # noqa: PLR2004  The file's value.
+    drop_key(out_dir, "max_depth")
+    assert resolve_config(out_dir).max_depth == _config.CONFIG.max_depth
+
+    alone = resolve_config(out_dir, environ={"ROVO_SCOPE__LOCALE": "en"})
+    assert alone.valid
+    assert alone.locale == "en"
+    assert alone.max_depth == _config.CONFIG.max_depth
+    flagged = resolve_config(out_dir, overrides=('scope.path_prefixes=["/a/", "/b/"]',))
+    assert flagged.valid
+    assert flagged.path_prefixes == ("/a/", "/b/")
+    assert flagged.locale is None
+
+
+def test_resolve_config_reads_the_two_named_variables(tmp_path: Path) -> None:
+    """The two variables the ticket names resolve to their keys, read as TOML values.
+
+    ROVO_MIRROR__PRUNE is mirror.prune; ROVO_CRAWL__REFOLLOW_UNCHANGED_LINKS is
+    crawl.refollow_unchanged_links.
+    """
+    out_dir = initialised(tmp_path)
+    environ = {"ROVO_MIRROR__PRUNE": "true", "ROVO_CRAWL__REFOLLOW_UNCHANGED_LINKS": "false"}
+    settings = resolve_config(out_dir, environ=environ)
+    assert settings.valid, settings.problems
+    assert settings.prune is True
+    assert settings.refollow_unchanged_links is False
+    file_only = resolve_config(out_dir)
+    assert file_only.prune is spec_bool("mirror", "prune")
+    assert file_only.refollow_unchanged_links is _config.CONFIG.refollow_unchanged_links
+    assert settings.hash != file_only.hash
+
+
+@pytest.mark.parametrize(
+    ("environ", "overrides", "problem"),
+    [
+        pytest.param(
+            {"ROVO_SCOPE__MAX_DEPTH": "deep"},
+            (),
+            "scope.max_depth: invalid value 'deep'",
+            id="variable-bad-value",
+        ),
+        pytest.param({"ROVO_NOPE__X": "1"}, (), "nope", id="variable-unknown-section"),
+        pytest.param({"ROVO_SCOPE__NOPE": "1"}, (), "scope.nope", id="variable-unknown-key"),
+        pytest.param(
+            {}, ("scope.max_depth=deep",), "scope.max_depth: invalid value 'deep'", id="flag-bad"
+        ),
+        pytest.param({}, ("nope.x=1",), "nope", id="flag-unknown-section"),
+        pytest.param({}, ("scope.nope=1",), "scope.nope", id="flag-unknown-key"),
+        pytest.param({}, ("scope.max_depth",), "scope.max_depth", id="flag-without-equals"),
+        pytest.param({}, ("max_depth=3",), "max_depth=3", id="flag-without-dot"),
+    ],
+)
+def test_resolve_config_names_a_bad_variable_or_flag_by_its_key_path(
+    tmp_path: Path, environ: dict[str, str], overrides: tuple[str, ...], problem: str
+) -> None:
+    """A bad value, an unknown section or an unknown key from either layer is a problem.
+
+    The same reader judges every layer, so the configuration is invalid and `problems`
+    names the key path; a --set with no "=" or no "." is a problem too.
+    """
+    settings = resolve_config(initialised(tmp_path), environ=environ, overrides=overrides)
+    assert settings.valid is False
+    assert any(problem in named for named in settings.problems), settings.problems
+
+
+def test_resolve_config_ignores_other_variables(tmp_path: Path) -> None:
+    """A variable without the ROVO_ prefix, or ROVO_ without the __ separator, is no layer."""
+    out_dir = initialised(tmp_path)
+    plain = resolve_config(out_dir)
+    environ = {"HOME": "/nowhere", "ROVO_HOME": "/nowhere", "ROVO_DEBUG": "1"}
+    assert resolve_config(out_dir, environ=environ) == plain
+
+
+def test_resolve_config_hash_moves_with_a_variable(tmp_path: Path) -> None:
+    """Configuration.hash covers the resolved configuration, the variable layer included."""
+    out_dir = initialised(tmp_path)
+    plain = resolve_config(out_dir)
+    moved = resolve_config(out_dir, environ={"ROVO_SCOPE__MAX_DEPTH": "2"})
+    assert moved.valid
+    assert moved.hash != plain.hash
+    assert HASH.fullmatch(moved.hash)
+    same = resolve_config(out_dir, environ={"ROVO_SCOPE__MAX_DEPTH": str(plain.max_depth)})
+    assert same.hash == plain.hash
