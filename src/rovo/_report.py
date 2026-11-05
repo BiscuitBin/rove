@@ -16,6 +16,7 @@ from rovo._config import CONFIG, Configuration, SyncOptions, encode_configuratio
 from rovo._convert.model import QualityFlag, QualityGate
 from rovo._crawl.model import (
     CrawlPolicy,
+    DiscoveryFailed,
     DiscoveryProblem,
     Frontier,
     Host,
@@ -276,6 +277,14 @@ def tally_failed_url(report: CrawlReport, failed: UrlFailed) -> bool:
     report.changes.append(
         Change(kind=ChangeKind.failed, url=failed.url, path=None, moved_from=None)
     )
+    return True
+
+
+def tally_discovery_problem(report: CrawlReport, failed: DiscoveryFailed) -> bool:
+    """Realises rovo.allium TallyDiscoveryProblem: a discovery_problems row."""
+    if not report.is_open_for(failed.run.target, failed.run.id):
+        return False
+    report.discovery_problems.append(DiscoveryProblemRow(url=failed.url, problem=failed.problem))
     return True
 
 

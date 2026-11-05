@@ -11,6 +11,7 @@ FetchEntry makes its first attempt); the run's driver, `run_crawl`, does the res
 import dataclasses
 import importlib.metadata
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -19,6 +20,7 @@ from fakes import (
     START,
     FakeFetcher,
     FixedClock,
+    ScriptedFetcher,
     fixture_site,
     html_response,
     not_found,
@@ -33,15 +35,20 @@ from rovo._crawl.model import (
     BlockVerdict,
     BreakerStatus,
     CrawlPolicy,
+    DiscoveryFailed,
+    DiscoveryProblem,
     DiscoverySource,
+    EntryFailed,
     FetchAttempt,
     Frontier,
     FrontierEntry,
     FrontierStatus,
+    Host,
     LadderWalk,
     RenderMode,
     RenderReason,
     RobotsMode,
+    RobotsPolicy,
     RobotsStance,
     Run,
     RunKind,
@@ -61,16 +68,22 @@ from rovo._crawl.run import (
     attempt_tier,
     begin_crawl,
     convert_fetched,
+    count_retry_after,
     create_frontier,
+    deny_all_when_robots_refused,
+    deny_all_when_robots_unreachable,
     discover,
     dispose_fetch,
     drop_stale_observations,
     end_run,
     enqueue,
     enqueue_page_links,
+    entry_fails,
+    feed_breaker,
     fetch_entry,
     fetch_robots,
     finish_run,
+    http_retry,
     load_frontier,
     load_runs,
     next_batch,
@@ -80,7 +93,9 @@ from rovo._crawl.run import (
     prepare_attempt,
     prepare_run,
     proceed_with_known_host,
+    read_robots_for_new_origin,
     render_reason_of,
+    retires_host_on_long_crawl_delay,
     robots_allows,
     run_crawl,
     select_batch,
@@ -100,7 +115,8 @@ from rovo._mirror.model import (
     Tier,
 )
 from rovo._mirror.state import save_mirror
-from spec_values import spec_duration, spec_float, spec_int
+from rovo._mirror.urls import hostname_of
+from spec_values import spec_duration, spec_enum, spec_float, spec_int
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -113,6 +129,55 @@ PAGE = (SITES / "one-page" / "guide" / "start.html").read_text(encoding="utf-8")
 DISALLOW_GUIDE = (SITES / "robots-disallow" / "robots.txt").read_text(encoding="utf-8")
 RULES = f"User-agent: *\nDisallow: /private/\nCrawl-delay: 2\nSitemap: {SITE}/sitemap.xml\n"
 CRAWL_DELAY = timedelta(seconds=2)
+# A second origin of the host docs.example: another port, so its own robots.txt (T12).
+PORTED = "http://docs.example:8080"
+PORTED_ROBOTS = f"{PORTED}/robots.txt"
+PORTED_PAGE = f"{PORTED}/guide/other.html"
+ZERO_DELAY = "User-agent: *\nCrawl-delay: 0\n"
+HALF_DELAY = "User-agent: *\nCrawl-delay: 0.5\n"
+# Crawl-delays past retry_after_cap as written (crawl.allium robots_crawl_delay_exceeds and
+# AdoptRobotsRules' guidance, 837 to 843 at fa096c4): too large for a timedelta, an
+# instant after it or a float (1e309, 1e400), past the cap by less than a float can tell
+# (one sub-ULP step, built from the configured cap), or with an exponent past Decimal's
+# own limit (reviews T12-2-r2 C1/B1 and T12-3-r2 C1/B1).
+CAP_SECONDS = Decimal(str(model.CONFIG.retry_after_cap.total_seconds()))
+PAST_CAP_DELAYS = (
+    f"{model.CONFIG.retry_after_cap.total_seconds() + 1:g}",
+    "99999999999",
+    "1e12",
+    "1e15",
+    "1e309",
+    "1e400",
+    str(CAP_SECONDS + Decimal("1e-15")),
+    "1e1000000000000000000",
+    "1e9999999999999999999",
+)
+PAST_CAP_IDS = (
+    "cap-plus-one",
+    "99999999999",
+    "1e12",
+    "1e15",
+    "1e309",
+    "1e400",
+    "cap-plus-sub-ulp",
+    "1e1000000000000000000",
+    "1e9999999999999999999",
+)
+# Crawl-delays that are not a finite, non-negative number in protego's (float's) grammar:
+# robots_crawl_delay is null and the host is not retired (review T12-3-r2 C2).
+NULL_DELAYS = ("inf", "nan", "-5", "abc", "_121", "121_", "1__21", "-1e9999999999999999999")
+# A number too small for Decimal's exponent is still a number: no delay (review T12-3-r2).
+TINY_DELAY = "1e-9999999999999999999"
+# Directive spellings protego reads as Crawl-delay 5: a space for the colon, "crawl delay",
+# a trailing comment, no space after the colon.
+SPELLED_DELAYS = (
+    "Crawl-delay 5",
+    "Crawl delay 5",
+    "crawl-delay 5 # c",
+    "Crawl delay: 5",
+    "crawl-delay:5",
+)
+SPELLED_DELAY = timedelta(seconds=5)
 NOSCRIPT_PAGE = """<!doctype html>
 <html lang="en">
     <head><title>Console</title></head>
@@ -126,9 +191,13 @@ NOSCRIPT_PAGE = """<!doctype html>
 </html>
 """
 SERVER_ERROR = 500
+SERVICE_UNAVAILABLE = 503
+TOO_MANY = 429
+NOT_FOUND = 404
 FORBIDDEN = 403
 MOVED = 301
 SECOND_RUN = 2
+TWO_TRIES = 2
 THIRD_RUN = 3
 # The links fixture site served from SITE (tests/fixtures/sites/links, T10).
 B_PAGE = f"{SITE}/guide/b.html"
@@ -536,13 +605,26 @@ def test_rule_failure_Discover_1(tmp_path: Path) -> None:
 
 
 def test_rule_success_OpenHost(tmp_path: Path) -> None:
-    """Verify rule OpenHost succeeds when all preconditions are met."""
+    """Verify rule OpenHost succeeds when all preconditions are met.
+
+    RobotsRequested carries the origin OpenHost was given (T12): the robots.txt read is
+    that origin's, port included.
+    """
     fetcher = site()
     run, _ = started(tmp_path)
     host = open_host(run, HOST, SITE, fetcher)
     assert host is not None
     assert run.hosts == [host]
     assert fetcher.requests == [ROBOTS]  # OpenHost raises RobotsRequested
+
+    ported = site()
+    other, _ = started(tmp_path / "ported")
+    opened = open_host(other, HOST, PORTED, ported)
+    assert opened is not None
+    assert opened.origin == PORTED
+    assert ported.requests == [PORTED_ROBOTS]
+    assert other.robots_policy(PORTED) is not None
+    assert other.robots_policy(SITE) is None
 
 
 def test_rule_failure_OpenHost_1(tmp_path: Path) -> None:
@@ -605,14 +687,32 @@ def test_rule_success_FetchRobots(tmp_path: Path) -> None:
     """Verify rule FetchRobots succeeds when all preconditions are met.
 
     robots.txt is read once, before the page, and its bytes count: the run requests
-    /robots.txt, then the seed, then nothing.
+    /robots.txt, then the seed, then nothing. RobotsRequested names the origin (T12): a
+    second origin of the host reads its own robots.txt into its own policy. An ordinary
+    answer leaves the breaker alone; only a Retry-After past the cap would trip it.
     """
     robots = text_response(ROBOTS, RULES)
     fetcher = site(robots=robots)
     run, _ = started(tmp_path)
-    open_host(run, HOST, SITE, fetcher)
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
     assert run.bytes_fetched == robots.size
     assert run.robots_policy(SITE) is not None
+
+    ported_robots = text_response(PORTED_ROBOTS, "User-agent: *\nDisallow: /guide/\n")
+    fetcher.responses[PORTED_ROBOTS] = ported_robots
+    response = fetch_robots(run, HOST, PORTED, fetcher)
+    assert response is not None
+    assert response.source_url == PORTED_ROBOTS
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
+    assert run.bytes_fetched == robots.size + ported_robots.size
+    ported = run.robots_policy(PORTED)
+    assert ported is not None
+    assert ported.origin == PORTED
+    assert [policy.origin for policy in run.robots_policies] == [SITE, PORTED]
+    assert host.breaker is not None
+    assert host.breaker.status is BreakerStatus.watching
+    assert host.breaker.outcomes == []
 
     order = site(robots=robots)
     crawl_once(tmp_path / "order", order)
@@ -626,12 +726,16 @@ def test_rule_failure_FetchRobots_1(tmp_path: Path) -> None:
     """
     fetcher = site()
     run, _ = started(tmp_path)
-    open_host(run, HOST, SITE, fetcher)
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    assert host.breaker is not None
     run.robots_policies.clear()
     run.status = RunStatus.finished
-    assert fetch_robots(run, HOST, fetcher) is None
+    assert fetch_robots(run, HOST, SITE, fetcher) is None
+    assert fetch_robots(run, HOST, PORTED, fetcher) is None
     assert fetcher.requests == [ROBOTS]
     assert run.robots_policies == []
+    assert host.breaker.status is BreakerStatus.watching
 
 
 def test_rule_failure_FetchRobots_2(tmp_path: Path) -> None:
@@ -641,38 +745,164 @@ def test_rule_failure_FetchRobots_2(tmp_path: Path) -> None:
     """
     fetcher = site()
     run, _ = started(tmp_path)
-    assert fetch_robots(run, HOST, fetcher) is None
+    assert fetch_robots(run, HOST, SITE, fetcher) is None
+    assert fetch_robots(run, HOST, PORTED, fetcher) is None
     assert fetcher.requests == []
     assert run.bytes_fetched == 0
+    assert run.robots_policies == []
 
 
 def test_rule_failure_FetchRobots_3(tmp_path: Path) -> None:
     """Verify rule FetchRobots is rejected when requires clause fails.
 
-    requires: not exists RobotsPolicy{run: run, origin: host.origin}.
+    requires: not exists RobotsPolicy{run: run, origin: origin}.
     """
     fetcher = site()
     run, _ = started(tmp_path)
-    open_host(run, HOST, SITE, fetcher)
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    assert host.breaker is not None
+    assert fetch_robots(run, HOST, PORTED, fetcher) is not None
     before = run.bytes_fetched
-    assert fetch_robots(run, HOST, fetcher) is None
-    assert fetcher.requests == [ROBOTS]
+    assert fetch_robots(run, HOST, SITE, fetcher) is None
+    assert fetch_robots(run, HOST, PORTED, fetcher) is None
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
     assert run.bytes_fetched == before
+    assert host.breaker.status is BreakerStatus.watching
+
+
+def adopted_delay(out_dir: Path, written: str) -> tuple[RobotsPolicy | None, Host]:
+    """AdoptRobotsRules for a second origin whose robots.txt declares Crawl-delay `written`.
+
+    The host opens on SITE with no robots.txt, so it starts with no delay and the run's rate.
+    """
+    return adopted_robots(out_dir, f"User-agent: *\nCrawl-delay: {written}\n")
+
+
+def adopted_robots(out_dir: Path, markup: str) -> tuple[RobotsPolicy | None, Host]:
+    """AdoptRobotsRules for a second origin whose robots.txt is `markup`.
+
+    The host opens on SITE with no robots.txt, so it starts with no delay and the run's rate.
+    """
+    run, _ = started(out_dir)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    assert (host.crawl_delay, host.rate) == (timedelta(0), run.policy.rate_per_host)
+    robots = text_response(PORTED_ROBOTS, markup)
+    return adopt_robots_rules(run, host, robots, origin=PORTED), host
 
 
 def test_rule_success_AdoptRobotsRules(tmp_path: Path) -> None:
     """Verify rule AdoptRobotsRules succeeds when all preconditions are met.
 
-    The policy is parsed for the user agent rovo; the host-rate effect is the politeness
-    slice's.
+    The policy is parsed for the user agent rovo, and the host takes its Crawl-delay
+    (T12): crawl_delay = max(crawl_delay, delay) and rate = min(rate, 1 / delay). Of two
+    origins of one host the longest delay and the lowest rate win, in either order; a
+    Crawl-delay of 0 changes neither; 0.5 is read as half a second. A delay equal to
+    retry_after_cap is adopted; one past it, however large, is never adopted (71b5b0f).
     """
     run, _ = started(tmp_path)
-    open_host(run, HOST, SITE, site(robots=text_response(ROBOTS, RULES)))
+    host = open_host(run, HOST, SITE, site(robots=text_response(ROBOTS, RULES)))
+    assert host is not None
     policy = run.robots_policy(SITE)
     assert policy is not None
     assert policy.stance is RobotsStance.rules
     assert robots_allows(run, SEED)
     assert not robots_allows(run, f"{SITE}/private/notes.html")
+    rate = run.policy.rate_per_host
+    assert rate is not None
+    assert host.crawl_delay == CRAWL_DELAY
+    assert host.rate == min(rate, 1 / CRAWL_DELAY.total_seconds())
+
+    for name, delays in (("longer-second", (2, 3)), ("longer-first", (3, 2))):
+        two, _ = started(tmp_path / name)
+        fetcher = site(robots=text_response(ROBOTS, f"User-agent: *\nCrawl-delay: {delays[0]}\n"))
+        fetcher.responses[PORTED_ROBOTS] = text_response(
+            PORTED_ROBOTS, f"User-agent: *\nCrawl-delay: {delays[1]}\n"
+        )
+        shared = open_host(two, HOST, SITE, fetcher)
+        assert shared is not None
+        fetch_robots(two, HOST, PORTED, fetcher)
+        longest = max(delays)
+        assert shared.crawl_delay == timedelta(seconds=longest), name
+        assert shared.rate == min(rate, 1 / longest), name
+
+    zero, _ = started(tmp_path / "zero")
+    unchanged = open_host(zero, HOST, SITE, site(robots=text_response(ROBOTS, ZERO_DELAY)))
+    assert unchanged is not None
+    zero_policy = zero.robots_policy(SITE)
+    assert zero_policy is not None
+    assert zero_policy.crawl_delay == timedelta(0)
+    assert unchanged.rate == rate
+    assert unchanged.crawl_delay == timedelta(0)
+
+    half, _ = started(tmp_path / "half")
+    halved = open_host(half, HOST, SITE, site(robots=text_response(ROBOTS, HALF_DELAY)))
+    assert halved is not None
+    half_policy = half.robots_policy(SITE)
+    assert half_policy is not None
+    assert half_policy.crawl_delay == timedelta(seconds=0.5)
+    assert halved.crawl_delay == timedelta(seconds=0.5)
+    assert halved.rate == min(rate, 1 / 0.5)
+
+    # At 71b5b0f: a Crawl-delay equal to retry_after_cap is adopted.
+    cap = run.policy.retry_after_cap
+    cap_policy, slowest = adopted_delay(tmp_path / "at-cap", f"{cap.total_seconds():g}")
+    assert cap_policy is not None
+    assert (cap_policy.crawl_delay, slowest.crawl_delay) == (cap, cap)
+    assert slowest.rate == min(rate, 1 / cap.total_seconds())
+
+    # At 71b5b0f: a Crawl-delay past retry_after_cap is never adopted, however large; the
+    # rule records no delay and leaves the host as it was, and reading it never raises.
+    # (Retiring the host is RetireHostOnLongCrawlDelay's, the breaker slice's.)
+    for written in PAST_CAP_DELAYS:
+        adopted, kept = adopted_delay(tmp_path / f"past-{written}", written)
+        assert adopted is not None, written
+        assert adopted.stance is RobotsStance.rules, written
+        assert adopted.crawl_delay is None, written
+        assert (kept.crawl_delay, kept.rate) == (timedelta(0), rate), written
+
+
+def test_rule_success_AdoptRobotsRules_reads_the_crawl_delay_as_written(tmp_path: Path) -> None:
+    """AdoptRobotsRules reads Crawl-delay exactly, as protego's grammar spells it (71b5b0f).
+
+    crawl.allium robots_crawl_delay and robots_crawl_delay_exceeds (AdoptRobotsRules'
+    guidance, 837 to 843 at fa096c4): a number past retry_after_cap, however large or
+    however slightly past, is never adopted and meets RetireHostOnLongCrawlDelay's guard;
+    a value that is not a finite, non-negative number is no Crawl-delay, so the host is
+    unchanged and not retired; a number too small for Decimal is 0, no delay. Reviews
+    T12-2-r2 C1/B1 and T12-3-r2 C1/B1/C2.
+    """
+    rate = standard_policy().rate_per_host
+    for written in PAST_CAP_DELAYS:
+        adopted, kept = adopted_delay(tmp_path / f"past-{written}", written)
+        assert adopted is not None, written
+        assert adopted.crawl_delay is None, written
+        assert (kept.crawl_delay, kept.rate) == (timedelta(0), rate), written
+        assert retires_host_on_long_crawl_delay(adopted.run, adopted), written
+
+    for number, written in enumerate(NULL_DELAYS):
+        adopted, kept = adopted_delay(tmp_path / f"null-{number}", written)
+        assert adopted is not None, written
+        assert adopted.stance is RobotsStance.rules, written
+        assert adopted.crawl_delay is None, written
+        assert (kept.crawl_delay, kept.rate) == (timedelta(0), rate), written
+        assert not retires_host_on_long_crawl_delay(adopted.run, adopted), written
+
+    tiny, unchanged = adopted_delay(tmp_path / "tiny", TINY_DELAY)
+    assert tiny is not None
+    assert tiny.crawl_delay == timedelta(0)
+    assert (unchanged.crawl_delay, unchanged.rate) == (timedelta(0), rate)
+    assert not retires_host_on_long_crawl_delay(tiny.run, tiny)
+
+    for number, line in enumerate(SPELLED_DELAYS):
+        markup = f"User-agent: *\n{line}\nDisallow:/guide/private/\n"
+        spelled, slowed = adopted_robots(tmp_path / f"spelled-{number}", markup)
+        assert spelled is not None, line
+        assert spelled.crawl_delay == SPELLED_DELAY, line
+        assert slowed.crawl_delay == SPELLED_DELAY, line
+        assert not robots_allows(spelled.run, f"{PORTED}/guide/private/notes.html"), line
+        assert robots_allows(spelled.run, PORTED_PAGE), line
 
 
 def test_rule_failure_AdoptRobotsRules_1(tmp_path: Path) -> None:
@@ -700,6 +930,23 @@ def test_rule_entity_creation_AdoptRobotsRules_1(tmp_path: Path) -> None:
     assert policy.crawl_delay == CRAWL_DELAY
     assert policy.declared_sitemaps == (f"{SITE}/sitemap.xml",)
     assert policy.problem is None
+
+    # crawl_delay is declared_delay (71b5b0f): null for a Crawl-delay past the cap, the
+    # other fields as before.
+    past, _ = started(tmp_path / "past")
+    host = open_host(past, HOST, SITE, site())
+    assert host is not None
+    long_rules = RULES.replace("Crawl-delay: 2", f"Crawl-delay: {PAST_CAP_DELAYS[-1]}")
+    created = adopt_robots_rules(
+        past, host, text_response(PORTED_ROBOTS, long_rules), origin=PORTED
+    )
+    assert created is not None
+    assert created.run is past
+    assert created.origin == PORTED
+    assert created.stance is RobotsStance.rules
+    assert created.crawl_delay is None
+    assert created.declared_sitemaps == (f"{SITE}/sitemap.xml",)
+    assert created.problem is None
 
 
 def test_rule_success_AllowAllWhenRobotsAbsent(tmp_path: Path) -> None:
@@ -1636,13 +1883,19 @@ def test_invariant_OneHostPerNamePerRun(tmp_path: Path) -> None:
 
 
 def test_invariant_OneRobotsPolicyPerOrigin(tmp_path: Path) -> None:
-    """Verify invariant OneRobotsPolicyPerOrigin holds after every state-changing rule that touches constrained entities."""  # noqa: E501  The obligation's description, quoted.
+    """Verify invariant OneRobotsPolicyPerOrigin holds after every state-changing rule that touches constrained entities.
+
+    Two origins of one host each hold one policy (T12); reading either again adds none.
+    """  # noqa: E501  The obligation's description, quoted.
     fetcher = site(robots=text_response(ROBOTS, RULES))
     run, _ = started(tmp_path)
     open_host(run, HOST, SITE, fetcher)
-    fetch_robots(run, HOST, fetcher)
+    fetch_robots(run, HOST, SITE, fetcher)
+    fetch_robots(run, HOST, PORTED, fetcher)
+    fetch_robots(run, HOST, PORTED, fetcher)
     origins = [policy.origin for policy in run.robots_policies]
-    assert origins == [SITE]
+    assert origins == [SITE, PORTED]
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
 
 
 # --- Fields, values and derived values ------------------------------------------------
@@ -1930,7 +2183,7 @@ class Recorder:
 
 
 def test_httpx_fetcher_one_request_per_fetch_with_the_rovo_user_agent() -> None:
-    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1248)."""
+    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1402)."""
     recorder = Recorder()
     with HttpxFetcher(transport=httpx.MockTransport(recorder)) as fetcher:
         response = fetcher.fetch(SEED)
@@ -2138,3 +2391,1165 @@ def test_projection_Frontier_in_progress_entries(tmp_path: Path) -> None:
     assert frontier.in_progress_entries == batch
     assert {entry.identity for entry in batch} <= {B_PAGE, C_PAGE, SECRET_PAGE}
     assert all(entry.status is FrontierStatus.in_progress for entry in batch)
+
+
+# --- Robots and politeness (T12) ------------------------------------------------------
+
+
+def unreachable(url: str) -> SiteResponse:
+    """A transport failure: no response arrived."""
+    return SiteResponse(status=0, source_url=url, markup="", size=0, error="connection refused")
+
+
+def answered(url: str, status: int, *, retry_after: timedelta | None = None) -> SiteResponse:
+    """An HTML answer with `status` and an optional Retry-After."""
+    return dataclasses.replace(html_response(url, "", status=status), retry_after=retry_after)
+
+
+def scripted(
+    *scripts: tuple[str, list[SiteResponse]], robots: SiteResponse | None = None
+) -> ScriptedFetcher:
+    """The fixture site's seed page, answered first from `scripts`."""
+    responses = {SEED: html_response(SEED, PAGE)}
+    if robots is not None:
+        responses[ROBOTS] = robots
+    return ScriptedFetcher(responses, dict(scripts))
+
+
+def attempt_on(
+    walk: LadderWalk, response: SiteResponse, *, tier: Tier = Tier.http, try_: int = 1
+) -> FetchAttempt:
+    """A FetchAttempt of `walk` answering `response`, unblocked, appended to the walk."""
+    attempt = FetchAttempt(
+        walk=walk,
+        tier=tier,
+        try_=try_,
+        response=response,
+        verdict=BlockVerdict(kind=BlockKind.none, signature=""),
+        render_reason=None,
+    )
+    walk.attempts.append(attempt)
+    return attempt
+
+
+def settled_on(
+    run: Run, frontier: Frontier, response: SiteResponse, *, identity: str = SEED
+) -> LadderWalk:
+    """A settled walk of the identity's in-progress row, its only attempt standing."""
+    entry = enqueue(run, frontier, identity, depth=0, via=DiscoverySource.start, priority=0)
+    entry.status = FrontierStatus.in_progress
+    host = run.host(hostname_of(identity))
+    assert host is not None
+    walk = LadderWalk(
+        entry=entry,
+        host=host,
+        tiers=(Tier.http,),
+        conditional=False,
+        escalated=False,
+        challenge_offered=False,
+        status=WalkStatus.settled,
+    )
+    walk.standing = attempt_on(walk, response)
+    return walk
+
+
+def exhausted(out_dir: Path, response: SiteResponse) -> tuple[Run, Frontier, LadderWalk]:
+    """The seed's walk settled on its last http try, answering `response`."""
+    run, frontier, walk = walked(out_dir, scripted((SEED, [response])))
+    last = attempt_on(walk, response, try_=model.CONFIG.http_attempts)
+    assert not last.retryable
+    assert settle_walk(last)
+    assert walk.standing is last
+    return run, frontier, walk
+
+
+def in_progress(run: Run, frontier: Frontier, url: str) -> FrontierEntry:
+    """The url's row, in progress, as SelectBatch leaves it."""
+    entry = enqueue(run, frontier, url, depth=1, via=DiscoverySource.link, priority=0)
+    entry.status = FrontierStatus.in_progress
+    return entry
+
+
+def jitter_bounds(wait: timedelta) -> tuple[timedelta, timedelta]:
+    """The wait scaled down and up by backoff_jitter."""
+    jitter = model.CONFIG.backoff_jitter
+    return wait * (1 - jitter), wait * (1 + jitter)
+
+
+def test_enum_comparable_RobotsMode() -> None:
+    """Verify fields typed with enum RobotsMode are comparable."""
+    assert tuple(mode.value for mode in RobotsMode) == spec_enum("crawl", "RobotsMode")
+    policy = standard_policy()
+    assert policy.robots == RobotsMode.respect
+    assert len(set(RobotsMode)) == len(spec_enum("crawl", "RobotsMode"))
+    assert dataclasses.replace(policy, robots=RobotsMode.ignore).robots is RobotsMode.ignore
+
+
+def test_enum_comparable_RobotsStance(tmp_path: Path) -> None:
+    """Verify fields typed with enum RobotsStance are comparable.
+
+    Each stance a robots.txt answer resolves to compares equal to its own member only.
+    """
+    assert tuple(stance.value for stance in RobotsStance) == spec_enum("crawl", "RobotsStance")
+    stances = []
+    for name, robots in (
+        ("rules", text_response(ROBOTS, RULES)),
+        ("absent", not_found(ROBOTS)),
+        ("refused", text_response(ROBOTS, "", status=FORBIDDEN)),
+    ):
+        run, _ = started(tmp_path / name)
+        open_host(run, HOST, SITE, site(robots=robots))
+        policy = run.robots_policy(SITE)
+        assert policy is not None
+        stances.append(policy.stance)
+    assert stances == [RobotsStance.rules, RobotsStance.allow_all, RobotsStance.disallow_all]
+    assert stances[0] != stances[1] != stances[2] != stances[0]
+
+
+def test_enum_comparable_DiscoveryProblem(tmp_path: Path) -> None:
+    """Verify fields typed with enum DiscoveryProblem are comparable."""
+    declared = spec_enum("crawl", "DiscoveryProblem")
+    assert tuple(problem.value for problem in DiscoveryProblem) == declared
+    problems = []
+    for name, robots in (
+        ("refused", text_response(ROBOTS, "", status=FORBIDDEN)),
+        ("unreachable", unreachable(ROBOTS)),
+    ):
+        run, _ = started(tmp_path / name)
+        open_host(run, HOST, SITE, site(robots=robots))
+        policy = run.robots_policy(SITE)
+        assert policy is not None
+        problems.append(policy.problem)
+    assert problems == [DiscoveryProblem.robots_refused, DiscoveryProblem.robots_unreachable]
+    assert problems[0] != problems[1]
+
+
+def test_entity_optional_RobotsPolicy_crawl_delay(tmp_path: Path) -> None:
+    """Verify optional field RobotsPolicy.crawl_delay accepts null and non-null values.
+
+    Null for an absent file and for a group with no Crawl-delay; a decimal duration when
+    the group declares one.
+    """
+    absent, _ = started(tmp_path / "absent")
+    open_host(absent, HOST, SITE, site())
+    plain, _ = started(tmp_path / "plain")
+    open_host(plain, HOST, SITE, site(robots=text_response(ROBOTS, DISALLOW_GUIDE)))
+    half, _ = started(tmp_path / "half")
+    open_host(half, HOST, SITE, site(robots=text_response(ROBOTS, HALF_DELAY)))
+    delays = [run.robots_policy(SITE) for run in (absent, plain, half)]
+    assert [policy.crawl_delay if policy else "missing" for policy in delays] == [
+        None,
+        None,
+        timedelta(seconds=0.5),
+    ]
+
+
+def test_entity_optional_RobotsPolicy_problem(tmp_path: Path) -> None:
+    """Verify optional field RobotsPolicy.problem accepts null and non-null values."""
+    parsed, _ = started(tmp_path / "parsed")
+    open_host(parsed, HOST, SITE, site(robots=text_response(ROBOTS, RULES)))
+    refused, _ = started(tmp_path / "refused")
+    open_host(refused, HOST, SITE, site(robots=text_response(ROBOTS, "", status=FORBIDDEN)))
+    rules = parsed.robots_policy(SITE)
+    denied = refused.robots_policy(SITE)
+    assert rules is not None
+    assert denied is not None
+    assert rules.problem is None
+    assert denied.problem is DiscoveryProblem.robots_refused
+
+
+def test_entity_optional_Host_rate(tmp_path: Path) -> None:
+    """Verify optional field Host.rate accepts null and non-null values.
+
+    A standard run's host has a rate. With the rate control disabled (owner testing, on
+    unit inputs) the host's rate is null and stays null under a Crawl-delay, which still
+    sets its crawl_delay: disabling one control never disables another.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    assert host.rate == run.policy.rate_per_host
+    assert host.rate is not None
+
+    unlimited = dataclasses.replace(standard_policy(), rate_per_host=None)
+    free, _ = started(tmp_path / "free", policy=unlimited)
+    unpaced = open_host(free, HOST, SITE, site(robots=text_response(ROBOTS, RULES)))
+    assert unpaced is not None
+    assert unpaced.rate is None
+    assert unpaced.crawl_delay == CRAWL_DELAY
+
+
+def test_entity_optional_Host_paused_until(tmp_path: Path) -> None:
+    """Verify optional field Host.paused_until accepts null and non-null values.
+
+    Null when the host opens; an instant once HttpRetry pauses it.
+    """
+    fetcher = scripted((SEED, [answered(SEED, SERVICE_UNAVAILABLE)]))
+    _, _, walk = walked(tmp_path, fetcher)
+    host = walk.host
+    assert host.paused_until is None
+    backed_off = http_retry(walk.attempts[0], fetcher)
+    assert backed_off is not None
+    assert host.paused_until == backed_off.until
+    assert backed_off.until > START
+
+
+def test_entity_relationship_Host_breaker(tmp_path: Path) -> None:
+    """Verify relationship Host.breaker navigates to the correct related entities.
+
+    The host's breaker is the one Breaker with host = this, and the outcome of the host's
+    settled walk is fed to it: a seed that never answers counts once.
+    """
+    fetcher = FakeFetcher({SEED: unreachable(SEED)})
+    result = crawl_once(tmp_path, fetcher)
+    (host,) = result.run.hosts
+    breaker = host.breaker
+    assert breaker is not None
+    assert breaker.host is host
+    assert breaker.outcomes == [True]
+    assert breaker.since_escalation == 1
+
+
+def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
+    """Verify all declared fields on FetchAttempt are present with correct types."""
+    _, _, walk = walked(tmp_path, site())
+    (attempt,) = walk.attempts
+    assert_fields(
+        attempt,
+        (
+            "walk",
+            "tier",
+            "try_",
+            "response",
+            "verdict",
+            "render_reason",
+            "retires_host",
+            "retryable",
+            "challenges",
+            "unsuccessful_challenge",
+            "failed_outright",
+            "wants_escalation",
+        ),
+    )
+    assert attempt.walk is walk
+    assert attempt.tier is Tier.http
+    assert attempt.try_ == 1
+    assert isinstance(attempt.response, SiteResponse)
+    assert isinstance(attempt.verdict, BlockVerdict)
+    assert attempt.retires_host is False
+    assert attempt.retryable is False
+    assert attempt.failed_outright is False
+    assert attempt.wants_escalation is False
+    assert list(getattr(attempt, "challenges", ["missing"])) == []
+    assert getattr(attempt, "unsuccessful_challenge", None) is False
+
+
+def test_invariant_FetchAttempt_TriesBounded(tmp_path: Path) -> None:
+    """Verify invariant TriesBounded holds after any field mutation on FetchAttempt.
+
+    A seed that answers 503 every time is tried http_attempts times, the tries counted
+    from 1, every one at the http tier; then no further try is made.
+    """
+    fetcher = scripted(robots=None)
+    fetcher.responses[SEED] = answered(SEED, SERVICE_UNAVAILABLE)
+    _, _, walk = walked(tmp_path, fetcher)
+    while walk.attempts[-1].retryable:
+        assert http_retry(walk.attempts[-1], fetcher) is not None
+    assert http_retry(walk.attempts[-1], fetcher) is None
+    tries = [attempt.try_ for attempt in walk.attempts]
+    assert tries == list(range(1, model.CONFIG.http_attempts + 1))
+    for attempt in walk.attempts:
+        assert 1 <= attempt.try_ <= model.CONFIG.http_attempts
+        assert attempt.tier is Tier.http
+    assert fetcher.count(SEED) == model.CONFIG.http_attempts
+
+
+def test_derived_FetchAttempt_retryable(tmp_path: Path) -> None:
+    """Verify derived value FetchAttempt.retryable computes correctly.
+
+    An http error, 429 or 5xx before the last try, unless it retires the host.
+    """
+    _, _, walk = walked(tmp_path, site())
+    last = model.CONFIG.http_attempts
+    cap = standard_policy().retry_after_cap
+    cases = [
+        (answered(SEED, SERVICE_UNAVAILABLE), Tier.http, 1, True),
+        (answered(SEED, TOO_MANY), Tier.http, last - 1, True),
+        (unreachable(SEED), Tier.http, 1, True),
+        (answered(SEED, SERVER_ERROR), Tier.http, last, False),
+        (html_response(SEED, PAGE), Tier.http, 1, False),
+        (answered(SEED, FORBIDDEN), Tier.http, 1, False),
+        (answered(SEED, SERVICE_UNAVAILABLE), Tier.browser, 1, False),
+        (answered(SEED, TOO_MANY, retry_after=cap + timedelta(seconds=1)), Tier.http, 1, False),
+    ]
+    for response, tier, try_, expected in cases:
+        attempt = attempt_on(walk, response, tier=tier, try_=try_)
+        assert attempt.retryable is expected, (response.status, tier, try_)
+
+
+def test_derived_FetchAttempt_retires_host(tmp_path: Path) -> None:
+    """Verify derived value FetchAttempt.retires_host computes correctly.
+
+    An http answer worth a retry whose Retry-After is past retry_after_cap, while
+    Retry-After is honoured; on any try.
+    """
+    _, _, walk = walked(tmp_path, site())
+    cap = standard_policy().retry_after_cap
+    past = cap + timedelta(seconds=1)
+    last = model.CONFIG.http_attempts
+    cases = [
+        (answered(SEED, TOO_MANY, retry_after=past), Tier.http, 1, True),
+        (answered(SEED, SERVICE_UNAVAILABLE, retry_after=past), Tier.http, last, True),
+        (answered(SEED, TOO_MANY, retry_after=cap), Tier.http, 1, False),
+        (answered(SEED, TOO_MANY), Tier.http, 1, False),
+        (dataclasses.replace(html_response(SEED, PAGE), retry_after=past), Tier.http, 1, False),
+        (answered(SEED, TOO_MANY, retry_after=past), Tier.browser, 1, False),
+    ]
+    for response, tier, try_, expected in cases:
+        attempt = attempt_on(walk, response, tier=tier, try_=try_)
+        assert attempt.retires_host is expected, (response.status, response.retry_after, tier)
+    walk.host.run.policy = dataclasses.replace(standard_policy(), honor_retry_after=False)
+    ignored = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=past))
+    assert ignored.retires_host is False
+
+
+def test_derived_FetchAttempt_failed_outright(tmp_path: Path) -> None:
+    """Verify derived value FetchAttempt.failed_outright computes correctly.
+
+    An error, or status 0; any status the site sent is an answer, whatever it says.
+    """
+    _, _, walk = walked(tmp_path, site())
+    no_status = SiteResponse(status=0, source_url=SEED, markup="", size=0)
+    assert attempt_on(walk, unreachable(SEED)).failed_outright is True
+    assert attempt_on(walk, no_status).failed_outright is True
+    for status in (SERVER_ERROR, SERVICE_UNAVAILABLE, TOO_MANY, FORBIDDEN):
+        assert attempt_on(walk, answered(SEED, status)).failed_outright is False
+    assert attempt_on(walk, html_response(SEED, PAGE)).failed_outright is False
+
+
+def test_entity_fields_Breaker(tmp_path: Path) -> None:
+    """Verify all declared fields on Breaker are present with correct types."""
+    result = crawl_once(tmp_path, site())
+    (host,) = result.run.hosts
+    breaker = host.breaker
+    assert breaker is not None
+    assert_fields(
+        breaker,
+        (
+            "host",
+            "tier",
+            "highest_tier",
+            "outcomes",
+            "escalations",
+            "since_escalation",
+            "status",
+            "block_rate",
+            "over_threshold",
+            "should_act",
+        ),
+    )
+    assert breaker.host is host
+    assert breaker.tier is Tier.http
+    assert breaker.highest_tier is Tier.http
+    assert breaker.outcomes == [False]
+    assert breaker.escalations == 0
+    assert breaker.since_escalation == 1
+    assert breaker.status is BreakerStatus.watching
+    assert breaker.block_rate == 0
+    assert breaker.over_threshold is False
+    assert breaker.should_act is False
+
+
+def test_invariant_Breaker_WindowBounded(tmp_path: Path) -> None:
+    """Verify invariant WindowBounded holds after any field mutation on Breaker.
+
+    The window keeps the last breaker_window outcomes however many walks settle; the
+    host's text history likewise keeps the last host_text_history sizes.
+    """
+    run, frontier = crawling(tmp_path, site())
+    host = run.host(HOST)
+    assert host is not None
+    assert host.breaker is not None
+    window = model.CONFIG.breaker_window
+    history = model.CONFIG.host_text_history
+    walks = max(window, history) + 3
+    for number in range(walks):
+        url = f"{SITE}/guide/p{number}.html"
+        response = dataclasses.replace(html_response(url, PAGE), main_text=number + 1)
+        assert feed_breaker(settled_on(run, frontier, response, identity=url))
+        assert len(host.breaker.outcomes) <= window
+        assert len(host.recent_text_lengths) <= history
+    assert host.breaker.outcomes == [False] * window
+    assert host.breaker.since_escalation == walks
+    assert host.recent_text_lengths == list(range(walks - history + 1, walks + 1))
+
+
+def test_derived_Breaker_over_threshold(tmp_path: Path) -> None:
+    """Verify derived value Breaker.over_threshold computes correctly.
+
+    At least min(breaker_window, breaker_min_outcomes) outcomes, and a share of counted
+    outcomes strictly above block_rate_threshold.
+    """
+    run, _ = crawling(tmp_path, site())
+    host = run.host(HOST)
+    assert host is not None
+    breaker = host.breaker
+    assert breaker is not None
+    needed = min(model.CONFIG.breaker_window, model.CONFIG.breaker_min_outcomes)
+    threshold = model.CONFIG.block_rate_threshold
+    at_threshold = round(needed * threshold)
+    assert at_threshold / needed == threshold
+    windows = [
+        [True] * (needed - 1),  # too few outcomes, every one a block
+        [True] * at_threshold + [False] * (needed - at_threshold),  # at the threshold
+        [True] * (at_threshold + 1) + [False] * (needed - at_threshold - 1),  # above it
+        [],
+    ]
+    seen = []
+    for outcomes in windows:
+        breaker.outcomes = outcomes
+        seen.append((breaker.block_rate, breaker.over_threshold))
+    assert seen == [
+        (1, False),
+        (threshold, False),
+        ((at_threshold + 1) / needed, True),
+        (0, False),
+    ]
+
+
+def test_projection_Frontier_retry_entries(tmp_path: Path) -> None:
+    """Verify projection Frontier.retry_entries filters correctly.
+
+    Exactly the failed, blocked, skipped_robots, skipped_blocked and skipped_limit rows.
+    """
+    run, frontier = started(tmp_path)
+    for status in FrontierStatus:
+        enqueue(
+            run,
+            frontier,
+            f"{SITE}/guide/{status.value}.html",
+            depth=1,
+            via=DiscoverySource.link,
+            priority=0,
+        ).status = status
+    retried = {entry.status for entry in frontier.retry_entries}
+    assert retried == {
+        FrontierStatus.failed,
+        FrontierStatus.blocked,
+        FrontierStatus.skipped_robots,
+        FrontierStatus.skipped_blocked,
+        FrontierStatus.skipped_limit,
+    }
+    assert len(frontier.retry_entries) == len(retried)
+
+
+def test_transition_edge_FrontierEntry_in_progress_failed(tmp_path: Path) -> None:
+    """Verify transition in_progress -> failed on FrontierEntry.status is reachable via a witnessing rule.
+
+    A seed answering 503 on every try runs out of tries: DisposeFetch raises EntryFailed
+    and EntryFails sets the row failed and raises UrlFailed with the tries made.
+    """  # noqa: E501  The obligation's description, quoted.
+    fetcher = scripted(robots=None)
+    fetcher.responses[SEED] = answered(SEED, SERVICE_UNAVAILABLE)
+    result = crawl_once(tmp_path, fetcher)
+    entry = result.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.failed
+    assert entry.attempts == 1
+    (failed,) = result.failed
+    assert failed.url == SEED
+    assert failed.error
+    assert failed.attempts == model.CONFIG.http_attempts
+    assert fetcher.count(SEED) == model.CONFIG.http_attempts
+    assert result.run.fetch_attempts == model.CONFIG.http_attempts
+
+
+def test_transition_edge_FrontierEntry_failed_pending(tmp_path: Path) -> None:
+    """Verify transition failed -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    A row a run failed is re-pended by the next run's PrepareRun.
+    """  # noqa: E501  The obligation's description, quoted.
+    fetcher = FakeFetcher({SEED: unreachable(SEED)})
+    first = crawl_once(tmp_path, fetcher)
+    entry = first.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.failed
+    persisted = load_frontier(first.run.target)
+    assert persisted is not None
+    second = start_run(request(first.run.target, run_id=SECOND_RUN), FixedClock())
+    assert second is not None
+    assert prepare_run(second, persisted)
+    row = persisted.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.pending
+
+
+def test_transition_edge_FrontierEntry_skipped_robots_pending(tmp_path: Path) -> None:
+    """Verify transition skipped_robots -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    A seed skipped because its origin's robots.txt was refused is re-pended by the next
+    run's PrepareRun, which reads robots.txt again.
+    """  # noqa: E501  The obligation's description, quoted.
+    fetcher = site(robots=text_response(ROBOTS, "", status=FORBIDDEN))
+    first = crawl_once(tmp_path, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    entry = first.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.skipped_robots
+    persisted = load_frontier(first.run.target)
+    assert persisted is not None
+    second = start_run(request(first.run.target, run_id=SECOND_RUN), FixedClock())
+    assert second is not None
+    assert prepare_run(second, persisted)
+    row = persisted.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.pending
+
+
+def test_config_default_http_attempts() -> None:
+    """Verify config parameter http_attempts has its declared default."""
+    assert model.CONFIG.http_attempts == spec_int("crawl", "http_attempts")
+
+
+def test_config_default_backoff_base() -> None:
+    """Verify config parameter backoff_base has its declared default."""
+    assert model.CONFIG.backoff_base == spec_duration("crawl", "backoff_base")
+    assert standard_policy().backoff_base == model.CONFIG.backoff_base
+
+
+def test_config_default_max_backoff() -> None:
+    """Verify config parameter max_backoff has its declared default."""
+    assert model.CONFIG.max_backoff == spec_duration("crawl", "max_backoff")
+    assert standard_policy().max_backoff == model.CONFIG.max_backoff
+
+
+def test_config_default_backoff_jitter() -> None:
+    """Verify config parameter backoff_jitter has its declared default."""
+    assert model.CONFIG.backoff_jitter == spec_float("crawl", "backoff_jitter")
+
+
+def test_config_default_retry_after_cap() -> None:
+    """Verify config parameter retry_after_cap has its declared default."""
+    assert model.CONFIG.retry_after_cap == spec_duration("crawl", "retry_after_cap")
+    assert standard_policy().retry_after_cap == model.CONFIG.retry_after_cap
+
+
+def test_config_default_breaker_window() -> None:
+    """Verify config parameter breaker_window has its declared default."""
+    assert model.CONFIG.breaker_window == spec_int("crawl", "breaker_window")
+
+
+def test_config_default_breaker_min_outcomes() -> None:
+    """Verify config parameter breaker_min_outcomes has its declared default."""
+    assert model.CONFIG.breaker_min_outcomes == spec_int("crawl", "breaker_min_outcomes")
+
+
+def test_config_default_block_rate_threshold() -> None:
+    """Verify config parameter block_rate_threshold has its declared default."""
+    assert model.CONFIG.block_rate_threshold == spec_float("crawl", "block_rate_threshold")
+
+
+def test_config_default_host_text_history() -> None:
+    """Verify config parameter host_text_history has its declared default."""
+    assert model.CONFIG.host_text_history == spec_int("crawl", "host_text_history")
+
+
+def test_rule_success_DenyAllWhenRobotsRefused(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsRefused succeeds when all preconditions are met.
+
+    A 401, 403 or 429 or a 5xx robots.txt is disallow-all for its origin and raises
+    DiscoveryFailed; through the driver the seed is skipped unrequested and the run
+    returns the DiscoveryFailed.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site(robots=text_response(ROBOTS, "", status=FORBIDDEN)))
+    assert host is not None
+    policy = run.robots_policy(SITE)
+    assert policy is not None
+    assert policy.stance is RobotsStance.disallow_all
+    assert not robots_allows(run, SEED)
+    for status in (401, FORBIDDEN, TOO_MANY, SERVER_ERROR, SERVICE_UNAVAILABLE):
+        run.robots_policies.clear()
+        failed = deny_all_when_robots_refused(run, host, text_response(ROBOTS, "", status=status))
+        assert failed == DiscoveryFailed(
+            run=run, url=ROBOTS, problem=DiscoveryProblem.robots_refused
+        ), status
+        assert not robots_allows(run, SEED)
+
+    fetcher = site(robots=text_response(ROBOTS, "", status=FORBIDDEN))
+    result = crawl_once(tmp_path / "driven", fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert result.discovery_failed == (
+        DiscoveryFailed(run=result.run, url=ROBOTS, problem=DiscoveryProblem.robots_refused),
+    )
+    entry = result.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.skipped_robots
+
+
+def test_rule_failure_DenyAllWhenRobotsRefused_1(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsRefused is rejected when requires clause fails.
+
+    requires: not response.ok.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    run.robots_policies.clear()
+    assert deny_all_when_robots_refused(run, host, text_response(ROBOTS, RULES)) is None
+    assert run.robots_policies == []
+
+
+def test_rule_failure_DenyAllWhenRobotsRefused_2(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsRefused is rejected when requires clause fails.
+
+    requires: response.access_refused or response.server_error.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    run.robots_policies.clear()
+    for response in (
+        not_found(ROBOTS),
+        text_response(ROBOTS, "", status=410),
+        unreachable(ROBOTS),
+    ):
+        assert deny_all_when_robots_refused(run, host, response) is None
+    assert run.robots_policies == []
+
+
+def test_rule_entity_creation_DenyAllWhenRobotsRefused_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule DenyAllWhenRobotsRefused ensures clause produces the specified fields.
+
+    For the origin RobotsAnswered names, here a second port of the host.
+    """  # noqa: E501  The obligation's description, quoted.
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    refused = text_response(PORTED_ROBOTS, "", status=SERVER_ERROR)
+    failed = deny_all_when_robots_refused(run, host, refused, origin=PORTED)
+    assert failed == DiscoveryFailed(
+        run=run, url=PORTED_ROBOTS, problem=DiscoveryProblem.robots_refused
+    )
+    policy = run.robots_policy(PORTED)
+    assert policy is not None
+    assert policy.run is run
+    assert policy.origin == PORTED
+    assert policy.stance is RobotsStance.disallow_all
+    assert policy.crawl_delay is None
+    assert policy.declared_sitemaps == ()
+    assert policy.problem is DiscoveryProblem.robots_refused
+    allowed = run.robots_policy(SITE)
+    assert allowed is not None
+    assert allowed.stance is RobotsStance.allow_all
+
+
+def test_rule_success_DenyAllWhenRobotsUnreachable(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsUnreachable succeeds when all preconditions are met.
+
+    A robots.txt that never answers is tried http_attempts times, then is disallow-all
+    for its origin with a DiscoveryFailed; no robots.txt try counts as a fetch attempt.
+    """
+    fetcher = site(robots=unreachable(ROBOTS))
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    assert fetcher.requests == [ROBOTS] * model.CONFIG.http_attempts
+    assert run.fetch_attempts == 0
+    policy = run.robots_policy(SITE)
+    assert policy is not None
+    assert policy.stance is RobotsStance.disallow_all
+    assert policy.problem is DiscoveryProblem.robots_unreachable
+    assert not robots_allows(run, SEED)
+
+    run.robots_policies.clear()
+    failed = deny_all_when_robots_unreachable(run, host, unreachable(ROBOTS))
+    assert failed == DiscoveryFailed(
+        run=run, url=ROBOTS, problem=DiscoveryProblem.robots_unreachable
+    )
+
+    driven = site(robots=unreachable(ROBOTS))
+    result = crawl_once(tmp_path / "driven", driven)
+    assert SEED not in driven.requests
+    assert result.discovery_failed == (
+        DiscoveryFailed(run=result.run, url=ROBOTS, problem=DiscoveryProblem.robots_unreachable),
+    )
+
+
+def test_rule_failure_DenyAllWhenRobotsUnreachable_1(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsUnreachable is rejected when requires clause fails.
+
+    requires: not response.ok.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    run.robots_policies.clear()
+    assert deny_all_when_robots_unreachable(run, host, text_response(ROBOTS, RULES)) is None
+    assert run.robots_policies == []
+
+
+def test_rule_failure_DenyAllWhenRobotsUnreachable_2(tmp_path: Path) -> None:
+    """Verify rule DenyAllWhenRobotsUnreachable is rejected when requires clause fails.
+
+    requires: response.error != null.
+    """
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    run.robots_policies.clear()
+    for status in (FORBIDDEN, SERVER_ERROR, NOT_FOUND):
+        response = text_response(ROBOTS, "", status=status)
+        assert deny_all_when_robots_unreachable(run, host, response) is None
+    assert run.robots_policies == []
+
+
+def test_rule_entity_creation_DenyAllWhenRobotsUnreachable_1(tmp_path: Path) -> None:
+    """Verify entity creation in rule DenyAllWhenRobotsUnreachable ensures clause produces the specified fields."""  # noqa: E501  The obligation's description, quoted.
+    run, _ = started(tmp_path)
+    host = open_host(run, HOST, SITE, site())
+    assert host is not None
+    failed = deny_all_when_robots_unreachable(run, host, unreachable(PORTED_ROBOTS), origin=PORTED)
+    assert failed == DiscoveryFailed(
+        run=run, url=PORTED_ROBOTS, problem=DiscoveryProblem.robots_unreachable
+    )
+    policy = run.robots_policy(PORTED)
+    assert policy is not None
+    assert policy.run is run
+    assert policy.origin == PORTED
+    assert policy.stance is RobotsStance.disallow_all
+    assert policy.crawl_delay is None
+    assert policy.declared_sitemaps == ()
+    assert policy.problem is DiscoveryProblem.robots_unreachable
+
+
+def test_rule_failure_SkipRobotsDisallowed_4(tmp_path: Path) -> None:
+    """Verify rule SkipRobotsDisallowed is rejected when requires clause fails.
+
+    requires: exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}. The host's
+    first origin disallows /guide/, but a row on its second origin, whose robots.txt is
+    unread, is not judged by the first origin's file.
+    """
+    run, frontier = crawling(tmp_path, site(robots=text_response(ROBOTS, DISALLOW_GUIDE)))
+    entry = in_progress(run, frontier, PORTED_PAGE)
+    assert run.robots_policy(PORTED) is None
+    assert not skip_robots_disallowed(run, entry)
+    assert entry.status is FrontierStatus.in_progress
+
+
+def test_rule_success_ReadRobotsForNewOrigin(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsForNewOrigin succeeds when all preconditions are met.
+
+    A row on a known host at an unread origin reads that origin's robots.txt before its
+    first page there; the host is not opened again.
+    """
+    fetcher = site(robots=text_response(ROBOTS, RULES))
+    fetcher.responses[PORTED_ROBOTS] = text_response(PORTED_ROBOTS, DISALLOW_GUIDE)
+    run, frontier = crawling(tmp_path, fetcher)
+    entry = in_progress(run, frontier, PORTED_PAGE)
+    assert read_robots_for_new_origin(run, entry, fetcher)
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
+    assert [host.name for host in run.hosts] == [HOST]
+    policy = run.robots_policy(PORTED)
+    assert policy is not None
+    assert policy.stance is RobotsStance.rules
+    assert not robots_allows(run, PORTED_PAGE)
+    assert robots_allows(run, SEED)
+    assert skip_robots_disallowed_on_new_host(run, entry)
+    assert entry.status is FrontierStatus.skipped_robots
+
+
+def test_rule_failure_ReadRobotsForNewOrigin_1(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsForNewOrigin is rejected when requires clause fails.
+
+    requires: exists run.
+    """
+    fetcher = site()
+    run, frontier = crawling(tmp_path, fetcher)
+    entry = in_progress(run, frontier, PORTED_PAGE)
+    assert not read_robots_for_new_origin(None, entry, fetcher)
+    run.status = RunStatus.finished
+    assert not read_robots_for_new_origin(run, entry, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert run.robots_policy(PORTED) is None
+
+
+def test_rule_failure_ReadRobotsForNewOrigin_2(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsForNewOrigin is rejected when requires clause fails.
+
+    requires: exists host and not host.breaker_tripped.
+    """
+    fetcher = site()
+    run, frontier, _ = crawling_without_hosts(tmp_path)
+    entry = in_progress(run, frontier, PORTED_PAGE)
+    assert not read_robots_for_new_origin(run, entry, fetcher)
+    assert fetcher.requests == []
+
+    tripped_fetcher = site()
+    tripped, tripped_frontier = crawling(tmp_path / "tripped", tripped_fetcher)
+    host = tripped.host(HOST)
+    assert host is not None
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    row = in_progress(tripped, tripped_frontier, PORTED_PAGE)
+    assert not read_robots_for_new_origin(tripped, row, tripped_fetcher)
+    assert tripped_fetcher.requests == [ROBOTS]
+    assert tripped.robots_policy(PORTED) is None
+
+
+def test_rule_failure_ReadRobotsForNewOrigin_3(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsForNewOrigin is rejected when requires clause fails.
+
+    requires: not exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}.
+    """
+    fetcher = site()
+    run, _, entry = selected(tmp_path, fetcher)
+    assert not read_robots_for_new_origin(run, entry, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert [policy.origin for policy in run.robots_policies] == [SITE]
+
+
+def test_rule_failure_ProceedWithKnownHost_4(tmp_path: Path) -> None:
+    """Verify rule ProceedWithKnownHost is rejected when requires clause fails.
+
+    requires: exists RobotsPolicy{run: run, origin: origin_of(entry.identity)}. The host's
+    first origin allows everything; a row on its unread second origin does not proceed.
+    """
+    run, frontier = crawling(tmp_path, site())
+    entry = in_progress(run, frontier, PORTED_PAGE)
+    assert run.robots_policy(PORTED) is None
+    assert not proceed_with_known_host(run, entry)
+    assert not robots_allows(run, PORTED_PAGE)
+
+
+def test_rule_success_HttpRetry(tmp_path: Path) -> None:
+    """Verify rule HttpRetry succeeds when all preconditions are met.
+
+    The host is paused until now + retry_wait (backoff_base on the first try, within
+    backoff_jitter; at least a Retry-After on a 503), HostBackedOff is raised, the next
+    http try is made at try + 1, and the host's rate is never raised.
+    """
+    fetcher = scripted((SEED, [answered(SEED, SERVICE_UNAVAILABLE)]))
+    run, _, walk = walked(tmp_path, fetcher)
+    host = walk.host
+    rate = host.rate
+    (first,) = walk.attempts
+    backed_off = http_retry(first, fetcher)
+    assert backed_off is not None
+    assert backed_off.host is host
+    low, high = jitter_bounds(run.policy.backoff_base)
+    assert START + low <= backed_off.until <= START + high
+    assert host.paused_until == backed_off.until
+    second = walk.attempts[-1]
+    assert second is not first
+    assert second.tier is Tier.http
+    assert second.try_ == first.try_ + 1
+    assert second.response.ok
+    assert fetcher.count(SEED) == TWO_TRIES
+    assert run.fetch_attempts == TWO_TRIES
+    assert host.rate == rate
+
+    wait = timedelta(seconds=40)
+    later = scripted((SEED, [answered(SEED, SERVICE_UNAVAILABLE, retry_after=wait)]))
+    _, _, waited = walked(tmp_path / "retry-after", later)
+    lengthened = http_retry(waited.attempts[0], later)
+    assert lengthened is not None
+    assert lengthened.until >= START + wait
+    assert waited.host.paused_until == lengthened.until
+
+
+def test_rule_failure_HttpRetry_1(tmp_path: Path) -> None:
+    """Verify rule HttpRetry is rejected when requires clause fails.
+
+    requires: attempt.retryable.
+    """
+    fetcher = scripted()
+    _, _, walk = walked(tmp_path, fetcher)
+    (attempt,) = walk.attempts
+    assert not attempt.retryable
+    assert http_retry(attempt, fetcher) is None
+    assert walk.host.paused_until is None
+    assert walk.attempts == [attempt]
+    assert fetcher.count(SEED) == 1
+
+
+def test_rule_failure_HttpRetry_2(tmp_path: Path) -> None:
+    """Verify rule HttpRetry is rejected when requires clause fails.
+
+    requires: attempt.walk.status = walking and attempt.walk.host.run.status = running.
+    """
+    fetcher = scripted(robots=None)
+    fetcher.responses[SEED] = answered(SEED, SERVICE_UNAVAILABLE)
+    run, _, walk = walked(tmp_path, fetcher)
+    (attempt,) = walk.attempts
+    assert attempt.retryable
+    walk.status = WalkStatus.settled
+    assert http_retry(attempt, fetcher) is None
+    walk.status = WalkStatus.walking
+    run.status = RunStatus.interrupted
+    assert http_retry(attempt, fetcher) is None
+    assert walk.host.paused_until is None
+    assert walk.attempts == [attempt]
+    assert fetcher.count(SEED) == 1
+
+
+def test_rule_success_CountRetryAfter(tmp_path: Path) -> None:
+    """Verify rule CountRetryAfter succeeds when all preconditions are met.
+
+    An http attempt answering 429 or 503 with a Retry-After, while honoured, counts once.
+    """
+    _, _, walk = walked(tmp_path, site())
+    host = walk.host
+    wait = timedelta(seconds=4)
+    assert count_retry_after(
+        attempt_on(walk, answered(SEED, SERVICE_UNAVAILABLE, retry_after=wait))
+    )
+    assert host.retry_after_honored == 1
+    assert count_retry_after(attempt_on(walk, answered(SEED, TOO_MANY, retry_after=wait)))
+    assert host.retry_after_honored == TWO_TRIES
+
+
+def test_rule_failure_CountRetryAfter_1(tmp_path: Path) -> None:
+    """Verify rule CountRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.walk.host.run.status = running.
+    """
+    run, _, walk = walked(tmp_path, site())
+    attempt = attempt_on(
+        walk, answered(SEED, SERVICE_UNAVAILABLE, retry_after=timedelta(seconds=4))
+    )
+    run.status = RunStatus.finished
+    assert not count_retry_after(attempt)
+    assert walk.host.retry_after_honored == 0
+
+
+def test_rule_failure_CountRetryAfter_2(tmp_path: Path) -> None:
+    """Verify rule CountRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.tier = http.
+    """
+    _, _, walk = walked(tmp_path, site())
+    response = answered(SEED, SERVICE_UNAVAILABLE, retry_after=timedelta(seconds=4))
+    assert not count_retry_after(attempt_on(walk, response, tier=Tier.browser))
+    assert walk.host.retry_after_honored == 0
+
+
+def test_rule_failure_CountRetryAfter_3(tmp_path: Path) -> None:
+    """Verify rule CountRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.response.retry_after != null and attempt.response.may_carry_retry_after.
+    """
+    _, _, walk = walked(tmp_path, site())
+    wait = timedelta(seconds=4)
+    for response in (
+        answered(SEED, SERVICE_UNAVAILABLE),
+        answered(SEED, SERVER_ERROR, retry_after=wait),
+        dataclasses.replace(html_response(SEED, PAGE), retry_after=wait),
+    ):
+        assert not count_retry_after(attempt_on(walk, response)), response.status
+    assert walk.host.retry_after_honored == 0
+
+
+def test_rule_failure_CountRetryAfter_4(tmp_path: Path) -> None:
+    """Verify rule CountRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.walk.host.run.policy.honor_retry_after (off only in owner testing,
+    here on unit inputs).
+    """
+    run, _, walk = walked(tmp_path, site())
+    run.policy = dataclasses.replace(standard_policy(), honor_retry_after=False)
+    attempt = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=timedelta(seconds=4)))
+    assert not count_retry_after(attempt)
+    assert walk.host.retry_after_honored == 0
+
+
+def test_rule_success_FeedBreaker(tmp_path: Path) -> None:
+    """Verify rule FeedBreaker succeeds when all preconditions are met.
+
+    A walk that failed outright counts as a block; an ok unblocked page does not, and its
+    main text joins the host's text history. Every settled walk adds to since_escalation.
+    """
+    run, frontier = crawling(tmp_path, site())
+    host = run.host(HOST)
+    assert host is not None
+    breaker = host.breaker
+    assert breaker is not None
+    assert feed_breaker(settled_on(run, frontier, unreachable(SEED)))
+    assert breaker.outcomes == [True]
+    assert breaker.since_escalation == 1
+    assert host.recent_text_lengths == []
+    text = 120
+    other = f"{SITE}/guide/other.html"
+    ok = dataclasses.replace(html_response(other, PAGE), main_text=text)
+    assert feed_breaker(settled_on(run, frontier, ok, identity=other))
+    assert breaker.outcomes == [True, False]
+    assert breaker.since_escalation == TWO_TRIES
+    assert host.recent_text_lengths == [text]
+    failed = f"{SITE}/guide/failed.html"
+    assert feed_breaker(settled_on(run, frontier, answered(failed, SERVER_ERROR), identity=failed))
+    assert breaker.outcomes == [True, False, False]
+    assert host.recent_text_lengths == [text]
+
+
+def test_rule_failure_FeedBreaker_1(tmp_path: Path) -> None:
+    """Verify rule FeedBreaker is rejected when requires clause fails.
+
+    requires: walk.status = settled.
+    """
+    run, frontier = crawling(tmp_path, site())
+    walk = settled_on(run, frontier, unreachable(SEED))
+    walk.status = WalkStatus.walking
+    assert not feed_breaker(walk)
+    assert walk.host.breaker is not None
+    assert walk.host.breaker.outcomes == []
+    assert walk.host.breaker.since_escalation == 0
+
+
+def test_rule_failure_FeedBreaker_2(tmp_path: Path) -> None:
+    """Verify rule FeedBreaker is rejected when requires clause fails.
+
+    requires: exists breaker and breaker.status = watching.
+    """
+    run, frontier = crawling(tmp_path, site())
+    walk = settled_on(run, frontier, unreachable(SEED))
+    breaker = walk.host.breaker
+    assert breaker is not None
+    breaker.status = BreakerStatus.tripped
+    assert not feed_breaker(walk)
+    assert breaker.outcomes == []
+    walk.host.breaker = None
+    assert not feed_breaker(walk)
+    assert walk.host.recent_text_lengths == []
+
+
+def test_rule_failure_FeedBreaker_3(tmp_path: Path) -> None:
+    """Verify rule FeedBreaker is rejected when requires clause fails.
+
+    requires: host.run.policy.breaker_enabled (off only in owner testing, here on unit
+    inputs).
+    """
+    run, frontier = crawling(tmp_path, site())
+    run.policy = dataclasses.replace(standard_policy(), breaker_enabled=False)
+    walk = settled_on(run, frontier, unreachable(SEED))
+    assert not feed_breaker(walk)
+    assert walk.host.breaker is not None
+    assert walk.host.breaker.outcomes == []
+    assert walk.host.breaker.since_escalation == 0
+
+
+def test_rule_success_EntryFails(tmp_path: Path) -> None:
+    """Verify rule EntryFails succeeds when all preconditions are met.
+
+    A walk settled on a transport failure: DisposeFetch raises EntryFailed with the error
+    and the try, and EntryFails sets the row failed and raises UrlFailed. A 5xx that ran
+    out of tries fails the same way, with its status text as the error.
+    """
+    run, _, walk = exhausted(tmp_path, unreachable(SEED))
+    failed = dispose_fetch(walk)
+    assert isinstance(failed, EntryFailed)
+    assert failed.run is run
+    assert failed.entry is walk.entry
+    assert failed.error == "connection refused"
+    assert failed.attempts == model.CONFIG.http_attempts
+    url_failed = entry_fails(failed)
+    assert url_failed is not None
+    assert walk.entry.status is FrontierStatus.failed
+    assert url_failed.run is run
+    assert url_failed.url == SEED
+    assert url_failed.error == "connection refused"
+    assert url_failed.attempts == model.CONFIG.http_attempts
+    assert walk.host.fetched == 0
+
+    _, _, server = exhausted(tmp_path / "server", answered(SEED, SERVICE_UNAVAILABLE))
+    status_failed = dispose_fetch(server)
+    assert isinstance(status_failed, EntryFailed)
+    assert status_failed.error  # status_text(response): a black box, its wording unpinned
+    assert status_failed.error != "no response"
+    assert status_failed.attempts == model.CONFIG.http_attempts
+    assert entry_fails(status_failed) is not None
+    assert server.entry.status is FrontierStatus.failed
+
+
+def test_rule_failure_EntryFails_1(tmp_path: Path) -> None:
+    """Verify rule EntryFails is rejected when requires clause fails.
+
+    requires: entry.status = in_progress.
+    """
+    _, _, walk = exhausted(tmp_path, unreachable(SEED))
+    failed = dispose_fetch(walk)
+    assert isinstance(failed, EntryFailed)
+    walk.entry.status = FrontierStatus.done
+    assert entry_fails(failed) is None
+    assert walk.entry.status is FrontierStatus.done
+
+
+def test_invariant_HostRateNeverRises(tmp_path: Path) -> None:
+    """Verify invariant HostRateNeverRises holds after every state-changing rule that touches constrained entities.
+
+    Across many robots.txt adoptions on several origins of one host, and a retry, the
+    rate only falls, never above rate_per_host: a Crawl-delay of 3 lowers it to 1/3; a
+    shorter or zero delay read later does not raise it again.
+    """  # noqa: E501  The obligation's description, quoted.
+    rate = standard_policy().rate_per_host
+    assert rate is not None
+    delays = ("0.25", "3", "0", "1", "0.5")
+    origins = [f"http://docs.example:{8000 + index}" for index in range(len(delays))]
+    fetcher = scripted((SEED, [answered(SEED, SERVICE_UNAVAILABLE)]))
+    for origin, delay in zip(origins, delays, strict=True):
+        fetcher.responses[f"{origin}/robots.txt"] = text_response(
+            f"{origin}/robots.txt", f"User-agent: *\nCrawl-delay: {delay}\n"
+        )
+    run, _, walk = walked(tmp_path, fetcher)
+    host = walk.host
+    seen = [host.rate]
+    for origin in origins:
+        fetch_robots(run, HOST, origin, fetcher)
+        seen.append(host.rate)
+    assert http_retry(walk.attempts[0], fetcher) is not None
+    seen.append(host.rate)
+    rates = [value for value in seen if value is not None]
+    assert len(rates) == len(seen)
+    assert all(value <= rate for value in rates)
+    assert rates == sorted(rates, reverse=True)
+    assert host.rate == min(rate, 1 / 3)
+    assert host.crawl_delay == timedelta(seconds=3)
+
+
+def test_surface_exposure_SiteExchange(tmp_path: Path) -> None:
+    """Verify each exposed item on SiteExchange is accessible.
+
+    What the site sees of one run's host: its name, the rate and Crawl-delay robots.txt
+    set, its pause, tiers, tallies and the Retry-Afters it honoured.
+    """
+    fetcher = scripted(
+        (SEED, [answered(SEED, SERVICE_UNAVAILABLE, retry_after=timedelta(seconds=4))]),
+        robots=text_response(ROBOTS, RULES),
+    )
+    result = crawl_once(tmp_path, fetcher)
+    (host,) = result.run.hosts
+    rate = result.run.policy.rate_per_host
+    assert rate is not None
+    exposed = {
+        "name": host.name,
+        "rate": host.rate,
+        "crawl_delay": host.crawl_delay,
+        "tiers_used": host.tiers_used,
+        "fetched": host.fetched,
+        "blocked": host.blocked,
+        "block_rate": host.block_rate,
+        "render_escalations": host.render_escalations,
+        "retry_after_honored": host.retry_after_honored,
+    }
+    assert exposed == {
+        "name": HOST,
+        "rate": min(rate, 1 / CRAWL_DELAY.total_seconds()),
+        "crawl_delay": CRAWL_DELAY,
+        "tiers_used": frozenset({Tier.http}),
+        "fetched": 1,
+        "blocked": 0,
+        "block_rate": 0,
+        "render_escalations": 0,
+        "retry_after_honored": 1,
+    }
+    assert host.paused_until is not None
+    assert host.paused_until >= START + timedelta(seconds=4)

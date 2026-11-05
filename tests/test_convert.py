@@ -459,7 +459,7 @@ def test_body_shape() -> None:
 
 
 def test_fetch_flags_recompute_low_confidence() -> None:
-    """with_fetch_flags adds the fetch flags and recomputes low_confidence (crawl.allium 1618)."""
+    """with_fetch_flags adds the fetch flags and recomputes low_confidence (crawl.allium 1780)."""
     content = converted(PAGE)
     assert not content.quality.low_confidence
     flagged = with_fetch_flags(content, {QualityFlag.render_needed})

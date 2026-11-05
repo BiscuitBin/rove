@@ -68,3 +68,17 @@ policy.
   text has its backslashes and brackets escaped and its whitespace flattened to single
   spaces, and the `llms.txt` summary falls back from the start URLs to the root URL's
   page before the first page by path.
+- `rovo sync` is polite: it reads each origin's robots.txt before anything else there and
+  matches it as RFC 9309 is implemented by the new runtime dependency
+  `protego>=0.7.0,<0.8`, in place of `urllib.robotparser` (so an `Allow` ending in
+  `/index.html` also allows its directory, and a path ending in `$` also matches as a
+  prefix with the `$` read as `%24`); a refused or unreachable robots.txt disallows its
+  origin, is listed under `discovery_problems` and makes the sync exit 1. Requests to
+  one host name are spaced by `1 / rate_per_host` and the longest decimal `Crawl-delay`
+  of its origins, with no burst (`Crawl-delay: 0` adds none; one past `retry_after_cap`,
+  however large, is never adopted and stops the sync as a later slice's branch). A
+  transport error, a 429 or a 5xx is retried, robots.txt included, up to `http_attempts`
+  tries with exponential backoff, jitter and `Retry-After` (seconds, however many, or an
+  HTTP date, on any retryable answer); a page whose tries run out on a 5xx or a
+  transport error is listed under `failed_urls` and makes the sync exit 1 (a 429 that
+  runs out stops the sync as a later slice's branch).

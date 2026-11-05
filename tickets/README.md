@@ -35,6 +35,7 @@ snapshot.
 | T09 | Tracer bullet: rovo init creates a mirror, rovo sync mirrors its seed page | `T09-tracer-init-sync-one-page.md` | T08 | none | open |
 | T10 | Links and scope: rovo sync follows links within the crawl scope and rewrites them between page files | `T10-links-and-scope.md` | T09 | none | open |
 | T11 | Indexes: every finalisation writes index.md, the directory indexes, llms.txt, index.jsonl and links.jsonl, and rovo index rebuilds them | `T11-indexes.md` | T10 | none | open |
+| T12 | Robots and politeness: rovo sync reads robots.txt per origin, paces each host, retries with backoff and Retry-After, and exits partial on a failure | `T12-robots-politeness.md` | T11 | none | open |
 
 ## Dependency graph
 
@@ -42,7 +43,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -75,6 +76,11 @@ T00 ─┬─ T01 ─┐
   directory over the threshold, `llms.txt`, `index.jsonl` and `links.jsonl` at the
   mirror's root, deterministically; `rovo index` rebuilds them offline from the
   manifest.
+- **T12** is slice 4: politeness. `rovo sync` reads each origin's robots.txt before
+  anything else there (a refused or unreachable one disallows that origin and is
+  reported), paces each host name by its rate and the longest Crawl-delay its origins
+  declare, retries a failed request with backoff and Retry-After, and exits 1 when a
+  page fails or robots.txt could not be read.
 
 ## How to pick up a ticket
 

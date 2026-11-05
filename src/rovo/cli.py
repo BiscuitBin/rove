@@ -70,10 +70,11 @@ def sync_command(
     """Fetch the mirror's pages, publish them as Markdown and write crawl-report.json."""
     from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
     from rovo._crawl.fetch import HttpxFetcher  # noqa: PLC0415  Loaded only when the command runs.
-    from rovo._mirror.state import SystemClock  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.pace import SystemTimer  # noqa: PLC0415  Loaded only when the command runs.
 
-    with HttpxFetcher() as fetcher:
-        code = _commands.sync(out_dir, fetcher=fetcher, clock=SystemClock())
+    timer = SystemTimer()
+    with HttpxFetcher(clock=timer) as fetcher:
+        code = _commands.sync(out_dir, fetcher=fetcher, clock=timer)
     raise typer.Exit(code.number)
 
 

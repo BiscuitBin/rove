@@ -10,7 +10,8 @@ the render recognisers, path assignment, the rovo.toml readers and the page file
 import dataclasses
 import os
 import stat
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
@@ -82,6 +83,7 @@ from rovo._report import (
     report_path,
 )
 from rovo._unfinished import NotInThisSlice
+from test_crawl import PAST_CAP_DELAYS, PAST_CAP_IDS
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -96,6 +98,7 @@ FORBIDDEN = 403
 MOVED = 301
 SERVER_ERROR = 500
 TOO_MANY = 429
+SERVICE_UNAVAILABLE = 503
 NOT_FOUND = 404
 
 
@@ -162,11 +165,10 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
     "responses",
     [
         pytest.param({ROBOTS: text_response(ROBOTS, "", status=MOVED)}, id="robots-redirect"),
-        pytest.param({ROBOTS: text_response(ROBOTS, "", status=FORBIDDEN)}, id="robots-refused"),
         pytest.param({SEED: html_response(SEED, "", status=NOT_FOUND)}, id="absent-page"),
         pytest.param({SEED: html_response(SEED, "", status=FORBIDDEN)}, id="blocked-page"),
-        pytest.param({SEED: html_response(SEED, "", status=SERVER_ERROR)}, id="retryable"),
         pytest.param({SEED: text_response(SEED, "plain")}, id="not-html"),
+        pytest.param({SEED: html_response(SEED, "", status=MOVED)}, id="page-redirect"),
         pytest.param(
             {SEED: html_response(SEED, PAGE.replace("</main>", '<input type="password"></main>'))},
             id="login-wall",
@@ -188,9 +190,80 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
 def test_a_later_slices_answer_stops_the_run(
     tmp_path: Path, responses: dict[str, SiteResponse]
 ) -> None:
-    """Robots, disposal, block and retry branches a later slice implements stop the run."""
+    """Robots, disposal, block and retry branches a later slice implements stop the run.
+
+    A refused robots.txt and a retryable answer are no longer here: T12 realises them.
+    A page's raw redirect stays the redirects slice's (T12 implement 2, propagate tick 4).
+    """
     with pytest.raises(NotInThisSlice):
         crawl(tmp_path, responses)
+    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+
+
+def test_a_429_that_survives_its_retries_stops_at_classify_block(tmp_path: Path) -> None:
+    """A page answering 429 on every try is retried, then needs a hard verdict (T12).
+
+    The verdict is the blocks slice's, so the run stops at classify_block, after
+    http_attempts tries.
+    """
+    fetcher = FakeFetcher(
+        {SEED: SiteResponse(status=TOO_MANY, source_url=SEED, markup="", size=0)}
+    )
+    mirror = new_mirror(tmp_path)
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == "classify_block"
+    assert fetcher.requests.count(SEED) == CRAWL.http_attempts
+    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+
+
+@pytest.mark.parametrize("written", PAST_CAP_DELAYS, ids=PAST_CAP_IDS)
+def test_a_crawl_delay_past_the_cap_stops_at_retire_host_on_long_crawl_delay(
+    tmp_path: Path, written: str
+) -> None:
+    """An honoured Crawl-delay past retry_after_cap retires the host (spec 71b5b0f).
+
+    The trip is the breaker slice's, as for a long Retry-After, so the run stops at
+    RetireHostOnLongCrawlDelay right after robots.txt, however large the number: never
+    an overflow, and no page is requested. The number is read as written, so 1e309 and
+    1e400 (too large for a float), the cap plus one sub-ULP step and an exponent past
+    Decimal's limit retire it too (reviews T12-2-r2 C1/B1 and T12-3-r2 C1/B1).
+    """
+    robots = text_response(ROBOTS, f"User-agent: *\nCrawl-delay: {written}\n")
+    fetcher = FakeFetcher({ROBOTS: robots, SEED: html_response(SEED, PAGE)})
+    mirror = new_mirror(tmp_path)
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+    assert fetcher.requests == [ROBOTS]
+    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+
+
+def test_a_breaker_breach_stops_the_run(tmp_path: Path) -> None:
+    """The moment a host's breaker should act, the run stops at BreakerTrips (T12).
+
+    Ten seeds, three of which never answer: once breaker_min_outcomes walks have settled,
+    the share of failures is past block_rate_threshold. The trip is the breaker slice's.
+    """
+    count = min(CRAWL.breaker_window, CRAWL.breaker_min_outcomes)
+    failing = int(count * CRAWL.block_rate_threshold) + 1
+    seeds = tuple(f"{SITE}/guide/p{number}.html" for number in range(count))
+    responses: dict[str, SiteResponse] = {}
+    for number, url in enumerate(seeds):
+        if number < failing:
+            responses[url] = SiteResponse(
+                status=0, source_url=url, markup="", size=0, error="connection refused"
+            )
+        else:
+            prose = f"Page {number} explains setting {number} of the example product in full."
+            responses[url] = html_response(
+                url,
+                PAGE.replace("<h1>Getting started</h1>", f"<h1>Page {number}</h1><p>{prose}</p>"),
+            )
+    mirror = new_mirror(tmp_path, start_urls=seeds)
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(request(mirror), None, FakeFetcher(responses), FixedClock())
+    assert stopped.value.rule == "BreakerTrips"
     assert not (tmp_path / ".rovo" / "frontier.json").exists()
 
 
@@ -589,7 +662,13 @@ def test_manifest_errors(tmp_path: Path) -> None:
 
 
 def test_httpx_fetcher_sends_validators_and_reads_retry_after() -> None:
-    """A conditional fetch sends the stored validators; Retry-After in seconds is read."""
+    """A conditional fetch sends the stored validators; Retry-After in seconds is read.
+
+    T12: a Retry-After given as an HTTP date is the time from the response's Date to that
+    date; a date already past is zero; an unreadable value is no Retry-After. Propagate
+    tick 4: seconds too many for a duration are the longest duration, past
+    retry_after_cap, and a non-ASCII digit is unreadable (implement 3).
+    """
     seen: list[httpx.Request] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -602,3 +681,44 @@ def test_httpx_fetcher_sends_validators_and_reads_retry_after() -> None:
     assert seen[0].headers["if-modified-since"] == "Sat"
     assert response.retry_after == timedelta(seconds=7)
     assert response.may_carry_retry_after
+
+    sent = datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC)
+    dated = {
+        "later": (sent + timedelta(seconds=90), timedelta(seconds=90)),
+        "past": (sent - timedelta(seconds=30), timedelta(0)),
+    }
+    for name, (until, expected) in dated.items():
+
+        def answer_dated(request: httpx.Request, until: datetime = until) -> httpx.Response:
+            del request
+            return httpx.Response(
+                SERVICE_UNAVAILABLE,
+                headers={
+                    "retry-after": format_datetime(until, usegmt=True),
+                    "date": format_datetime(sent, usegmt=True),
+                },
+            )
+
+        with HttpxFetcher(transport=httpx.MockTransport(answer_dated)) as fetcher:
+            assert fetcher.fetch(SEED).retry_after == expected, name
+
+    def unreadable(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(SERVICE_UNAVAILABLE, headers={"retry-after": "soon"})
+
+    with HttpxFetcher(transport=httpx.MockTransport(unreadable)) as fetcher:
+        assert fetcher.fetch(SEED).retry_after is None
+
+    edges: dict[bytes, timedelta | None] = {
+        b"9" * 30: timedelta.max,
+        b"\xb2": None,
+    }
+    for value, read in edges.items():
+
+        def answer_edge(request: httpx.Request, value: bytes = value) -> httpx.Response:
+            del request
+            return httpx.Response(SERVICE_UNAVAILABLE, headers=[(b"retry-after", value)])
+
+        with HttpxFetcher(transport=httpx.MockTransport(answer_edge)) as fetcher:
+            assert fetcher.fetch(SEED).retry_after == read, value
+    assert timedelta.max > CRAWL.retry_after_cap

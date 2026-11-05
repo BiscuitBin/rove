@@ -37,7 +37,9 @@ PRIVATE_MODULES = (
 # What `import rovo` must never load: the private modules, the command line and every
 # runtime dependency, matched on the first dotted component for the third-party names.
 ROOT_FORBIDDEN_MODULES = (*PRIVATE_MODULES, "rovo.cli")
-ROOT_FORBIDDEN_TOPS = frozenset({"httpx", "bs4", "lxml", "markdownify", "playwright", "typer"})
+ROOT_FORBIDDEN_TOPS = frozenset(
+    {"httpx", "bs4", "lxml", "markdownify", "playwright", "protego", "typer"}
+)
 
 
 def _module_name(path: Path) -> str:

@@ -1,19 +1,23 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 596 to 1746).
+"""One standard run, RunRequested to RunEnded (crawl.allium 601 to 1908).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
 opens hosts, OpenHost reads robots.txt, FetchEntry makes its first attempt. `run_crawl`
 drives the rest in the specification's order, one frontier row after another, and
-stops with NotInThisSlice where a later slice's branch would be taken.
+stops with NotInThisSlice where a later slice's branch would be taken. Every request
+waits its turn at its host name's limiter (rovo._crawl.pace) on the run's timer.
 """
 
+import random
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import MAX_EMAX, Decimal, InvalidOperation
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, overload
-from urllib.robotparser import RobotFileParser
 
 from bs4 import BeautifulSoup
+from protego import Protego
 
 from rovo._convert.fidelity import (
     convert,
@@ -33,6 +37,8 @@ from rovo._crawl.model import (
     BlockVerdict,
     Breaker,
     BreakerStatus,
+    DiscoveryFailed,
+    DiscoveryProblem,
     DiscoverySource,
     EntryFailed,
     FetchAttempt,
@@ -40,6 +46,7 @@ from rovo._crawl.model import (
     FrontierEntry,
     FrontierStatus,
     Host,
+    HostBackedOff,
     LadderWalk,
     RenderMode,
     RenderReason,
@@ -55,6 +62,7 @@ from rovo._crawl.model import (
     UrlFailed,
     WalkStatus,
 )
+from rovo._crawl.pace import Timer, back_off, fetch_resource, wait_turn
 from rovo._mirror.intake import admit_candidate, links_found, settle_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
@@ -76,6 +84,13 @@ _FRONTIER = "frontier.json"
 _RUNS = "runs.json"
 _ACCESS_DENIED = frozenset({401, 403})
 _REDIRECTS = range(300, 400)
+_CRAWL_DELAY = "crawl-delay"
+_SECONDS_PER_DAY = 86400
+_MICROSECONDS = 6
+# A Crawl-delay written with an exponent past Decimal's limit, such as 1e1000000000000000000:
+# kept as the largest power of ten Decimal holds, past every cap.
+_PAST_EVERY_CAP = Decimal(f"1e{MAX_EMAX}")
+_TOO_MANY_REQUESTS = 429
 _SPA_ROOTS = ("root", "app", "__next", "__nuxt")
 _UNRESOLVED = frozenset(
     {
@@ -107,18 +122,20 @@ class RunRecord:
 
 @dataclass(frozen=True, kw_only=True)
 class CrawlResult:
-    """What one run leaves: the ended run and its frontier."""
+    """What one run leaves: the ended run, its frontier and the events the root takes."""
 
     run: Run
     frontier: Frontier
     failed: tuple[UrlFailed, ...] = ()
+    discovery_failed: tuple[DiscoveryFailed, ...] = ()
+    backed_off: tuple[HostBackedOff, ...] = ()
 
 
 # --- Starting a run -------------------------------------------------------------------
 
 
-def start_run(request: RunRequest, clock: Clock) -> Run | None:
-    """Realises crawl.allium StartRun."""
+def start_run(request: RunRequest, clock: Timer) -> Run | None:
+    """Realises crawl.allium StartRun; the run paces on `clock` and draws its own jitter."""
     owner_ready = (
         request.baseline is not None and request.preceding is not None and request.owned_hosts
     )
@@ -153,6 +170,9 @@ def start_run(request: RunRequest, clock: Clock) -> Run | None:
         fetch_attempts=0,
         started_at=clock.now(),
         status=RunStatus.running,
+        timer=clock,
+        # Jitter spreads retries; it needs no cryptographic strength, only its own source.
+        draw=random.Random().uniform,  # noqa: S311  Backoff jitter, not a secret.
     )
 
 
@@ -263,66 +283,213 @@ def open_host(run: Run, name: str, origin: str, fetcher: Fetcher) -> Host | None
         status=BreakerStatus.watching,
     )
     run.hosts.append(host)
-    fetch_robots(run, name, fetcher)
+    fetch_robots(run, name, host.origin, fetcher)
     return host
 
 
-def fetch_robots(run: Run, name: str, fetcher: Fetcher) -> SiteResponse | None:
-    """Realises crawl.allium FetchRobots, then its RobotsAnswered.
+def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResponse | None:
+    """Realises crawl.allium FetchRobots for `origin`, then its RobotsAnswered.
 
-    One http request, no retry and no redirect followed in this slice; a 3xx answer, a
-    refusal and an unreachable robots.txt are later slices' branches.
+    The request goes through `fetch_resource`, under the host's limiter, with a page's
+    retries; the answer ends in exactly one of AdoptRobotsRules, DenyAllWhenRobotsRefused,
+    DenyAllWhenRobotsUnreachable or AllowAllWhenRobotsAbsent. A 3xx answer (redirect
+    following) is a later slice's branch, and so is retiring the host on a Retry-After
+    past the cap, which fetch_resource stops at, or on an honoured Crawl-delay past it
+    (RetireHostOnLongCrawlDelay), which stops once the rules are adopted.
     """
     host = run.host(name)
     if run.status is not RunStatus.running or host is None:
         return None
-    if run.robots_policy(host.origin) is not None:
+    if run.robots_policy(origin) is not None:
         return None
-    response = fetcher.fetch(f"{host.origin}/robots.txt")
+    response = fetch_resource(robots_url(origin), run, host, fetcher)
     run.bytes_fetched += response.size
     if response.status in _REDIRECTS:
         raise NotInThisSlice(rule="FetchRobots")
-    adopted = adopt_robots_rules(run, host, response)
-    if adopted is None and allow_all_when_robots_absent(run, host, response) is None:
-        raise NotInThisSlice(rule="DenyAllWhenRobotsRefused")
+    adopted = adopt_robots_rules(run, host, response, origin=origin)
+    if adopted is not None:
+        if retires_host_on_long_crawl_delay(run, adopted):
+            raise NotInThisSlice(rule="RetireHostOnLongCrawlDelay")
+        return response
+    failed = deny_all_when_robots_refused(
+        run, host, response, origin=origin
+    ) or deny_all_when_robots_unreachable(run, host, response, origin=origin)
+    if failed is not None:
+        run.discovery_failures.append(failed)
+    else:
+        allow_all_when_robots_absent(run, host, response, origin=origin)
     return response
 
 
-def adopt_robots_rules(run: Run, host: Host, response: SiteResponse) -> RobotsPolicy | None:
-    """Realises crawl.allium AdoptRobotsRules (the host-rate effect deferred).
+def robots_url(origin: str) -> str:
+    """crawl.allium robots_url: the origin's /robots.txt."""
+    return f"{origin}/robots.txt"
 
-    The file is parsed with urllib.robotparser for the user agent rovo; pacing the host
-    by its Crawl-delay is the politeness slice's.
+
+def adopt_robots_rules(
+    run: Run, host: Host, response: SiteResponse, *, origin: str | None = None
+) -> RobotsPolicy | None:
+    """Realises crawl.allium AdoptRobotsRules; `origin` defaults to the host's.
+
+    The file is parsed with protego for the user agent rovo. A Crawl-delay past
+    retry_after_cap is never adopted (past_cap): the policy records none and the host is
+    unchanged. Otherwise, while Crawl-delay is honoured and the group declares one, the
+    host keeps the longest delay of its origins and, for a delay above zero, the lowest
+    rate: min(rate, 1 / delay).
     """
     if not response.ok:
         return None
-    rules = RobotFileParser()
-    rules.parse(response.markup.splitlines())
-    delay = rules.crawl_delay(USER_AGENT)
+    rules, declared = parse_robots(response.markup)
+    past_cap = robots_crawl_delay_exceeds(declared, run.policy.retry_after_cap)
+    delay = None if past_cap else robots_crawl_delay(declared)
     policy = RobotsPolicy(
         run=run,
-        origin=host.origin,
+        origin=host.origin if origin is None else origin,
         stance=RobotsStance.rules,
-        crawl_delay=None if delay is None else timedelta(seconds=float(delay)),
-        declared_sitemaps=tuple(rules.site_maps() or ()),
+        crawl_delay=delay,
+        declared_sitemaps=tuple(rules.sitemaps),
         problem=None,
         rules=rules,
+        declared_delay=declared,
     )
     run.robots_policies.append(policy)
+    if run.policy.honor_crawl_delay and delay is not None:
+        host.crawl_delay = max(host.crawl_delay, delay)
+        if host.rate is not None and delay > timedelta(0):
+            host.rate = min(host.rate, 1 / delay.total_seconds())
     return policy
 
 
+def parse_robots(markup: str) -> tuple[Protego, Decimal | None]:
+    """Parse robots.txt with protego, keeping the rovo group's Crawl-delay as written.
+
+    protego reads a Crawl-delay as a float, which turns '1e400' into no delay and
+    '120.000000000000001' into 120. So each Crawl-delay line's value is replaced by its
+    ordinal before protego reads the file and kept as an exact Decimal; protego still
+    chooses the group and the last valid directive in it, and its answer is mapped back.
+    A value that is not a finite, non-negative number in protego's (float's) grammar is
+    replaced by one protego drops; a number too large for Decimal is kept past every cap.
+    """
+    declared: list[Decimal] = []
+    lines: list[str] = []
+    for line in markup.splitlines():
+        value = _crawl_delay_value(line)
+        if value is None:
+            lines.append(line)
+            continue
+        number = _decimal_seconds(value)
+        if number is None:
+            lines.append("Crawl-delay: -")
+            continue
+        lines.append(f"Crawl-delay: {len(declared)}")
+        declared.append(number)
+    rules = Protego.parse("\n".join(lines))
+    ordinal = rules.crawl_delay(USER_AGENT)
+    return rules, None if ordinal is None else declared[int(ordinal)]
+
+
+def _crawl_delay_value(line: str) -> str | None:
+    """The value of a Crawl-delay directive line, read as protego reads directives.
+
+    A comment is cut and the line stripped; 'field: value' is a Crawl-delay when the
+    field is 'crawl-delay' or 'crawl delay', and a line whose colon does not separate a
+    known field is read as whitespace-separated words, as protego's parser does.
+    """
+    line = line.split("#", 1)[0].strip()
+    if ":" in line:
+        name, raw = line.split(":", 1)
+        if name.strip().lower() in {_CRAWL_DELAY, "crawl delay"}:
+            return raw.strip() or None
+        if not raw or raw[0].isspace():
+            return None
+    words = line.split()
+    lowered = [word.lower() for word in words[:2]]
+    if lowered[:1] == [_CRAWL_DELAY]:
+        return " ".join(words[1:]) or None
+    if lowered == ["crawl", "delay"]:
+        return " ".join(words[2:]) or None
+    return None
+
+
+def _decimal_seconds(value: str) -> Decimal | None:
+    """A Crawl-delay value as an exact number of seconds; null when it is not a number.
+
+    A number is what protego reads, Python's float grammar ('1_000' and surrounding
+    blanks included, '_121' or '1__21' not), so the value is checked with float() before
+    Decimal() reads it exactly. A finite number whose exponent is past Decimal's limit
+    is still a number: a positive one too large is kept past every cap, one too small
+    (or a zero) is 0. inf, nan and negative values are null.
+    """
+    try:
+        float(value)
+    except ValueError:
+        return None
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        return _beyond_decimal_range(value)
+    if not number.is_finite() or number < 0:
+        return None
+    return number
+
+
+def _beyond_decimal_range(value: str) -> Decimal | None:
+    """A float-grammar number Decimal cannot hold: its exponent is past Decimal's limit."""
+    mantissa, _, exponent = value.strip().lower().partition("e")
+    significand = Decimal(mantissa)
+    if significand < 0:
+        return None
+    if significand == 0 or exponent.lstrip().startswith("-"):
+        return Decimal(0)
+    return _PAST_EVERY_CAP
+
+
+def robots_crawl_delay(declared: Decimal | None) -> timedelta | None:
+    """crawl.allium robots_crawl_delay: the rovo group's Crawl-delay as decimal seconds.
+
+    Null when the group declares none or its value is not a number. Read only when
+    robots_crawl_delay_exceeds is false, so the number always fits a timedelta.
+    """
+    return None if declared is None else timedelta(seconds=float(declared))
+
+
+def robots_crawl_delay_exceeds(declared: Decimal | None, cap: timedelta) -> bool:
+    """crawl.allium robots_crawl_delay_exceeds: the rovo group's Crawl-delay is past `cap`.
+
+    The number is compared exactly as written, as a Decimal against the cap's seconds,
+    and never becomes a float or a timedelta: '1e400' and '120.000000000000001' are past
+    a 120-second cap rather than no delay, an overflow or a rounding to the cap, and so is
+    a number whose exponent is past Decimal's own limit ('1e1000000000000000000').
+    """
+    if declared is None:
+        return False
+    whole = Decimal(cap.days * _SECONDS_PER_DAY + cap.seconds)
+    return declared > whole + Decimal(cap.microseconds).scaleb(-_MICROSECONDS)
+
+
+def retires_host_on_long_crawl_delay(run: Run, adopted: RobotsPolicy) -> bool:
+    """Whether crawl.allium RetireHostOnLongCrawlDelay's guards hold for an adopted policy.
+
+    The robots.txt answered ok (AdoptRobotsRules created `adopted`), Crawl-delay is
+    honoured, and its Crawl-delay is past retry_after_cap. The trip itself is the breaker
+    slice's, so the caller stops there.
+    """
+    if adopted.rules is None or not run.policy.honor_crawl_delay:
+        return False
+    return robots_crawl_delay_exceeds(adopted.declared_delay, run.policy.retry_after_cap)
+
+
 def allow_all_when_robots_absent(
-    run: Run, host: Host, response: SiteResponse
+    run: Run, host: Host, response: SiteResponse, *, origin: str | None = None
 ) -> RobotsPolicy | None:
-    """Realises crawl.allium AllowAllWhenRobotsAbsent."""
+    """Realises crawl.allium AllowAllWhenRobotsAbsent; `origin` defaults to the host's."""
     if response.ok or response.error is not None:
         return None
     if response.access_refused or response.server_error:
         return None
     policy = RobotsPolicy(
         run=run,
-        origin=host.origin,
+        origin=host.origin if origin is None else origin,
         stance=RobotsStance.allow_all,
         crawl_delay=None,
         declared_sitemaps=(),
@@ -332,21 +499,57 @@ def allow_all_when_robots_absent(
     return policy
 
 
-def robots_allows(run: Run, url: str) -> bool:
-    """crawl.allium robots_allows, for the user agent rovo.
+def deny_all_when_robots_refused(
+    run: Run, host: Host, response: SiteResponse, *, origin: str | None = None
+) -> DiscoveryFailed | None:
+    """Realises crawl.allium DenyAllWhenRobotsRefused; `origin` defaults to the host's."""
+    if response.ok or not (response.access_refused or response.server_error):
+        return None
+    where = host.origin if origin is None else origin
+    return _deny_all(run, where, DiscoveryProblem.robots_refused)
 
-    True under robots = ignore and for a host whose stance is allow_all, false under
-    disallow_all or before the host's robots.txt is known, else the parsed rules' answer.
+
+def deny_all_when_robots_unreachable(
+    run: Run, host: Host, response: SiteResponse, *, origin: str | None = None
+) -> DiscoveryFailed | None:
+    """Realises crawl.allium DenyAllWhenRobotsUnreachable; `origin` defaults to the host's."""
+    if response.ok or response.error is None:
+        return None
+    where = host.origin if origin is None else origin
+    return _deny_all(run, where, DiscoveryProblem.robots_unreachable)
+
+
+def _deny_all(run: Run, origin: str, problem: DiscoveryProblem) -> DiscoveryFailed:
+    """A disallow_all policy for the origin, and the DiscoveryFailed naming its robots.txt."""
+    run.robots_policies.append(
+        RobotsPolicy(
+            run=run,
+            origin=origin,
+            stance=RobotsStance.disallow_all,
+            crawl_delay=None,
+            declared_sitemaps=(),
+            problem=problem,
+        )
+    )
+    return DiscoveryFailed(run=run, url=robots_url(origin), problem=problem)
+
+
+def robots_allows(run: Run, url: str) -> bool:
+    """crawl.allium robots_allows, for the user agent rovo, by the URL's own origin.
+
+    True under robots = ignore and for an origin whose stance is allow_all, false under
+    disallow_all or before the origin's robots.txt is known, else the parsed rules'
+    answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
+    literal-$ copy included (crawl.allium 963 to 1003).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True
-    host = run.host(hostname_of(url))
-    policy = None if host is None else run.robots_policy(host.origin)
+    policy = run.robots_policy(origin_of(url))
     if policy is None or policy.stance is RobotsStance.disallow_all:
         return False
     if policy.rules is None:
         return policy.stance is RobotsStance.allow_all
-    return policy.rules.can_fetch(USER_AGENT, url)
+    return policy.rules.can_fetch(url, USER_AGENT)
 
 
 def enqueue(  # noqa: PLR0913  The UrlDiscovered trigger's parameters.
@@ -491,7 +694,7 @@ def skip_robots_disallowed(run: Run | None, entry: FrontierEntry) -> bool:
     host = _entry_host(run, entry)
     if run is None or host is None or host.breaker_tripped:
         return False
-    if robots_allows(run, entry.identity):
+    if robots_allows(run, entry.identity) or not _origin_read(run, entry):
         return False
     entry.status = FrontierStatus.skipped_robots
     return True
@@ -510,7 +713,19 @@ def proceed_with_known_host(run: Run | None, entry: FrontierEntry) -> bool:
     host = _entry_host(run, entry)
     if run is None or host is None or host.breaker_tripped:
         return False
-    return robots_allows(run, entry.identity)
+    return robots_allows(run, entry.identity) and _origin_read(run, entry)
+
+
+def read_robots_for_new_origin(run: Run | None, entry: FrontierEntry, fetcher: Fetcher) -> bool:
+    """Realises crawl.allium ReadRobotsForNewOrigin: True when it raised EntryHostReady.
+
+    A row on a known host at an origin whose robots.txt is unread reads it first.
+    """
+    host = _entry_host(run, entry)
+    if run is None or host is None or host.breaker_tripped or _origin_read(run, entry):
+        return False
+    fetch_robots(run, host.name, origin_of(entry.identity), fetcher)
+    return True
 
 
 def skip_robots_disallowed_on_new_host(run: Run, entry: FrontierEntry) -> bool:
@@ -564,11 +779,12 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
         return None
     if tier is not Tier.http:
         raise NotInThisSlice(rule="AttemptTier")
+    host = walk.host
+    wait_turn(host)
     response = fetcher.fetch(walk.entry.identity, validators=_validators(walk))
     if try_ > 1 or tier is not walk.tiers[0]:
         run.fetch_attempts += 1
     run.bytes_fetched += response.size
-    host = walk.host
     verdict = classify_block(response, host.median_text if host.has_text_baseline else None)
     unblocked = response.ok and verdict.kind is BlockKind.none
     attempt = FetchAttempt(
@@ -580,6 +796,11 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
         render_reason=render_reason_of(response) if unblocked else None,
     )
     walk.attempts.append(attempt)
+    count_retry_after(attempt)
+    survived = not attempt.retryable and not attempt.retires_host
+    if response.status == _TOO_MANY_REQUESTS and survived:
+        # classify_block: a 429 that survived its retries is a hard verdict.
+        raise NotInThisSlice(rule="classify_block")
     return attempt
 
 
@@ -591,6 +812,36 @@ def prepare_attempt(attempt: FetchAttempt) -> bool:
     """
     walk = attempt.walk
     return walk.status is WalkStatus.walking and walk.host.run.status is RunStatus.running
+
+
+def http_retry(attempt: FetchAttempt, fetcher: Fetcher) -> HostBackedOff | None:
+    """Realises crawl.allium HttpRetry, then its TierRequested: the HostBackedOff it raised.
+
+    The host is paused until now + retry_wait, never shortening a pause it had, and the
+    next http try waits that pause out at the limiter; the rate is never raised.
+    """
+    walk = attempt.walk
+    if not attempt.retryable:
+        return None
+    if walk.status is not WalkStatus.walking or walk.host.run.status is not RunStatus.running:
+        return None
+    backed_off = back_off(walk.host, attempt.try_, attempt.response.retry_after)
+    attempt_tier(walk, Tier.http, attempt.try_ + 1, fetcher)
+    return backed_off
+
+
+def count_retry_after(attempt: FetchAttempt) -> bool:
+    """Realises crawl.allium CountRetryAfter: True when it counted the Retry-After."""
+    host = attempt.walk.host
+    response = attempt.response
+    if host.run.status is not RunStatus.running or attempt.tier is not Tier.http:
+        return False
+    if response.retry_after is None or not response.may_carry_retry_after:
+        return False
+    if not host.run.policy.honor_retry_after:
+        return False
+    host.retry_after_honored += 1
+    return True
 
 
 def settle_walk(attempt: FetchAttempt) -> bool:
@@ -613,28 +864,75 @@ def settle_walk(attempt: FetchAttempt) -> bool:
     return True
 
 
+def feed_breaker(walk: LadderWalk) -> bool:
+    """Realises crawl.allium FeedBreaker: True when it fed the host's breaker.
+
+    One outcome per settled walk, counted when the standing attempt was a hard block, a
+    challenge or failed outright; an ok, unblocked page with main text joins the host's
+    text history. Both lists keep only their last config-sized run.
+    """
+    host = walk.host
+    breaker = host.breaker
+    standing = walk.standing
+    if walk.status is not WalkStatus.settled or standing is None:
+        return False
+    if breaker is None or breaker.status is not BreakerStatus.watching:
+        return False
+    if not host.run.policy.breaker_enabled:
+        return False
+    counted = standing.verdict.counts_against_host or standing.failed_outright
+    breaker.outcomes = [*breaker.outcomes, counted][-CONFIG.breaker_window :]
+    breaker.since_escalation += 1
+    response = standing.response
+    if response.ok and standing.verdict.kind is BlockKind.none and response.main_text > 0:
+        lengths = [*host.recent_text_lengths, response.main_text]
+        host.recent_text_lengths = lengths[-CONFIG.host_text_history :]
+    return True
+
+
 # --- What a settled fetch becomes ---------------------------------------------------
 
 
-def dispose_fetch(walk: LadderWalk) -> bool:
-    """Realises crawl.allium DisposeFetch, the ok-HTML branch: True when PageFetched.
+def dispose_fetch(walk: LadderWalk) -> EntryFailed | bool:
+    """Realises crawl.allium DisposeFetch, in its branch order: what the settled fetch is.
 
-    An ok, unblocked HTML answer with no redirect for a URL with no known page counts as
-    fetched for its host and raises PageFetched. Every other branch is a later slice's.
+    The EntryFailed for a walk that failed outright (its error) or for an answer that is
+    not ok (its status text); True when an ok, unblocked HTML answer with no redirect for
+    a URL with no known page counts as fetched and raises PageFetched; False when the
+    guards do not hold. Every other branch is a later slice's.
     """
     attempt = walk.standing
     if walk.status is not WalkStatus.settled or attempt is None:
         return False
-    if walk.entry.status is not FrontierStatus.in_progress:
+    entry = walk.entry
+    if entry.status is not FrontierStatus.in_progress:
         return False
+    run = walk.host.run
     response = attempt.response
-    known = walk.host.run.target.known_page(walk.entry.identity)
+    known = run.target.known_page(entry.identity)
+    if attempt.failed_outright:
+        error = response.error or "no response"
+        return EntryFailed(run=run, entry=entry, error=error, attempts=attempt.try_)
+    # The branches between failed_outright and not response.ok, in their order.
+    earlier_branch = (
+        (response.not_modified and known is not None)
+        or response.absent
+        or attempt.verdict.counts_against_host
+        or (response.redirected_out and known is not None)
+        or response.unfollowed_redirect
+    )
+    # fetch_or_render follows a redirect or returns it as redirect_location, so no raw
+    # 3xx but a 304 reaches the not-ok branch; following redirects is a later slice's.
+    if not earlier_branch and response.status in _REDIRECTS and not response.not_modified:
+        raise NotInThisSlice(rule="DisposeFetch")
+    if not earlier_branch and not response.ok:
+        return EntryFailed(
+            run=run, entry=entry, error=status_text(response), attempts=attempt.try_
+        )
     if (
-        attempt.failed_outright
-        or not response.ok
+        earlier_branch
         or attempt.verdict.kind is not BlockKind.none
         or response.redirect_hops
-        or response.unfollowed_redirect
         or not response.is_html
         or known is not None
     ):
@@ -745,6 +1043,14 @@ def end_run(run: Run, clock: Clock) -> bool:
 # --- Black boxes ----------------------------------------------------------------------
 
 
+def status_text(response: SiteResponse) -> str:
+    """crawl.allium status_text: the status code and its reason phrase."""
+    try:
+        return f"{response.status} {HTTPStatus(response.status).phrase}"
+    except ValueError:
+        return f"HTTP status {response.status}"
+
+
 def classify_block(response: SiteResponse, median_text: float | None) -> BlockVerdict:
     """crawl.allium classify_block: none for an ok HTML answer in this slice.
 
@@ -797,7 +1103,7 @@ def render_reason_of(response: SiteResponse) -> RenderReason | None:
 
 
 def run_crawl(
-    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Clock
+    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Timer
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, then save the frontier and the run."""
     result = drive_run(request, persisted, fetcher, clock)
@@ -806,7 +1112,7 @@ def run_crawl(
 
 
 def drive_run(
-    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Clock
+    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Timer
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, saving nothing.
 
@@ -833,7 +1139,13 @@ def drive_run(
         failed.extend(url_failed for url_failed in handled if url_failed is not None)
     finish_run(run, frontier)
     end_run(run, clock)
-    return CrawlResult(run=run, frontier=frontier, failed=tuple(failed))
+    return CrawlResult(
+        run=run,
+        frontier=frontier,
+        failed=tuple(failed),
+        discovery_failed=tuple(run.discovery_failures),
+        backed_off=tuple(run.backoffs),
+    )
 
 
 def save_run(result: CrawlResult) -> None:
@@ -845,11 +1157,11 @@ def save_run(result: CrawlResult) -> None:
 def _handle_entry(
     run: Run, frontier: Frontier, entry: FrontierEntry, fetcher: Fetcher, clock: Clock
 ) -> UrlFailed | None:
-    """One row in progress: its host, robots, the walk, disposal, conversion, storage.
+    """One row in progress: its host and origin, robots, the walk, disposal, storage.
 
-    UrlFailed when the mirror discarded the candidate and the entry failed, else None.
+    UrlFailed when the entry failed (its fetch, or the mirror discarded it), else None.
     """
-    if open_host_for_entry(run, entry, fetcher):
+    if open_host_for_entry(run, entry, fetcher) or read_robots_for_new_origin(run, entry, fetcher):
         if skip_robots_disallowed_on_new_host(run, entry):
             return None
     elif skip_robots_disallowed(run, entry) or not proceed_with_known_host(run, entry):
@@ -857,16 +1169,32 @@ def _handle_entry(
     walk = fetch_entry(run, entry, fetcher)
     if walk is None:  # EntryHostReady was raised, so FetchEntry's guards hold.
         return None
+    _settle(walk, fetcher)
+    disposed = dispose_fetch(walk)
+    if isinstance(disposed, EntryFailed):
+        return entry_fails(disposed)
+    return _store(run, frontier, walk, clock)
+
+
+def _settle(walk: LadderWalk, fetcher: Fetcher) -> None:
+    """The walk's tries to settlement: each attempt ready, retried while it may be.
+
+    HttpRetry while the attempt is retryable, then SettleWalk and FeedBreaker; the
+    breaker acting, a host retired and an escalation are later slices' branches.
+    """
     attempt = walk.attempts[-1]
-    prepare_attempt(attempt)
-    if attempt.retires_host:
-        raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
-    if attempt.retryable:
-        raise NotInThisSlice(rule="HttpRetry")
+    while True:
+        prepare_attempt(attempt)
+        if attempt.retires_host:
+            raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
+        if http_retry(attempt, fetcher) is None:
+            break
+        attempt = walk.attempts[-1]
     if not settle_walk(attempt):
         raise NotInThisSlice(rule="Escalate")
-    dispose_fetch(walk)
-    return _store(run, frontier, walk, clock)
+    feed_breaker(walk)
+    if walk.host.breaker is not None and walk.host.breaker.should_act:
+        raise NotInThisSlice(rule="BreakerTrips")
 
 
 def _store(run: Run, frontier: Frontier, walk: LadderWalk, clock: Clock) -> UrlFailed | None:
@@ -1066,6 +1394,11 @@ def _choose_batch(
             chosen.append(row)
             budget -= 1
     return chosen
+
+
+def _origin_read(run: Run, entry: FrontierEntry) -> bool:
+    """RobotsPolicy{run: run, origin: origin_of(entry.identity)} exists."""
+    return run.robots_policy(origin_of(entry.identity)) is not None
 
 
 def _entry_host(run: Run | None, entry: FrontierEntry) -> Host | None:

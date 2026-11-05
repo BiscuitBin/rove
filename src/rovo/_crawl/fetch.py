@@ -6,13 +6,15 @@ decides what it means. A transport error is an answer with status 0 and the erro
 
 import importlib.metadata
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from types import TracebackType
 from typing import Protocol, Self
 
 import httpx
 
 from rovo._crawl.model import CONFIG, SiteResponse
+from rovo._mirror.state import Clock, SystemClock
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -34,8 +36,14 @@ class Fetcher(Protocol):
 class HttpxFetcher:
     """The real fetcher: one httpx.Client per run, closed when the run ends."""
 
-    def __init__(self, *, transport: httpx.BaseTransport | None = None) -> None:
-        """Open the client; `transport` replaces the network in tests."""
+    def __init__(
+        self, *, transport: httpx.BaseTransport | None = None, clock: Clock | None = None
+    ) -> None:
+        """Open the client; `transport` replaces the network in tests.
+
+        `clock` dates a Retry-After given as an HTTP date when the answer has no Date.
+        """
+        self._clock = clock or SystemClock()
         self._client = httpx.Client(
             transport=transport,
             timeout=httpx.Timeout(CONFIG.fetch_timeout.total_seconds()),
@@ -66,10 +74,30 @@ class HttpxFetcher:
             markup=response.text,
             size=len(response.content),
             content_type=response.headers.get("content-type"),
-            retry_after=_retry_after(response.headers.get("retry-after")),
+            retry_after=self._retry_after(response.headers),
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
         )
+
+    def _retry_after(self, headers: httpx.Headers) -> timedelta | None:
+        """The answer's Retry-After, in seconds or as an HTTP date, as a duration.
+
+        A date is measured from the answer's Date header, else from the fetcher's clock;
+        a date already past is zero, and an unreadable value is no Retry-After. A number
+        of seconds too large for a duration is the longest duration, still past
+        retry_after_cap, so it retires the host as any long Retry-After does.
+        """
+        value = headers.get("retry-after")
+        if value is None:
+            return None
+        text = value.strip()
+        if text.isascii() and text.isdigit():
+            return _whole_seconds(text)
+        until = _http_date(text)
+        if until is None:
+            return None
+        sent = _http_date(headers.get("date", "")) or self._clock.now()
+        return max(timedelta(0), until - sent)
 
     @property
     def is_closed(self) -> bool:
@@ -94,8 +122,25 @@ class HttpxFetcher:
         self.close()
 
 
-def _retry_after(value: str | None) -> timedelta | None:
-    """A Retry-After given in seconds; an HTTP date is left to the politeness slice."""
-    if value is None or not value.strip().isdigit():
+_LONGEST_SECONDS = timedelta.max // timedelta(seconds=1)
+
+
+def _whole_seconds(digits: str) -> timedelta:
+    """A run of ASCII digits as seconds, the longest duration when it holds no more.
+
+    The digits are measured before they are read, so no number past the longest
+    duration is ever built, however many digits the header carries.
+    """
+    significant = digits.lstrip("0") or "0"
+    if len(significant) > len(str(_LONGEST_SECONDS)) or int(significant) > _LONGEST_SECONDS:
+        return timedelta.max
+    return timedelta(seconds=int(significant))
+
+
+def _http_date(text: str) -> datetime | None:
+    """An HTTP date as a timezone-aware datetime, None when it is not one."""
+    try:
+        moment = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
         return None
-    return timedelta(seconds=int(value.strip()))
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)

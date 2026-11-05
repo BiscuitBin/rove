@@ -49,7 +49,7 @@ under `rovo._convert` imports `rovo._mirror`, `rovo._crawl` or `rovo.cli`; nothi
 `rovo.cli`, `rovo._config`, `rovo._report` or `rovo._commands`; `_config` and `_report`
 import neither `_commands` nor `rovo.cli`; `rovo._unfinished` imports no rovo module;
 `src/rovo/__init__.py` imports no private module, not `rovo.cli`, and nothing whose first
-component is `httpx`, `bs4`, `lxml`, `markdownify`, `playwright` or `typer`; and no
+component is `httpx`, `bs4`, `lxml`, `markdownify`, `playwright`, `protego` or `typer`; and no
 statement of `cli.py` that runs on import (inside `if`, `try`, `with`, a loop or a class
 body included; a function body or an `if TYPE_CHECKING:` body excluded) imports a
 private module or a dependency. A further test requires the scan to have found the root
@@ -83,8 +83,15 @@ weed or review found, `tests/test_slice_boundaries.py` the points where a slice 
 with `NotInThisSlice`.
 
 `tests/fakes.py` holds the seams' doubles: `FakeFetcher`, a URL-to-`SiteResponse` map
-that records every request and answers 404 for any other URL, `FixedClock`, a clock that
-stands still, and `html_response` and `text_response` to build answers. No test sleeps
+that records every request and answers 404 for any other URL; `ScriptedFetcher`, which
+answers a scripted URL from a sequence of answers, one per request, before its map;
+`StampingFetcher`, which wraps any fetcher and records `(url, timer.now())` per request;
+`FixedClock`, a clock that stands still and records each `sleep` without moving;
+`SteppingTimer`, a timer whose time moves only when it sleeps, by exactly that much, so
+the gap between two stamps is the wait the limiter chose; and `html_response` and
+`text_response` to build answers. `tests/test_pace.py` tests the pacing on unit inputs:
+the limiter's spacing, `retry_wait`, robots matching and the robots.txt retries, and the
+real `SystemTimer` only with `time.sleep` and `time.monotonic` replaced. No test sleeps
 or reaches the network.
 
 ## The wheel smoke
@@ -95,7 +102,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the twenty-five package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-six package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -111,7 +118,12 @@ serves `tests/fixtures/sites/basic/` with the standard library's `ThreadingHTTPS
 and `SimpleHTTPRequestHandler`, request logging silenced, bound to an ephemeral port on
 `127.0.0.1` in a background thread, and returns the base URL
 (`http://127.0.0.1:<port>/`); given a `Path`, it serves that directory instead, such as
-a templated copy in `tmp_path`. When the test ends, every server it started is shut down
+a templated copy in `tmp_path`. A path may be scripted: `script` answers its requests
+from a list of `Answer`s (a status, headers and a body), one per request, before the
+file; `always` answers every request to it the same way once the script is used up; and
+`DROP` closes the connection without a response. Every request is logged, and
+`serve_site.log(base)` gives each path with its `time.monotonic()` arrival, in order.
+When the test ends, every server it started is shut down
 and closed, and its threads are joined (the server joins its request threads too), so
 `filterwarnings = error` sees no unclosed socket. Nothing reaches the network.
 
@@ -121,7 +133,10 @@ single `index.html`, `one-page` a single documentation page at `guide/start.html
 is a small linked site (a seed, pages one and two links deep, a robots-disallowed page
 and a page off the path prefix), and `cross-target` with `cross-host` are two sites whose
 pages link across servers; `cross-host` holds the placeholder `@TARGET_BASE@`, which the
-test replaces with the other server's base URL.
+test replaces with the other server's base URL. `polite` is a seed, two pages, a page
+the scripted tests make flaky and a page under a path its `robots.txt` disallows, with a
+`Crawl-delay`; `tests/e2e/test_polite_sync.py` syncs it to check robots.txt, pacing,
+retries and the partial exit.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

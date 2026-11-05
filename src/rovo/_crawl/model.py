@@ -7,12 +7,19 @@ by value. A relationship the specification declares is a list on the owning enti
 import enum
 import hashlib
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from urllib.robotparser import RobotFileParser
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from protego import Protego
 
 from rovo._mirror.model import Mirror, Operator, Tier
 from rovo._mirror.urls import hostname_of
+
+if TYPE_CHECKING:
+    from rovo._crawl.pace import Timer
 
 _OK = range(200, 300)
 _NOT_MODIFIED = 304
@@ -198,7 +205,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 534 to 579), the one copy in code.
+# crawl.allium's config block (crawl.allium 539 to 584), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -486,6 +493,13 @@ class Run:
     finished_at: datetime | None = None
     hosts: list["Host"] = field(default_factory=list)
     robots_policies: list["RobotsPolicy"] = field(default_factory=list)
+    # Implementation state, not specification fields: the timer the run paces on, the
+    # jitter draw retry_wait scales a backoff by (a factor in [low, high]), and the
+    # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns.
+    timer: "Timer" = field(repr=False)
+    draw: Callable[[float, float], float] = field(repr=False)
+    discovery_failures: list["DiscoveryFailed"] = field(default_factory=list, repr=False)
+    backoffs: list["HostBackedOff"] = field(default_factory=list, repr=False)
 
     @property
     def tripped_hosts(self) -> list["Host"]:
@@ -556,6 +570,32 @@ class Breaker:
     since_escalation: int
     status: BreakerStatus
 
+    @property
+    def block_rate(self) -> float:
+        """blocked_share(outcomes): the share of outcomes counted as a block, 0 when none."""
+        return sum(self.outcomes) / len(self.outcomes) if self.outcomes else 0.0
+
+    @property
+    def over_threshold(self) -> bool:
+        """Enough outcomes, and a block rate past block_rate_threshold."""
+        return (
+            len(self.outcomes) >= min(CONFIG.breaker_window, CONFIG.breaker_min_outcomes)
+            and self.block_rate > CONFIG.block_rate_threshold
+        )
+
+    @property
+    def should_act(self) -> bool:
+        """Watching, over the threshold, and not waiting out an escalation."""
+        return (
+            self.status is BreakerStatus.watching
+            and self.over_threshold
+            and (
+                self.tier is not self.highest_tier
+                or self.escalations == 0
+                or self.since_escalation >= CONFIG.breaker_window
+            )
+        )
+
 
 @dataclass(kw_only=True, eq=False)
 class Host:
@@ -576,6 +616,9 @@ class Host:
     sitemap_children_read: int
     sitemap_entries_admitted: int
     breaker: Breaker | None = None
+    # Implementation state beside paused_until: when the last request to the host name
+    # started, from which the limiter spaces the next one (crawl.allium AttemptTier).
+    last_started: datetime | None = field(default=None, repr=False)
 
     @property
     def median_text(self) -> float:
@@ -610,7 +653,10 @@ class RobotsPolicy:
     crawl_delay: timedelta | None
     declared_sitemaps: tuple[str, ...]
     problem: DiscoveryProblem | None
-    rules: RobotFileParser | None = field(default=None, repr=False)
+    rules: Protego | None = field(default=None, repr=False)
+    # The rovo group's Crawl-delay as written, an exact decimal number of seconds:
+    # implementation state for robots_crawl_delay_exceeds, which never builds a Duration.
+    declared_delay: Decimal | None = field(default=None, repr=False)
 
 
 @dataclass(kw_only=True, eq=False)
@@ -643,6 +689,13 @@ class FetchAttempt:
     response: SiteResponse
     verdict: BlockVerdict
     render_reason: RenderReason | None
+    # OwnerChallenge rows exist only in an owner-testing run (a later slice), so none here.
+    challenges: list[object] = field(default_factory=list, repr=False)
+
+    @property
+    def unsuccessful_challenge(self) -> bool:
+        """A challenge of this attempt was abandoned or timed out; none is offered yet."""
+        return False
 
     @property
     def retires_host(self) -> bool:
@@ -674,7 +727,6 @@ class FetchAttempt:
     @property
     def wants_escalation(self) -> bool:
         """The attempt asks for the next tier."""
-        # No challenge exists in a standard run, so none was unsuccessful.
         return (
             (self.render_reason is not None or self.verdict.kind is not BlockKind.none)
             and (
@@ -683,6 +735,7 @@ class FetchAttempt:
             )
             and not (self.response.ok and not self.response.is_html)
             and not self.response.not_modified
+            and not self.unsuccessful_challenge
         )
 
 
@@ -707,8 +760,25 @@ class UrlFailed:
 
 
 @dataclass(frozen=True, kw_only=True)
+class DiscoveryFailed:
+    """The DiscoveryFailed trigger (crawl.allium DenyAllWhenRobotsRefused and its kin)."""
+
+    run: Run
+    url: str
+    problem: DiscoveryProblem
+
+
+@dataclass(frozen=True, kw_only=True)
+class HostBackedOff:
+    """The HostBackedOff trigger (crawl.allium HttpRetry)."""
+
+    host: Host
+    until: datetime
+
+
+@dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 1843)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2000)."""
 
     operator: Operator
     mirror: Mirror

@@ -10,14 +10,24 @@ no report too (the ticket's Deviation row).
 import importlib.metadata
 import json
 import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from fakes import FakeFetcher, FixedClock, fixture_site, html_response, text_response
+from fakes import (
+    START,
+    FakeFetcher,
+    FixedClock,
+    SteppingTimer,
+    fixture_site,
+    html_response,
+    text_response,
+)
 from rovo import _commands
 from rovo._config import initial_scope, resolve_config, scope_of, signature_of
 from rovo._convert import profiles
+from rovo._crawl.model import CONFIG as CRAWL
 from rovo._mirror.finalise import request_pass
 from rovo._mirror.indexes import index_pass
 from rovo._mirror.model import IndexesWritten, Operator, PassKind, Tier
@@ -532,3 +542,50 @@ def test_rule_failure_FinishIndexCommand_1(tmp_path: Path) -> None:
     data = report(out_dir)
     assert data["exit_code"] == "ok"
     assert data["converted"] == len(INDEX_PAGES)
+
+
+# --- sync paces on its timer and reports what failed (T12) ------------------------------
+
+
+def test_sync_paces_on_its_timer_and_tallies_discovery_problems(tmp_path: Path) -> None:
+    """Sync takes a Timer: a refused robots.txt's retries wait on it, never for real.
+
+    Its DiscoveryFailed is tallied before CloseRun: crawl-report.json lists the robots
+    URL, the exit is partial, and the report's finish is later than its start by exactly
+    the waits the timer was asked for.
+    """
+    out = initialised(tmp_path / "out")
+    fetcher = FakeFetcher(
+        {ROBOTS: text_response(ROBOTS, "", status=503), SEED: html_response(SEED, PAGE)}
+    )
+    timer = SteppingTimer()
+    code = _commands.sync(out, fetcher=fetcher, clock=timer, tier_installed=never_installed)
+    assert code is ExitCode.partial
+    assert fetcher.requests == [ROBOTS] * CRAWL.http_attempts
+    waits = [seconds for seconds in timer.sleeps if seconds > 0]
+    assert len(waits) == CRAWL.http_attempts - 1
+    report = json.loads(report_path(out).read_text(encoding="utf-8"))
+    assert report["exit_code"] == "partial"
+    assert report["discovery_problems"] == [{"url": ROBOTS, "problem": "robots_refused"}]
+    assert report["unresolved_urls"] == [SEED]
+    started = datetime.fromisoformat(report["started_at"])
+    finished = datetime.fromisoformat(report["finished_at"])
+    assert started == START
+    assert finished == timer.instant
+    assert finished - started == sum((timedelta(seconds=s) for s in timer.sleeps), timedelta(0))
+
+
+def test_sync_tallies_a_failed_url_before_close_run(tmp_path: Path) -> None:
+    """A seed that answers 503 on every try is a failed_urls row and a failed change."""
+    out = initialised(tmp_path / "out")
+    fetcher = FakeFetcher({SEED: html_response(SEED, "", status=503)})
+    assert synced(out, fetcher) is ExitCode.partial
+    assert fetcher.requests.count(SEED) == CRAWL.http_attempts
+    report = json.loads(report_path(out).read_text(encoding="utf-8"))
+    assert report["exit_code"] == "partial"
+    (row,) = report["failed_urls"]
+    assert row["url"] == SEED
+    assert row["attempts"] == CRAWL.http_attempts
+    assert row["error"]
+    assert report["changes"] == [{"kind": "failed", "url": SEED, "path": None, "moved_from": None}]
+    assert report["fetched"] == CRAWL.http_attempts

@@ -1,14 +1,25 @@
-"""Test doubles for the seams: a Fetcher that answers from a map, a Clock that stands still.
+"""Test doubles for the seams: Fetchers that answer from a map or a script, and timers.
 
 `FakeFetcher` records every request in order, so a test can prove what was fetched and
 when; a URL it has no answer for comes back 404, as the fixture server would answer.
+`ScriptedFetcher` answers a URL from its script first, one answer per request, then from
+the map: an answer that must hold every time goes in the map, a sequence in the script.
+`StampingFetcher` wraps any fetcher and stamps each request with its timer's time.
+
+`FixedClock` and `SteppingTimer` both satisfy the crawl's Timer seam (`now()` and
+`sleep(seconds)`) and both record every sleep they are asked for; neither sleeps for
+real. `FixedClock` never advances, so a test's timestamps stay where they were;
+`SteppingTimer` advances by exactly what each sleep asks, so gaps between stamps are the
+waits the limiter chose.
 """
 
-from collections.abc import Mapping
-from datetime import UTC, datetime
+import itertools
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
-from rovo._crawl.fetch import Validators
+from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import SiteResponse
 
 # The instant every FixedClock reads unless told otherwise: timezone-aware UTC.
@@ -79,13 +90,94 @@ class FakeFetcher:
         return self.responses.get(url, not_found(url))
 
 
+class ScriptedFetcher(FakeFetcher):
+    """A FakeFetcher that answers each scripted URL from its script before its map.
+
+    Each request to a URL takes the next unused answer of its script; once the script is
+    used up, the URL is answered from `responses`, else 404, as FakeFetcher answers.
+    """
+
+    def __init__(
+        self,
+        responses: Mapping[str, SiteResponse],
+        scripts: Mapping[str, Sequence[SiteResponse]] | None = None,
+    ) -> None:
+        """Answer from `scripts` first, one answer per request, then from `responses`."""
+        super().__init__(responses)
+        self.scripts = {url: list(answers) for url, answers in (scripts or {}).items()}
+
+    def fetch(self, url: str, *, validators: Validators | None = None) -> SiteResponse:
+        """Record the request; the next scripted answer, else the mapped one, else a 404."""
+        script = self.scripts.get(url)
+        if not script:
+            return super().fetch(url, validators=validators)
+        self.requests.append(url)
+        self.validators.append(validators)
+        return script.pop(0)
+
+    def count(self, url: str) -> int:
+        """How many times `url` was requested."""
+        return self.requests.count(url)
+
+
+class Stamping(Protocol):
+    """What StampingFetcher reads the time from."""
+
+    def now(self) -> datetime:
+        """The current time, UTC."""
+        ...
+
+
+class StampingFetcher:
+    """Wraps a Fetcher and records `(url, timer.now())` before each request it passes on."""
+
+    def __init__(self, fetcher: Fetcher, timer: Stamping) -> None:
+        """Stamp each request to `fetcher` with `timer`'s time."""
+        self.fetcher = fetcher
+        self.timer = timer
+        self.stamps: list[tuple[str, datetime]] = []
+
+    def fetch(self, url: str, *, validators: Validators | None = None) -> SiteResponse:
+        """Stamp the request, then pass it on."""
+        self.stamps.append((url, self.timer.now()))
+        return self.fetcher.fetch(url, validators=validators)
+
+
 class FixedClock:
-    """A clock that reads the same instant every time."""
+    """A clock that reads the same instant every time; a sleep is recorded, never taken."""
 
     def __init__(self, now: datetime = START) -> None:
         """Stand still at `now`."""
         self.instant = now
+        self.sleeps: list[float] = []
 
     def now(self) -> datetime:
         """The fixed instant."""
         return self.instant
+
+    def sleep(self, seconds: float) -> None:
+        """Record the requested seconds; the instant does not move."""
+        self.sleeps.append(seconds)
+
+
+class SteppingTimer:
+    """A timer whose time moves only when it is asked to sleep, by exactly that much."""
+
+    def __init__(self, now: datetime = START) -> None:
+        """Start at `now`."""
+        self.instant = now
+        self.sleeps: list[float] = []
+
+    def now(self) -> datetime:
+        """The current instant."""
+        return self.instant
+
+    def sleep(self, seconds: float) -> None:
+        """Record the requested seconds and advance by them."""
+        self.sleeps.append(seconds)
+        self.instant += timedelta(seconds=seconds)
+
+
+def gaps(stamps: Sequence[tuple[str, datetime]]) -> list[timedelta]:
+    """The time between each stamp and the one before it, in order."""
+    return [later[1] - earlier[1] for earlier, later in itertools.pairwise(stamps)]

@@ -93,6 +93,34 @@ mirror has no free path for is refused: its URL is reported as failed with the e
 `no free path` and the sync exits 1 (the [mirror reference](mirror.md#page-files) says
 when that happens).
 
+`rovo sync` is polite to the site. It reads each origin's `/robots.txt` (scheme, host
+and port, as RFC 9309 scopes it) before anything else there, a second port of a host
+included, and judges every URL by its own origin's file with RFC 9309 matching as
+`protego` 0.7 implements it: the longest matching path wins, `Allow` wins a tie, `*`
+matches any run of characters and a final `$` anchors the end of the path. Two
+consequences of that matcher differ from literal RFC 9309. An `Allow` path ending in
+`/index.html` (no final `$`) also allows its directory, so `/private/` is allowed under
+`Disallow: /private/` and `Allow: /private/index.html`. A line whose path ends in `$`
+also matches as a prefix with that `$` read as `%24`, so under `Disallow: /private/`,
+`Allow: /private/$` allows `/private/$secret` (and `/private/%24secret`) as well as
+`/private/`, and `Disallow: /x$` disallows `/x$y` as well as `/x`. A
+robots.txt that answers 401, 403, 429 or 5xx is refused, and one that never answers is
+unreachable: either disallows that whole origin, is listed under `discovery_problems`
+in `crawl-report.json` and makes the sync exit 1; a missing robots.txt (404) allows
+everything. Requests to one host name are spaced, with no burst, by at least
+`1 / rate_per_host` (2 per second) and by the longest `Crawl-delay` any of its origins
+declares for `rovo`, read as decimal seconds; `Crawl-delay: 0` adds no delay, and one
+past `retry_after_cap` (120 s), however large, is never adopted. A
+transport error, a 429 or a 5xx is retried, robots.txt included, up to `http_attempts`
+(5) tries in all, waiting `backoff_base * 2^(try - 1)` capped at `max_backoff` (1 s
+doubling to 16 s), with 25% jitter either way, and at least the `Retry-After` an answer
+gives in seconds or as an HTTP date; nothing is requested from the host before that wait
+ends, and the host's `retry_after_honored` counts each honoured `Retry-After` that came with a 429
+or a 503. A page
+whose tries run out is listed under `failed_urls` with its tries and makes the sync exit
+1; a page robots.txt disallows is listed under `unresolved_urls` but alone leaves the
+exit 0. Retries and waits print nothing; progress output is a later slice's.
+
 It exits 2 and writes no report when `OUT_DIR` is not a directory, holds no manifest or
 holds one that does not parse, or when the configuration is invalid (a value of the
 wrong type, a root or start URL that is not an http or https URL, a host that does not
@@ -100,8 +128,11 @@ parse, a `max_age` that is not a finite number of seconds), names no root or
 start URL, sets `unblocking.provider`, changes the root URL the last run recorded,
 needs a browser or stealth engine that is not installed, or sets `robots = "ignore"`.
 The refusal is printed on standard error; the specification's refused report arrives
-with a later slice. When a run reaches a branch a later slice implements (a redirect, a
-404, a block, a retry, a page already in the mirror, a link to a missing page or to a URL that answers
+with a later slice. When a run reaches a branch a later slice implements (a redirect,
+robots.txt's included, a 404, a block, a 429 that survives its retries, a `Retry-After`
+past `retry_after_cap` (120 s), however large, a `Crawl-delay` past it, which retires
+the host as soon as its robots.txt is read, a host whose failures trip its breaker, a page already
+in the mirror, a link to a missing page or to a URL that answers
 with a redirect or a non-HTML file, a profile other
 than `generic`, a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.

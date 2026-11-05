@@ -8,12 +8,22 @@ case, a malformed URL or configuration value, a password input quoted another wa
 non-heading source id (review 2, ai_tmp/review/T09-2/); an IPv6 host init writes and a
 huge integer max_age (review 2, round 4). T10 (implement): an autolink to a written page
 and a destination that reaches into inline code; a destination with parentheses (weed 2);
-link text holding brackets or an image (weed 3).
+link text holding brackets or an image (weed 3). T12 (review T12-1): pacing time is the
+wall-clock anchor plus the monotonic delta, so a step of the wall clock changes no wait.
+T12 (implement 2 and 3, weed 2 and 3): a page's raw 3xx stops at DisposeFetch while a 304
+with no stored page fails; a Retry-After too long for a duration saturates, zero padding
+is read, and a non-ASCII digit is no Retry-After. T12 (reviews T12-2-r2 and T12-3-r2): a
+Crawl-delay is read exactly, so 1e309, 1e400, the cap plus one sub-ULP step and an
+exponent past Decimal's limit are past the cap, while a value outside float's grammar is
+no Crawl-delay and one too small for Decimal is no delay.
 """
 
 import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
@@ -22,13 +32,17 @@ from rovo import _commands
 from rovo._config import initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
 from rovo._convert.fidelity import convert, extract, link_destinations, map_destinations, normalize
-from rovo._crawl.model import FrontierStatus, RunStatus
+from rovo._crawl import pace
+from rovo._crawl.fetch import HttpxFetcher
+from rovo._crawl.model import CONFIG as CRAWL_CONFIG
+from rovo._crawl.model import EntryFailed, FrontierStatus, RunStatus
 from rovo._crawl.run import (
     classify_block,
     convert_fetched,
     dispose_fetch,
     entry_fails,
     fail_discarded_entry,
+    run_crawl,
 )
 from rovo._mirror import model
 from rovo._mirror.finalise import finalise
@@ -39,6 +53,8 @@ from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, o
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
 from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
+from test_crawl import new_mirror as crawl_mirror
+from test_crawl import request as crawl_request
 from test_crawl import settled, site
 from test_mirror import FIRST_RUN, ROOT, new_mirror, stored
 from test_report import crawled, opened
@@ -585,3 +601,235 @@ def test_a_link_with_bracketed_text_or_an_image_becomes_relative(tmp_path: Path)
     assert "[see [1]](b.md)" in start
     assert f"[![logo]({LOGO})](b.md)" in start
     assert all(link.target_identity != LOGO for link in mirror.links), mirror.links
+
+
+class _JumpingClock:
+    """A wall clock that steps an hour forward on every reading."""
+
+    def __init__(self) -> None:
+        self.readings = 0
+
+    def now(self, tz: object = None) -> datetime:
+        del tz
+        self.readings += 1
+        return datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC) + timedelta(hours=self.readings)
+
+
+def test_anchored_now_ignores_a_wall_clock_jump(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review T12-1: the pacing time reads no wall clock after its anchor.
+
+    Two readings at the same monotonic time agree although the wall clock jumped forward
+    between them; the result is the anchor plus the monotonic delta.
+    """
+    jumping = _JumpingClock()
+    monkeypatch.setattr(pace, "datetime", jumping)
+    anchor = datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC)
+    first = pace.anchored_now(anchor, 10.0, 12.5)
+    jumping.now()
+    second = pace.anchored_now(anchor, 10.0, 12.5)
+    assert first == second == anchor + timedelta(seconds=2.5)
+    assert jumping.readings == 1
+
+
+# --- T12 implement 2 and 3, pinned by propagate tick 4 (witness tick 3) -------------
+
+MOVED_STATUSES = (301, 302, 307, 308)
+SERVICE_UNAVAILABLE = 503
+NOT_MODIFIED = 304
+NOT_FOUND = 404
+# retry_after_cap in seconds, exactly, for a Crawl-delay a sub-ULP step past it.
+CRAWL_DELAY_CAP = Decimal(str(CRAWL_CONFIG.retry_after_cap.total_seconds()))
+TOO_LONG_FOR_A_DURATION = ("99999999999999999999", "86400000000000", "9" * 5000)
+
+
+def retry_after_of(value: bytes) -> timedelta | None:
+    """The Retry-After HttpxFetcher reads from a 503 carrying the raw header `value`."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(SERVICE_UNAVAILABLE, headers=[(b"retry-after", value)])
+
+    with HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher:
+        return fetcher.fetch(SEED).retry_after
+
+
+@pytest.mark.parametrize("value", TOO_LONG_FOR_A_DURATION, ids=["20-digits", "14-digits", "5000"])
+def test_a_retry_after_too_long_for_a_duration_is_the_longest(value: str) -> None:
+    """Implement T12-3: a whole number of seconds past timedelta's range saturates.
+
+    The value is still past retry_after_cap, so it retires the host as any long
+    Retry-After does (crawl.allium RetireHostOnLongRetryAfter); reading it never raises.
+    """
+    read = retry_after_of(value.encode("ascii"))
+    assert read == timedelta.max
+    assert read > CRAWL_CONFIG.retry_after_cap
+
+
+def test_a_zero_padded_retry_after_is_its_number() -> None:
+    """Implement T12-3: leading zeros are dropped before the length check, not counted."""
+    assert retry_after_of(b"0" * 40 + b"5") == timedelta(seconds=5)
+    assert retry_after_of(b"0") == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "value", [b"\xb2", b"\xb9\xb2\xb3"], ids=["superscript-2", "superscripts"]
+)
+def test_a_non_ascii_digit_retry_after_is_unreadable(value: bytes) -> None:
+    """Implement T12-3: delay-seconds is 1*DIGIT (RFC 9110), ASCII only.
+
+    A latin-1 superscript passes str.isdigit; it is neither seconds nor an HTTP date, so
+    it is no Retry-After, as an unreadable value is.
+    """
+    assert retry_after_of(value) is None
+
+
+def test_a_saturated_retry_after_retires_the_host(tmp_path: Path) -> None:
+    """Implement T12-3, end to end: a 503 with a huge Retry-After reaches the trip guard.
+
+    Through HttpxFetcher and the driver, the honoured Retry-After past retry_after_cap
+    stops at RetireHostOnLongRetryAfter, the breaker slice's, instead of an overflow.
+    """
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(NOT_FOUND)
+        return httpx.Response(
+            SERVICE_UNAVAILABLE, headers={"retry-after": TOO_LONG_FOR_A_DURATION[0]}
+        )
+
+    mirror = crawl_mirror(tmp_path)
+    with (
+        HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher,
+        pytest.raises(NotInThisSlice) as stopped,
+    ):
+        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == "RetireHostOnLongRetryAfter"
+
+
+@pytest.mark.parametrize("status", MOVED_STATUSES)
+def test_a_raw_page_redirect_is_a_later_slices(tmp_path: Path, status: int) -> None:
+    """Implement T12-2: a page's raw 3xx other than 304 stops at DisposeFetch.
+
+    Following a redirect is the redirects slice's, so the answer never reaches the
+    not-ok branch and is never failed as its status text.
+    """
+    _, _, walk = settled(tmp_path, FakeFetcher({SEED: html_response(SEED, "", status=status)}))
+    with pytest.raises(NotInThisSlice) as stopped:
+        dispose_fetch(walk)
+    assert stopped.value.rule == "DisposeFetch"
+    assert walk.entry.status is FrontierStatus.in_progress
+
+
+def test_a_not_modified_page_with_no_stored_page_fails(tmp_path: Path) -> None:
+    """Implement T12-2: a 304 for a URL with no stored page still fails its row.
+
+    DisposeFetch's guidance: with no page to keep, a 304 is not ok and fails the entry
+    with its status text after the try that answered it.
+    """
+    fetcher = FakeFetcher({SEED: html_response(SEED, "", status=NOT_MODIFIED)})
+    _, _, walk = settled(tmp_path, fetcher)
+    failed = dispose_fetch(walk)
+    assert isinstance(failed, EntryFailed)
+    assert failed.error.startswith(str(NOT_MODIFIED))
+    assert failed.attempts == 1
+
+
+@pytest.mark.parametrize("delay", ["1e15", "1e12", "99999999999"])
+def test_a_huge_crawl_delay_retires_the_host_instead_of_overflowing(
+    tmp_path: Path, delay: str
+) -> None:
+    """Weed T12-4 code-bug 1, answered at 71b5b0f: a huge Crawl-delay never overflows.
+
+    Through HttpxFetcher and the driver, a Crawl-delay past retry_after_cap is compared as
+    written (robots_crawl_delay_exceeds), never adopted, and retires the host: the run
+    stops at RetireHostOnLongCrawlDelay, the breaker slice's, not at an OverflowError in
+    timedelta or the limiter, and not stalled waiting it out.
+    """
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=f"User-agent: *\nCrawl-delay: {delay}\n")
+        return httpx.Response(NOT_FOUND)
+
+    mirror = crawl_mirror(tmp_path)
+    with (
+        HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher,
+        pytest.raises(NotInThisSlice) as stopped,
+    ):
+        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+
+
+def crawl_delay_fetcher(delay: str) -> HttpxFetcher:
+    """An HttpxFetcher whose robots.txt declares Crawl-delay `delay`.
+
+    The seed answers a page, anything else a 404.
+    """
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=f"User-agent: *\nCrawl-delay: {delay}\n")
+        if str(request.url) == SEED:
+            return httpx.Response(200, html=UNLINKED)
+        return httpx.Response(NOT_FOUND)
+
+    return HttpxFetcher(transport=httpx.MockTransport(answer))
+
+
+@pytest.mark.parametrize(
+    "delay",
+    [
+        "1e309",
+        "1e400",
+        str(CRAWL_DELAY_CAP + Decimal("1e-15")),
+        "1e1000000000000000000",
+        "1e9999999999999999999",
+    ],
+    ids=["1e309", "1e400", "cap-plus-sub-ulp", "1e1000000000000000000", "1e9999999999999999999"],
+)
+def test_a_crawl_delay_is_compared_with_the_cap_as_written(tmp_path: Path, delay: str) -> None:
+    """Reviews T12-2-r2 C1/B1 and T12-3-r2 C1/B1: the Crawl-delay number is read exactly.
+
+    protego reads a Crawl-delay as a float, so 1e309 and 1e400 were no delay and the cap
+    plus one sub-ULP step was the cap; an exponent past Decimal's own limit raised or was
+    dropped. Each is past retry_after_cap as written (crawl.allium AdoptRobotsRules'
+    guidance, 837 to 843), so the run stops at RetireHostOnLongCrawlDelay after robots.txt.
+    """
+    mirror = crawl_mirror(tmp_path)
+    with (
+        crawl_delay_fetcher(delay) as fetcher,
+        pytest.raises(NotInThisSlice) as stopped,
+    ):
+        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+
+
+@pytest.mark.parametrize(
+    ("delay", "adopted"),
+    [
+        ("_121", None),
+        ("121_", None),
+        ("1__21", None),
+        ("-1e9999999999999999999", None),
+        ("1e-9999999999999999999", timedelta(0)),
+    ],
+    ids=["_121", "121_", "1__21", "minus-1e9999999999999999999", "1e-9999999999999999999"],
+)
+def test_a_crawl_delay_outside_floats_grammar_is_no_crawl_delay(
+    tmp_path: Path, delay: str, adopted: timedelta | None
+) -> None:
+    """Review T12-3-r2 C2 (and C1's small end): what protego cannot read is no Crawl-delay.
+
+    A number is what protego reads, float's grammar: misplaced underscores and a negative
+    number are null, and a number too small for Decimal's exponent is 0. None retires
+    the host, so the run through HttpxFetcher finishes.
+    """
+    mirror = crawl_mirror(tmp_path)
+    with crawl_delay_fetcher(delay) as fetcher:
+        result = run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert result.run.status is RunStatus.finished
+    policy = result.run.robots_policy(SITE)
+    assert policy is not None
+    assert policy.crawl_delay == adopted
+    (host,) = result.run.hosts
+    assert host.crawl_delay == timedelta(0)

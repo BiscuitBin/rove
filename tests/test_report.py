@@ -13,12 +13,14 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
-from fakes import START, FakeFetcher, FixedClock, html_response
+from fakes import START, FakeFetcher, FixedClock, html_response, text_response
 from rovo import _config
 from rovo._config import Configuration, SyncOptions
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag, QualityGate
+from rovo._crawl import model
 from rovo._crawl.model import (
+    DiscoveryFailed,
     DiscoveryProblem,
     RenderMode,
     RobotsMode,
@@ -65,6 +67,8 @@ from rovo._report import (
     report_path,
     summarise,
     take_broken_links,
+    tally_discovery_problem,
+    tally_failed_url,
     tally_finalised_page,
 )
 from spec_values import spec_enum, spec_float
@@ -84,6 +88,8 @@ LOW = 0.5
 MIDDLE = 0.75
 PERCENTILE = 0.1
 FORBIDDEN = 403
+SERVICE_UNAVAILABLE = 503
+ROBOTS = f"{SITE}/robots.txt"
 
 # Every CrawlReport field but the mirror, the operator and the open/written status.
 REPORT_KEYS = {
@@ -157,8 +163,8 @@ OPTIONS = SyncOptions(
 )
 
 
-def crawled(out_dir: Path, page: str = PAGE) -> CrawlResult:
-    """One standard run of the fixture site over a FakeFetcher."""
+def crawled(out_dir: Path, page: str = PAGE, *, fetcher: FakeFetcher | None = None) -> CrawlResult:
+    """One standard run of the fixture site over a FakeFetcher, `fetcher` when given."""
     out_dir.mkdir(parents=True, exist_ok=True)
     mirror = Mirror(
         out_dir=out_dir,
@@ -193,8 +199,8 @@ def crawled(out_dir: Path, page: str = PAGE) -> CrawlResult:
         stealth_mode=StealthMode.off,
         targets=frozenset(),
     )
-    fetcher = FakeFetcher({SEED: html_response(SEED, page)})
-    return run_crawl(trigger, None, fetcher, FixedClock())
+    answers = fetcher or FakeFetcher({SEED: html_response(SEED, page)})
+    return run_crawl(trigger, None, answers, FixedClock())
 
 
 def opened(run: Run, *, fail_on_low_quality: bool = False) -> CrawlReport:
@@ -703,3 +709,150 @@ def test_enum_comparable_ReportStatus(tmp_path: Path) -> None:
 def test_config_default_report_percentile() -> None:
     """Verify config parameter report_percentile has its declared default."""
     assert _config.CONFIG.report_percentile == spec_float("rovo", "report_percentile")
+
+
+# --- Discovery problems and failed URLs (T12) -----------------------------------------
+
+
+def refused_robots(out_dir: Path) -> CrawlResult:
+    """A run whose robots.txt answers 403: the seed is skipped and discovery failed."""
+    fetcher = FakeFetcher(
+        {ROBOTS: text_response(ROBOTS, "", status=FORBIDDEN), SEED: html_response(SEED, PAGE)}
+    )
+    return crawled(out_dir, fetcher=fetcher)
+
+
+def failing_seed(out_dir: Path) -> CrawlResult:
+    """A run whose seed answers 503 on every try: the seed fails after its retries."""
+    unavailable = html_response(SEED, "", status=SERVICE_UNAVAILABLE)
+    return crawled(out_dir, fetcher=FakeFetcher({SEED: unavailable}))
+
+
+def test_rule_success_TallyDiscoveryProblem(tmp_path: Path) -> None:
+    """Verify rule TallyDiscoveryProblem succeeds when all preconditions are met.
+
+    The run's DiscoveryFailed becomes a discovery_problems row, the run has failures and
+    crawl-report.json lists the row; the exit is partial.
+    """
+    result = refused_robots(tmp_path)
+    (failed,) = result.discovery_failed
+    report = opened(result.run)
+    assert tally_discovery_problem(report, failed)
+    assert report.discovery_problems == [
+        DiscoveryProblemRow(url=ROBOTS, problem=DiscoveryProblem.robots_refused)
+    ]
+    assert report.has_failures
+    assert close_run(report, result.run, result.frontier)
+    assert rank_and_write_report(report, result.run, FixedClock()) is ExitCode.partial
+    assert written(tmp_path)["discovery_problems"] == [
+        {"url": ROBOTS, "problem": "robots_refused"}
+    ]
+
+
+def test_rule_failure_TallyDiscoveryProblem_1(tmp_path: Path) -> None:
+    """Verify rule TallyDiscoveryProblem is rejected when requires clause fails.
+
+    requires: exists report and report.status = open.
+    """
+    result = refused_robots(tmp_path)
+    (failed,) = result.discovery_failed
+    other = opened(result.run)
+    other.run_id = result.run.id + 1
+    assert not tally_discovery_problem(other, failed)
+    assert other.discovery_problems == []
+    report = opened(result.run)
+    report.status = CrawlReportStatus.written
+    assert not tally_discovery_problem(report, failed)
+    assert report.discovery_problems == []
+    assert not report.has_failures
+
+
+def test_value_equality_DiscoveryProblemRow() -> None:
+    """Verify value type DiscoveryProblemRow has structural equality."""
+    row = DiscoveryProblemRow(url=ROBOTS, problem=DiscoveryProblem.robots_refused)
+    again = DiscoveryProblemRow(url=ROBOTS, problem=DiscoveryProblem.robots_refused)
+    assert row == again
+    assert hash(row) == hash(again)
+    assert row != dataclasses.replace(row, problem=DiscoveryProblem.robots_unreachable)
+    assert row != dataclasses.replace(row, url=f"{SITE}:8080/robots.txt")
+
+
+def test_entity_fields_DiscoveryProblemRow(tmp_path: Path) -> None:
+    """Verify all declared fields on DiscoveryProblemRow are present with correct types."""
+    result = refused_robots(tmp_path)
+    report = opened(result.run)
+    for failed in result.discovery_failed:
+        assert isinstance(failed, DiscoveryFailed)
+        assert tally_discovery_problem(report, failed)
+    (row,) = report.discovery_problems
+    assert isinstance(row, DiscoveryProblemRow)
+    assert row.url == ROBOTS
+    assert isinstance(row.problem, DiscoveryProblem)
+    assert row.problem is DiscoveryProblem.robots_refused
+
+
+def test_rule_success_TallyFailedUrl(tmp_path: Path) -> None:
+    """Verify rule TallyFailedUrl succeeds when all preconditions are met.
+
+    A seed that ran out of retries is a failed_urls row with its tries and a failed
+    change; crawl-report.json lists both and the exit is partial.
+    """
+    result = failing_seed(tmp_path)
+    (failed,) = result.failed
+    report = opened(result.run)
+    assert tally_failed_url(report, failed)
+    (row,) = report.failed_urls
+    assert row == FailedUrl(url=SEED, error=failed.error, attempts=model.CONFIG.http_attempts)
+    assert row.error
+    assert report.changes == [Change(kind=ChangeKind.failed, url=SEED, path=None, moved_from=None)]
+    assert close_run(report, result.run, result.frontier)
+    assert rank_and_write_report(report, result.run, FixedClock()) is ExitCode.partial
+    on_disk = written(tmp_path)
+    assert on_disk["failed_urls"] == [
+        {"url": SEED, "error": failed.error, "attempts": model.CONFIG.http_attempts}
+    ]
+    assert on_disk["changes"] == [
+        {"kind": "failed", "url": SEED, "path": None, "moved_from": None}
+    ]
+
+
+def test_rule_failure_TallyFailedUrl_1(tmp_path: Path) -> None:
+    """Verify rule TallyFailedUrl is rejected when requires clause fails.
+
+    requires: exists report and report.status = open.
+    """
+    result = failing_seed(tmp_path)
+    (failed,) = result.failed
+    other = opened(result.run)
+    other.run_id = result.run.id + 1
+    assert not tally_failed_url(other, failed)
+    report = opened(result.run)
+    report.status = CrawlReportStatus.written
+    assert not tally_failed_url(report, failed)
+    assert report.failed_urls == []
+    assert report.changes == []
+    assert other.failed_urls == []
+
+
+def test_value_equality_FailedUrl() -> None:
+    """Verify value type FailedUrl has structural equality."""
+    row = FailedUrl(url=SEED, error="503 Service Unavailable", attempts=5)
+    again = FailedUrl(url=SEED, error="503 Service Unavailable", attempts=5)
+    assert row == again
+    assert hash(row) == hash(again)
+    assert row != dataclasses.replace(row, attempts=1)
+    assert row != dataclasses.replace(row, error="connection refused")
+
+
+def test_entity_fields_FailedUrl(tmp_path: Path) -> None:
+    """Verify all declared fields on FailedUrl are present with correct types."""
+    result = failing_seed(tmp_path)
+    report = opened(result.run)
+    for failed in result.failed:
+        assert tally_failed_url(report, failed)
+    (row,) = report.failed_urls
+    assert isinstance(row, FailedUrl)
+    assert row.url == SEED
+    assert isinstance(row.error, str)
+    assert row.error
+    assert row.attempts == model.CONFIG.http_attempts

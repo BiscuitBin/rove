@@ -1,11 +1,11 @@
 """The root's rules (rovo.allium): init, sync and index, composing config, crawl, mirror, report.
 
 Each command returns the ExitCode the process exits with and writes its problems to
-standard error. `sync` takes the Fetcher and the Clock it runs with, so tests drive it
-without the network; `rovo.cli` builds the real ones. Only the mirror's modules load
-with this one: `index` never crawls, so `init` and `sync` import the configuration, the
-crawl and the report inside their bodies, and `rovo index` loads neither httpx nor
-rovo._crawl.
+standard error. `sync` takes the Fetcher and the Timer it runs and paces with, so tests
+drive it without the network and without sleeping; `rovo.cli` builds the real ones.
+Only the mirror's modules load with this one: `index` never crawls, so `init` and `sync`
+import the configuration, the crawl and the report inside their bodies, and `rovo index`
+loads neither httpx nor rovo._crawl.
 """
 
 import importlib.metadata
@@ -21,7 +21,6 @@ from rovo._mirror.finalise import finalise
 from rovo._mirror.indexes import index_pass, unreadable_page_file
 from rovo._mirror.model import IndexesWritten, Mirror, Operator, PassKind, Tier
 from rovo._mirror.state import (
-    Clock,
     ManifestError,
     load_mirror,
     manifest_path,
@@ -34,6 +33,7 @@ from rovo._unfinished import NotInThisSlice
 if TYPE_CHECKING:
     from rovo._config import Configuration
     from rovo._crawl.fetch import Fetcher
+    from rovo._crawl.pace import Timer
 
 
 def init(site_url: str, out_dir: Path, profile_name: str | None = None) -> ExitCode:
@@ -73,7 +73,7 @@ def sync(
     out_dir: Path,
     *,
     fetcher: "Fetcher",
-    clock: Clock,
+    clock: "Timer",
     tier_installed: Callable[[Tier], bool] | None = None,
 ) -> ExitCode:
     """Realises rovo.allium RefuseSyncWithoutDirectory, StartSync and the report's rules.
@@ -139,7 +139,7 @@ def _start_problem(
 
 
 def _start_sync(
-    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: Clock
+    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: "Timer"
 ) -> ExitCode:
     """StartSync, then the run, CloseRun, the finalise pass and RankAndWriteReport."""
     # Only a sync loads the configuration, the crawl and the report (rovo index never).
@@ -170,6 +170,7 @@ def _start_sync(
         finalise_run_report,
         rank_and_write_report,
         take_broken_links,
+        tally_discovery_problem,
         tally_failed_url,
         tally_finalised_page,
     )
@@ -226,6 +227,8 @@ def _start_sync(
         targets=frozenset(),
     )
     result = drive_run(request, load_frontier(mirror), fetcher, clock)
+    for problem in result.discovery_failed:
+        tally_discovery_problem(report, problem)
     for failed in result.failed:
         tally_failed_url(report, failed)
     close_run(report, result.run, result.frontier)

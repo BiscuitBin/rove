@@ -24,6 +24,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── __main__.py            python -m rovo
 │   ├── py.typed               Marks the package as typed
 │   ├── _convert/ _mirror/ _crawl/  Private modules, in that import direction
+│   │   └── _crawl/pace.py     The timer seam, the per-host limiter and retry waits
 │   ├── _config.py  _report.py  Private modules for the command
 │   └── _commands.py  _exit.py  _unfinished.py  init, sync, index; exit codes; the guard
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
@@ -32,6 +33,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
 │       └── sites/             Static sites the end-to-end tests serve
+│           └── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py
 ├── docs/                      Handbook, manifest, specs/ and decisions/
 │   └── specs/                 The Allium modules: behaviour is decided here

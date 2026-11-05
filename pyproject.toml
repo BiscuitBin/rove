@@ -41,6 +41,13 @@ dependencies = [
   # MIT (by its classifier; the metadata has no License field); released by Matthew
   # Tretter, the locked 1.2.3 uploaded 2026-06-30.
   "markdownify>=1.2.3,<2",
+  # robots.txt parsing and matching for the crawl: RFC 9309 longest match, Allow
+  # winning ties, * and $ wildcards, and a decimal Crawl-delay. Python 3.13's
+  # urllib.robotparser answers by the first matching rule and drops a fractional
+  # Crawl-delay. Pure Python, no dependencies. BSD-3-Clause; released by the Scrapy
+  # project (author Anubhav Patel), the locked 0.7.0 uploaded 2026-09-21. At 0.x: the
+  # next minor bounds it. Imported by rovo._crawl alone.
+  "protego>=0.7.0,<0.8",
 ]
 
 [project.optional-dependencies]

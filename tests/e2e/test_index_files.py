@@ -4,7 +4,9 @@ The installed `rovo` script beside this interpreter runs out of process against 
 sites served on 127.0.0.1 by `serve_site`; nothing reaches the network. The file is not
 `test_indexes.py`, which the unit suite's tests/test_indexes.py already names. The
 large-directory site is generated into tmp_path with one page more than the threshold
-the code reads, rather than committed as a fixture.
+the code reads, rather than committed as a fixture. Since T12 paces every sync at
+rate_per_host, its two hundred requests run in process, through `rovo._commands.sync`
+over the real HttpxFetcher and a timer that records its waits and never sleeps.
 """
 
 import json
@@ -15,6 +17,10 @@ from pathlib import Path
 
 from test_init_sync import USAGE, load, page_root, rovo
 
+from fakes import FixedClock
+from rovo import _commands
+from rovo._crawl.fetch import HttpxFetcher
+from rovo._exit import ExitCode
 from rovo._mirror.model import CONFIG
 
 INDEX_FILES = ("index.md", "index.jsonl", "links.jsonl", "llms.txt")
@@ -47,6 +53,13 @@ def synced(base: str, out: Path) -> None:
     assert init.returncode == 0, init.stderr
     sync = rovo("sync", str(out))
     assert sync.returncode == 0, sync.stderr
+
+
+def synced_in_process(base: str, out: Path) -> None:
+    """Rovo init and rovo sync in process over HttpxFetcher, the timer standing still."""
+    assert _commands.init(f"{base}guide/start.html", out) is ExitCode.ok
+    with HttpxFetcher() as fetcher:
+        assert _commands.sync(out, fetcher=fetcher, clock=FixedClock()) is ExitCode.ok
 
 
 def host_segment(base: str) -> str:
@@ -237,7 +250,7 @@ def test_a_large_directory_gets_its_own_index(
     count = CONFIG.hierarchical_index_threshold + 1
     base = serve_site(large_directory_site(tmp_path / "site", count))
     out = tmp_path / "out"
-    synced(base, out)
+    synced_in_process(base, out)
     host = host_segment(base)
 
     big = out / "_indexes" / host / "big.md"
