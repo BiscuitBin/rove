@@ -24,8 +24,9 @@
 --   What a page becomes once delivered (mirror); conversion itself
 --   (convert); commands, refusals, exit codes and the report (rovo);
 --   library choices: HTTP client, browser engines, robots and sitemap
---   parsers, which are black boxes; proxies, CAPTCHA solvers and paid
---   unblocking services, which are never used.
+--   parsers, which are black boxes (robots matching excepted:
+--   robots_allows names protego and its pinned range); proxies, CAPTCHA
+--   solvers and paid unblocking services, which are never used.
 --
 -- Dependencies
 --   mirror.allium: Mirror, Page, Operator, SyncRun (which Run stands in
@@ -963,18 +964,44 @@ rule FetchSitemap {
         -- origin, origin_of(url), never another origin of the same host:
         -- it is true under robots = ignore, true when that origin's stance
         -- is allow_all, false under disallow_all, and otherwise the parsed
-        -- rules' answer for the user agent rovo, matched as RFC 9309 says:
-        -- the longest matching Allow or Disallow path wins, Allow wins a
-        -- tie, * matches any run of characters and a final $ anchors the
-        -- end of the path. One addition, as protego and Google make: an
-        -- Allow path ending in "/index.html", with no final $, also allows
-        -- its directory, as though the group held a second Allow line with
-        -- that "index.html" replaced by $ ("Allow: /private/index.html"
-        -- adds "Allow: /private/$"), weighed by its length like any line.
-        -- So under "Disallow: /private/" the identity "/private/", which
-        -- the mirror folds "/private/index.html" into, is allowed, while
+        -- rules' answer for the user agent rovo. That answer, the parsing
+        -- it rests on and the choice of the group that applies to rovo are
+        -- RFC 9309 matching as protego implements it, in the release range
+        -- pyproject.toml pins (protego>=0.7.0,<0.8): moving that pin past
+        -- the range, or changing the parser, is a change to this
+        -- specification. Crawl-delay is not part of it: robots_crawl_delay
+        -- and robots_crawl_delay_exceeds (AdoptRobotsRules) say how it is
+        -- read. In RFC 9309's terms, the longest matching Allow or Disallow
+        -- path wins, Allow wins a tie, * matches any run of characters and
+        -- a final $ anchors the end of the path. Two known differences from
+        -- literal RFC 9309 follow from that choice; they are consequences,
+        -- not the definition.
+        -- First, the index.html fold: an Allow path ending in
+        -- "/index.html", with no final $, also allows its directory, as
+        -- though the group held a second Allow line with that "index.html"
+        -- replaced by $ ("Allow: /private/index.html" adds
+        -- "Allow: /private/$"), weighed by its length like any line. So
+        -- under "Disallow: /private/" the identity "/private/", which the
+        -- mirror folds "/private/index.html" into, is allowed, while
         -- "/private/?a=1" is not. Nothing else folds: not "index.htm" or
         -- any other name, not "INDEX.HTML", and never a Disallow line.
+        -- Second, the literal-$ copy: an Allow or Disallow line, as written
+        -- in the file, whose path ends in $ also gets a copy of the same
+        -- kind with that $ written "%24". The copy has no anchor, so it
+        -- matches as a prefix, and it is weighed by its own length, two
+        -- characters more than the line it copies ("Allow: /p$" beats
+        -- "Disallow: /p%2" for "/p$x"). A $ in a request path is compared
+        -- as "%24", so "/private/$secret" and "/private/%24secret" are one
+        -- path to the matcher. So under "Disallow: /private/",
+        -- "Allow: /private/$" allows "/private/" and also every path under
+        -- "/private/$", "/private/$secret" and "/private/%24secret"
+        -- included, though RFC 9309 anchors it to "/private/" alone;
+        -- "Disallow: /x$" likewise disallows "/x$y" as well as "/x". The
+        -- line the fold adds gets no copy: "Allow: /private/index.html"
+        -- leaves "/private/$secret" disallowed, and
+        -- "Allow: /private/index.html$" gets the copy but not the fold. A
+        -- $ anywhere but the end of a path is an ordinary character, so
+        -- its copy changes nothing.
         -- An origin whose robots.txt the run has not read is read before
         -- anything there is fetched.
 }
