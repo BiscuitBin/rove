@@ -204,7 +204,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 548 to 593), the one copy in code.
+# crawl.allium's config block (crawl.allium 549 to 594), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -510,6 +510,7 @@ class Run:
     targets: frozenset[str]
     forced_refetch: frozenset[str]
     active_urls: frozenset[str]
+    recheckable_urls: frozenset[str]
     unresolved_urls: frozenset[str]
     error: str | None
     interrupt_requested: bool
@@ -833,7 +834,7 @@ class HostBackedOff:
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2219)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2272)."""
 
     operator: Operator
     mirror: Mirror

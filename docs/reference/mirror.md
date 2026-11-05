@@ -68,6 +68,7 @@ in the last column. The standard library reads the file with `tomllib`.
 | `crawl.max_age` | absent: a page never goes stale; a number of seconds | `PrepareRun`, `crawl.allium` |
 | `crawl.refollow_unchanged_links` | `true`: a page answered unchanged queues its stored links again | `config.refollow_unchanged_links`, `rovo.allium` |
 | `quality.fail_on_low_quality` | `false` | `config.fail_on_low_quality`, `rovo.allium` |
+| `mirror.prune` | `false`: a removed page's file is archived under `_removed/`; `true` deletes it | `config.prune`, `mirror.allium` |
 | `unblocking.provider` | absent; any value is a configuration problem | `Configuration`, `rovo.allium` |
 
 An unknown section or key, a value of the wrong type or outside its choices, a profile
@@ -150,7 +151,8 @@ gives `guide/index.md` and `/.html` gives `index.md` under the prefix `/`), each
 segment keeps `[A-Za-z0-9._-]` and replaces anything else with `-`, and empty segments
 are dropped. The path is never percent-decoded, so each `%` becomes `-` too:
 `/guide/%2e%2e/x.html` becomes `-2e-2e/x.md`, never a path outside the mirror. Each
-segment is then rewritten on its own:
+segment is then rewritten on its own (see below), and each directory is then spelt as
+the paths the mirror already holds spell it.
 
 - a leading `.` and a trailing run of `.` become `-`, so no page is hidden
   (`.git/config.html` gives `-git/config.md`, `page.` gives `page-.md`);
@@ -168,6 +170,13 @@ matter: `con.` gives `con--.md` (the device `-`, then the trailing `.` as `-`).
 Last, `.md` is added unless the name already ends in `.md` exactly, in lower case:
 `README.md` stays, `README.MD` gives `README.MD.md`. `index.md` and `_index.md` inside a
 host's directory are ordinary page names.
+
+A directory has one spelling: compared ignoring case, each directory takes the spelling
+a page's path (the page's own included) already uses for it, so with `sub/a.md` held,
+`/Sub/b.html` gives `sub/b.md`, and a page at `sub/x.md` whose URL becomes `/Sub/x.html`
+keeps its path. Where held paths already spell a directory several ways, the held path
+first by code point gives the spelling (`Sub/` before `sub/`); no page already held is
+moved. The file name keeps its own spelling and meets the collision rule below.
 
 A path another page holds, compared ignoring case, or a path over 200 characters
 (counted from `pages/`, the host segment included) gets `-` and the first six hex digits
@@ -338,9 +347,11 @@ The archive mirrors `pages/`: a removed page's file at `pages/<host>/<path>` is 
 `_removed/<host>/<path>`, the path the page's record keeps. A page answered again is
 written again at that path when it is still free (else at the path its identity is
 assigned), and its archived copy is deleted; a page that moves onto a removed page's
-identity replaces that record, and its archived copy is deleted too. Deleting a removed
-page's file instead of archiving it (`prune` in `mirror.allium`) is not configurable:
-`rovo.toml` has no such key, so the file is always archived.
+identity replaces that record, and its archived copy is deleted too. With
+`mirror.prune = true` in `rovo.toml`, a removed page's file is deleted instead of
+archived. A page answered again and removed again in the same sync keeps its archived
+copy, even when it was answered at a new path: that path was never published, so
+nothing is archived from it.
 
 No file moves while a sync fetches. A removal, a move or a revival is recorded in
 memory, and the finalisation applies the file changes in order before it publishes the

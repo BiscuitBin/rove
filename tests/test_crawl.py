@@ -466,7 +466,8 @@ def test_rule_entity_creation_StartRun_1(tmp_path: Path) -> None:
     """Verify entity creation in rule StartRun ensures clause produces the specified fields.
 
     Re-propagated by T14 at a0814ab: Run.created carries the trigger's
-    refollow_unchanged_links, true or false.
+    refollow_unchanged_links, true or false. Re-propagated by T15 at bad753c: Run.created
+    carries recheckable_urls, empty.
     """
     mirror = new_mirror(tmp_path)
     trigger = request(mirror)
@@ -492,6 +493,7 @@ def test_rule_entity_creation_StartRun_1(tmp_path: Path) -> None:
     assert run.targets == frozenset()
     assert run.forced_refetch == frozenset()
     assert run.active_urls == frozenset()
+    assert run.recheckable_urls == frozenset()
     assert run.unresolved_urls == frozenset()
     assert run.error is None
     assert run.interrupt_requested is False
@@ -553,6 +555,9 @@ def test_rule_success_PrepareRun(tmp_path: Path) -> None:
 
     A full standard update run re-pends the written page's row, returns in-progress rows
     to pending and retries the failed rows the scope admits; a row outside it stays.
+    Re-propagated by T15 at bad753c: it notes its absent, duplicate and done rows as
+    recheckable (Run.recheckable_urls) and leaves their status; a failed row is retried,
+    not noted.
     """
     first = crawl_once(tmp_path, site())
     frontier = first.frontier
@@ -569,6 +574,7 @@ def test_rule_success_PrepareRun(tmp_path: Path) -> None:
     failed.status = FrontierStatus.failed
     outside = enqueue(first.run, frontier, OFF_SITE, depth=1, via=DiscoverySource.link, priority=0)
     outside.status = FrontierStatus.failed
+    settled_rows = settled_rows_of(first.run, frontier)
 
     second = start_run(
         request(first.run.target, run_id=SECOND_RUN, kind=RunKind.update), FixedClock()
@@ -584,6 +590,13 @@ def test_rule_success_PrepareRun(tmp_path: Path) -> None:
     assert outside.status is FrontierStatus.failed
     assert second.forced_refetch == frozenset()
     assert second.active_urls == frozenset(entry.identity for entry in frontier.entries)
+    assert frozenset(settled_rows) <= second.recheckable_urls
+    for url, status in settled_rows.items():
+        row = frontier.entry(url)
+        assert row is not None
+        assert row.status is status
+    assert failed.identity not in second.recheckable_urls
+    assert stray.identity not in second.recheckable_urls
 
 
 def test_rule_failure_PrepareRun_1(tmp_path: Path) -> None:
@@ -608,6 +621,152 @@ def test_rule_failure_PrepareRun_2(tmp_path: Path) -> None:
     assert run is not None
     assert not prepare_run(run, None)
     assert run.active_urls == frozenset()
+
+
+# T15 follow-up (spec bad753c): a full run rechecks a settled row its discovery names
+# again (crawl.allium PrepareRun and Enqueue). The rows a first run left settled: an
+# absent row with no page, a duplicate row, and a done row whose identity is no page's own
+# (the requested identity of a moved page).
+ABSENT_ROW = f"{SITE}/guide/absent.html"
+DUPLICATE_ROW = f"{SITE}/guide/duplicate.html"
+MOVED_ROW = f"{SITE}/guide/moved.html"
+LINKING_PAGE = """<!doctype html>
+<html lang="en">
+    <head><title>Getting started | Example docs</title></head>
+    <body>
+        <main>
+            <h1>Getting started</h1>
+            <p>The guide starts here and links to the page about other things.</p>
+            <p><a href="other.html">Other things</a></p>
+        </main>
+    </body>
+</html>
+"""
+OTHER_PAGE = """<!doctype html>
+<html lang="en">
+    <head><title>Other things | Example docs</title></head>
+    <body>
+        <main>
+            <h1>Other things</h1>
+            <p>Other things are described here in a sentence of plain prose.</p>
+        </main>
+    </body>
+</html>
+"""
+
+
+def settled_rows_of(run: Run, frontier: Frontier) -> dict[str, FrontierStatus]:
+    """Enqueue ABSENT_ROW, DUPLICATE_ROW and MOVED_ROW under `run` and settle each row."""
+    statuses = {
+        ABSENT_ROW: FrontierStatus.absent,
+        DUPLICATE_ROW: FrontierStatus.duplicate,
+        MOVED_ROW: FrontierStatus.done,
+    }
+    for url, status in statuses.items():
+        row = enqueue(run, frontier, url, depth=1, via=DiscoverySource.link, priority=0)
+        row.status = status
+    return statuses
+
+
+def rechecking(out_dir: Path) -> tuple[Run, Frontier]:
+    """A second full run prepared over a frontier holding the three settled rows."""
+    first = crawl_once(out_dir, site())
+    frontier = first.frontier
+    settled_rows_of(first.run, frontier)
+    second = start_run(
+        request(first.run.target, run_id=SECOND_RUN, kind=RunKind.update), FixedClock()
+    )
+    assert second is not None
+    assert attach_frontier(second, frontier) is frontier
+    assert prepare_run(second, frontier)
+    return second, frontier
+
+
+def rediscover(
+    run: Run, frontier: Frontier, url: str, via: DiscoverySource = DiscoverySource.link
+) -> FrontierEntry:
+    """UrlDiscovered for `url` at depth 1 with the link priority."""
+    return enqueue(
+        run, frontier, url, depth=1, via=via, priority=model.CONFIG.link_priority, from_url=SEED
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "via"),
+    [
+        (ABSENT_ROW, DiscoverySource.link),
+        (DUPLICATE_ROW, DiscoverySource.sitemap),
+        (MOVED_ROW, DiscoverySource.llms_txt),
+    ],
+    ids=["absent-by-link", "duplicate-by-sitemap", "moved-by-llms-txt"],
+)
+def test_Enqueue_rechecks_a_settled_row_a_full_run_rediscovers_once(
+    tmp_path: Path, url: str, via: DiscoverySource
+) -> None:
+    """crawl.allium Enqueue, rediscovered (bad753c): re-pended once per run.
+
+    A row settled before this full run, which PrepareRun left alone and no page holds as
+    its identity, is re-pended when the run's discovery (a page link, a sitemap entry or
+    llms.txt) names its URL again; the URL leaves recheckable_urls, so the row settled
+    again and named again in the same run stays settled.
+    """
+    run, frontier = rechecking(tmp_path)
+    assert url in run.recheckable_urls
+    row = rediscover(run, frontier, url, via)
+    assert row.status is FrontierStatus.pending
+    assert url not in run.recheckable_urls
+    assert [entry.identity for entry in frontier.entries].count(url) == 1
+    row.status = FrontierStatus.absent
+    assert rediscover(run, frontier, url, via).status is FrontierStatus.absent
+
+
+def test_Enqueue_leaves_settled_a_row_nothing_rechecks(tmp_path: Path) -> None:
+    """crawl.allium Enqueue: only a rediscovered recheckable row with no page is re-pended.
+
+    A row nothing names stays settled; a row settled in this run (absent, never noted
+    by PrepareRun) stays settled when named again; and a done row whose identity is a
+    page's own (the seed, settled in this run) stays done.
+    """
+    run, frontier = rechecking(tmp_path)
+    for url in (ABSENT_ROW, DUPLICATE_ROW, MOVED_ROW):
+        row = frontier.entry(url)
+        assert row is not None
+        assert row.status is not FrontierStatus.pending
+    fresh = rediscover(run, frontier, OTHER)
+    fresh.status = FrontierStatus.absent
+    assert rediscover(run, frontier, OTHER).status is FrontierStatus.absent
+    seed_row = frontier.entry(SEED)
+    assert seed_row is not None
+    seed_row.status = FrontierStatus.done
+    assert rediscover(run, frontier, SEED).status is FrontierStatus.done
+
+
+def test_a_link_absent_last_sync_is_fetched_when_the_next_sync_finds_it_again(
+    tmp_path: Path,
+) -> None:
+    """PrepareRun and Enqueue through the driver (bad753c): an absent row is rechecked.
+
+    The first run's seed links to OTHER, which answers 404: its row is absent and no
+    page is stored. In the second run OTHER answers a page; the seed, fetched again with
+    a changed body (so it is converted, not raw-unchanged, and EnqueuePageLinks runs),
+    names it, so OTHER is requested and stored and its row is done.
+    """
+    mirror = first_synced(tmp_path, FakeFetcher({SEED: html_response(SEED, LINKING_PAGE)}))
+    saved = load_frontier(mirror)
+    assert saved is not None
+    other_row = saved.entry(OTHER)
+    assert other_row is not None
+    assert other_row.status is FrontierStatus.absent
+    changed_seed = LINKING_PAGE.replace("starts here", "now starts here")
+    again = FakeFetcher(
+        {SEED: html_response(SEED, changed_seed), OTHER: html_response(OTHER, OTHER_PAGE)}
+    )
+    result = synced_again(mirror, again)
+    assert OTHER in again.requests
+    assert mirror.page(OTHER) is not None
+    rechecked = result.frontier.entry(OTHER)
+    assert rechecked is not None
+    assert rechecked.status is FrontierStatus.done
 
 
 # --- Discovery ---------------------------------------------------------------------
@@ -2024,7 +2183,9 @@ def test_invariant_OneRobotsPolicyPerOrigin(tmp_path: Path) -> None:
 def test_entity_fields_Run(tmp_path: Path) -> None:
     """Verify all declared fields on Run are present with correct types.
 
-    Re-propagated by T14 at a0814ab: Run gains refollow_unchanged_links.
+    Re-propagated by T14 at a0814ab: Run gains refollow_unchanged_links. Re-propagated
+    by T15 at bad753c: Run gains recheckable_urls, empty after an initial run (its
+    frontier was new, so PrepareRun found no settled row).
     """
     result = crawl_once(tmp_path, site())
     run = result.run
@@ -2051,6 +2212,7 @@ def test_entity_fields_Run(tmp_path: Path) -> None:
             "targets",
             "forced_refetch",
             "active_urls",
+            "recheckable_urls",
             "unresolved_urls",
             "error",
             "interrupt_requested",
@@ -2065,6 +2227,7 @@ def test_entity_fields_Run(tmp_path: Path) -> None:
         ),
     )
     assert run.refollow_unchanged_links is True
+    assert run.recheckable_urls == frozenset()
     assert run.tripped_hosts == []
     assert run.has_tripped_host is False
     assert run.targeted is False

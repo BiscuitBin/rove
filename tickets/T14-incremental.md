@@ -514,26 +514,30 @@ arrived; the verification output, each headed by its commit.
      nothing (`UnchangedRunIsStable`). The question was: a server stamping every answer
      with a fresh `Last-Modified` or `ETag` over a byte-identical body made every sync
      rewrite every page file and `index.jsonl`.
-- **The T14 follow-up batched needs-user question: OPEN.** Gaps the answers leave, found
-  while specifying them; each states the interim the specification at `a0814ab`
-  implies, built and never presented as the answer, and none blocks an owned
-  obligation.
-  1. **A moved sitemap lastmod still rewrites a page file.** `sitemap_lastmod` is still
-     in the frontmatter, and `RecordUnchanged` takes a moved value, so a sitemap whose
-     lastmod moves over a byte-identical page still rewrites the page file (the answer
-     named only `etag` and `last_modified`). Interim: as written, the lastmod is written
-     and the file moves.
-  2. **Navigation links are not re-followed.** Navigation links are not stored with a
-     page, so an unchanged page re-follows its content links only. Interim: content
-     links only.
-  3. **A crash before finalisation empties a page's stored links.** `RefreshPage`
-     empties a page's outbound links and only finalisation refills them; after a crash
-     before finalisation that page's stored links are empty, and it re-follows nothing,
-     until the next finalised sync. Interim: as written.
-  4. **Stored targets keep the last finalisation's normalisation.** A link's target
-     identity was normalised under the scope in force at the last finalisation, so a
-     changed `meaningful_query_params` cannot recover a dropped parameter until the page
-     changes. Interim: the stored identity, re-tested against the scope in force.
+- **The T14 follow-up batched needs-user question: ANSWERED** (items 1 to 4, carried
+  into T15's batched question as items a to d and answered there, specification
+  `bad753c`: each interim accepted as built and stated as decided). Gaps the answers
+  leave, found while specifying them; the text below is the question as asked, with
+  line numbers at `a0814ab`.
+  1. **ANSWERED (a), accepted as built: a moved sitemap lastmod rewrites the page
+     file.** `sitemap_lastmod` stays in the frontmatter (`Frontmatter`,
+     `RecordUnchanged`, `UnchangedRunIsStable` at `bad753c`). The question was:
+     `sitemap_lastmod` is still in the frontmatter, and `RecordUnchanged` takes a moved
+     value, so a sitemap whose lastmod moves over a byte-identical page still rewrites
+     the page file (the answer named only `etag` and `last_modified`).
+  2. **ANSWERED (b), accepted as built: content links only.** Only content links are
+     stored and re-followed (`RefollowUnchangedLinks` at `bad753c`). The question was:
+     navigation links are not stored with a page, so an unchanged page re-follows its
+     content links only.
+  3. **ANSWERED (c), accepted as built: no stored links until the next finalisation.**
+     A page stored by a run that crashed before finalisation re-follows nothing until
+     the next finalised sync (`RefollowUnchangedLinks` at `bad753c`). The question was:
+     `RefreshPage` empties a page's outbound links and only finalisation refills them.
+  4. **ANSWERED (d), accepted as built: the last finalisation's normalisation.** A
+     stored target identity keeps the normalisation of the scope in force at that
+     finalisation (`RefollowUnchangedLinks` at `bad753c`). The question was: a changed
+     `meaningful_query_params` cannot recover a dropped parameter until the page
+     changes.
 - **Carried.** The T13 follow-up items 1 to 3 (one URL falling due twice; the
   speculative pause's length; speculative children counting toward
   `sitemap_children_read`) are ANSWERED at `a0814ab` (the interims accepted, stated as

@@ -128,7 +128,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 648 to 714).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 658 to 741).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or
@@ -149,7 +149,7 @@ def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) ->
     if version_label(mirror.profile, identity) is not None:
         raise NotInThisSlice(rule="assign_path")
     root = page_root(identity)
-    plain = f"{root}{_relative_path(mirror, identity)}"
+    plain = _fold_directories(mirror, root, _relative_path(mirror, identity))
     stem = plain.removesuffix(_PAGE_EXTENSION)
     full = digest(identity)
     max_chars = CONFIG.max_path_chars
@@ -176,7 +176,7 @@ def page_root(identity: str) -> str:
 
 
 def host_segment(identity: str) -> str:
-    """The directory under pages/ for the identity's host (MovePage guidance, 648 to 659).
+    """The directory under pages/ for the identity's host (MovePage guidance, 658 to 670).
 
     The host lower-cased, a trailing "." dropped, every character outside [a-z0-9.-]
     replaced with "-", the device-name rewrite applied, then a non-default port appended
@@ -222,8 +222,25 @@ def _relative_path(mirror: "Mirror", identity: str) -> str:
     return "/".join(segments)
 
 
+def _fold_directories(mirror: "Mirror", root: str, relative: str) -> str:
+    """`root` and `relative`, each directory spelt as a held path spells it (715 to 726).
+
+    Level by level under the parent already folded, a directory segment takes, ignoring
+    case, the spelling of the held path (every page's, its own included) that sorts first
+    by code point; one no path holds keeps its own. The last segment keeps its spelling.
+    """
+    *directories, name = relative.split("/")
+    held = sorted(page.path for page in mirror.pages)
+    prefix = root
+    for segment in directories:
+        wanted = f"{prefix}{segment}/".casefold()
+        spelt = next((path for path in held if path.casefold().startswith(wanted)), None)
+        prefix += f"{segment}/" if spelt is None else spelt[len(prefix) : len(wanted)]
+    return f"{prefix}{name}"
+
+
 def _rewrite_segment(segment: str, *, directory: bool) -> str:
-    """The segment rewrites inside pages/<host>/ (MovePage guidance, 676 to 693).
+    """The segment rewrites inside pages/<host>/ (MovePage guidance, 690 to 707).
 
     Each reads the sanitised segment alone and they apply together, agreeing where they
     overlap: a trailing run of "." and a leading "." become "-"; a directory named,

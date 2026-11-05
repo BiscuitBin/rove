@@ -1,4 +1,4 @@
-"""Page intake (mirror.allium 515 to 896): candidates become pages and aliases.
+"""Page intake (mirror.allium 518 to 916): candidates become pages and aliases.
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
 `settle_candidate` fires the one whose guards hold, exactly one per candidate. The
@@ -7,7 +7,6 @@ its file event on the mirror, and the next finalise pass applies it.
 """
 
 from rovo._mirror.model import (
-    CONFIG,
     Alias,
     CandidateDelivered,
     CandidateDiscarded,
@@ -188,7 +187,7 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> LinksFou
 
 
 def links_found(candidate: PageCandidate, page: Page) -> LinksFound:
-    """The LinksFound RefreshPage raises for the stored page (mirror.allium 858)."""
+    """The LinksFound RefreshPage raises for the stored page (mirror.allium 878)."""
     content = candidate.content
     return LinksFound(
         candidate=candidate,
@@ -388,7 +387,7 @@ def revive_removed_page(candidate: PageCandidate, clock: Clock) -> Page | None:
     target.previous_digest = None
     target.first_seen = clock.now()
     mirror.record_file_effect(
-        FileEffect(kind=FileEffectKind.archived_copy_deleted, path=archived_path)
+        FileEffect(kind=FileEffectKind.archived_copy_deleted, path=archived_path, source=new_path)
     )
     refresh_page(candidate, target, clock)
     return target
@@ -450,7 +449,7 @@ def retire_page(
     """Realises mirror.allium RetirePage: its PageRemoved; None when the page is not written.
 
     The page keeps its record and path; its aliases and outbound links go. Its file is
-    archived at _removed/<host>/<relative path>, or deleted under CONFIG.prune; no file
+    archived at _removed/<host>/<relative path>, or deleted under the mirror's prune; no file
     moves here: the event is recorded and the next finalise pass applies it. A page moved
     this run and not yet published is still at its published path, which the event takes.
     """
@@ -464,7 +463,7 @@ def retire_page(
     page.moved_from = None
     mirror.aliases = [alias for alias in mirror.aliases if alias.target is not page]
     mirror.links = [link for link in mirror.links if link.source is not page]
-    kind = FileEffectKind.deleted if CONFIG.prune else FileEffectKind.archived
+    kind = FileEffectKind.deleted if mirror.prune else FileEffectKind.archived
     source = _published_path(mirror, page.path)
     mirror.record_file_effect(FileEffect(kind=kind, path=page.path, source=source))
     removed = PageRemoved(mirror=mirror, page=page, reason=reason, candidate=candidate)

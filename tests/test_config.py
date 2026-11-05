@@ -16,7 +16,7 @@ from rovo._config import Configuration, initial_scope, resolve_config, starter_c
 from rovo._convert import profiles
 from rovo._crawl.model import RenderMode, RobotsMode, StealthMode
 from rovo._report import ExitCode
-from spec_values import spec_bool, spec_int, spec_name
+from spec_values import config_defaults, spec_bool, spec_int, spec_name
 
 SITE = "http://docs.example"
 SEED = f"{SITE}/guide/start.html"
@@ -36,6 +36,7 @@ TEMPLATE_KEYS = {
     "conversion": {"profile"},
     "crawl": {"robots", "render_mode", "stealth_mode", "refollow_unchanged_links"},
     "quality": {"fail_on_low_quality"},
+    "mirror": {"prune"},
 }
 
 
@@ -90,6 +91,8 @@ def test_entity_fields_Configuration(tmp_path: Path) -> None:
     """Verify all declared fields on Configuration are present with correct types.
 
     Re-propagated by T14 at a0814ab: Configuration gains refollow_unchanged_links.
+    Re-propagated by T15 at bad753c: Configuration gains prune (mirror.prune), the
+    mirror's default.
     """
     settings = resolve_config(initialised(tmp_path))
     assert isinstance(settings, Configuration)
@@ -111,6 +114,7 @@ def test_entity_fields_Configuration(tmp_path: Path) -> None:
     assert settings.stealth_mode is StealthMode.off
     assert settings.max_age is None
     assert settings.refollow_unchanged_links is _config.CONFIG.refollow_unchanged_links
+    assert settings.prune is spec_bool("mirror", "prune")
     assert settings.fail_on_low_quality is _config.CONFIG.fail_on_low_quality
     assert settings.unblocking_provider is None
     assert settings.has_seeds is True
@@ -177,6 +181,32 @@ def test_config_default_refollow_unchanged_links(tmp_path: Path) -> None:
     assert invalid.problems == ("crawl.refollow_unchanged_links: invalid value 'no'",)
     drop_key(out_dir, "refollow_unchanged_links")
     assert resolve_config(out_dir).refollow_unchanged_links is declared
+
+
+def test_config_default_prune(tmp_path: Path) -> None:
+    """Verify config parameter prune has its declared default.
+
+    rovo.allium declares prune's default as mirror.allium's (mirror/config.prune), so
+    the value is read there. The built-in default, the template's [mirror] prune and an
+    absent key agree; the file's true is read as true, and a value that is not a boolean
+    is a problem naming the key path mirror.prune.
+    """
+    assert config_defaults("rovo")["prune"] == "mirror/config.prune"
+    declared = spec_bool("mirror", "prune")
+    out_dir = initialised(tmp_path)
+    parsed = tomllib.loads(rovo_toml(out_dir).read_text(encoding="utf-8"))
+    assert parsed["mirror"]["prune"] is declared
+    assert resolve_config(out_dir).prune is declared
+    set_key(out_dir, "prune", "true")
+    pruning = resolve_config(out_dir)
+    assert pruning.valid is True
+    assert pruning.prune is True
+    set_key(out_dir, "prune", '"no"')
+    invalid = resolve_config(out_dir)
+    assert invalid.valid is False
+    assert invalid.problems == ("mirror.prune: invalid value 'no'",)
+    drop_key(out_dir, "prune")
+    assert resolve_config(out_dir).prune is declared
 
 
 def test_rovo_toml_round_trips() -> None:

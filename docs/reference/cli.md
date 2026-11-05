@@ -60,8 +60,9 @@ Create a mirror: write rovo.toml and an empty manifest. Nothing is fetched.
 | `OUT_DIR` | The directory the mirror is made in; created when absent. |
 | `--profile NAME` | A catalogue profile (`generic`, `mslearn`, `devsite`). By default the URL's host picks one, else `generic`. |
 
-`rovo init` writes `OUT_DIR/rovo.toml`, every key with its default, and an empty
-manifest at `OUT_DIR/.rovo/manifest.json`, and makes no request. The scope it writes
+`rovo init` writes `OUT_DIR/rovo.toml`, every key with its default (the sections
+`site`, `scope`, `conversion`, `crawl`, `quality`, `mirror` and `unblocking`), and an
+empty manifest at `OUT_DIR/.rovo/manifest.json`, and makes no request. The scope it writes
 keeps the URL's host, its directory as the path prefix and, as the root URL, its first
 path segment. It exits 2, writing nothing, when the URL is not an http or https URL
 that parses (`http://[` is not one), the
@@ -134,7 +135,8 @@ disallowed by robots.txt`), and a 3xx with no `Location` fails with its status. 
 the mirror that now answers `404` or `410`, or redirects out of the scope, is removed:
 its record keeps its path (`removal_reason` `absent` or `redirected_out`, the target in
 `redirect_target`), its file is archived under `_removed/<host>/` at the path it had
-under `pages/<host>/`, links to it become `dangling`, and the report lists it once as
+under `pages/<host>/` (deleted instead with `mirror.prune = true` in `rovo.toml`), links
+to it become `dangling`, and the report lists it once as
 `removed`. A URL with no page that answers `404` or `410` is silent; one that loops,
 passes the hop limit or redirects out of scope is listed under `failed_urls`. A page
 whose URL now redirects to a URL no page holds moves there: it keeps its record, takes
@@ -148,7 +150,10 @@ its archived copy goes. A page whose source URL the scope in force no longer adm
 narrowed `path_prefixes`, say) is not requested and is removed (`out_of_scope`) when the
 sync finalises. Files move only then, after the run: an interrupted sync leaves the
 pages and the archive as the last finished sync left them. A directory under `pages/` or
-`_removed/` left empty is removed.
+`_removed/` left empty is removed. A URL an earlier sync left settled with no page of
+its own (one that answered `404` or `410`, a duplicate, or a moved page's old URL) is
+fetched again, once per sync, when a page link, a sitemap or `llms.txt` names it again;
+an old URL that now answers its own page takes back the page it led to.
 
 Before any page, `rovo sync` discovers pages beyond the seeds, host by host in sorted
 order, once each host's robots.txt is read. It reads the sitemaps that host's robots.txt

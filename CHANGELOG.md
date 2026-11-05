@@ -123,3 +123,10 @@ policy.
   reach one page in a sync settle as one page and a `duplicate` row; a removed page that
   answers again is revived at its path; a page a narrowed scope no longer admits is
   retired at the next finalisation. The report lists each removal once as `removed`.
+- `rovo.toml` gains a `[mirror]` section, written by `rovo init`: `mirror.prune = true`
+  deletes a removed page's file instead of archiving it under `_removed/` (default
+  `false`). A full `rovo sync` fetches again a URL an earlier sync left settled (one
+  that answered `404` or `410` with no page, a duplicate, or a moved page's old URL)
+  when a page link, a sitemap or `llms.txt` names it again, once per sync. A directory
+  under `pages/<host>/` keeps one spelling: a new page whose directory differs only in
+  case from one a page already uses takes that spelling.

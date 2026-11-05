@@ -1,6 +1,6 @@
 """assign_path's full-digest fallback and its null outcome (mirror.allium MovePage, at fed9ed8).
 
-The guidance (mirror.allium 699 to 712): a path another page holds (ignoring case) or one
+The guidance (mirror.allium 706 to 732): a path another page holds (ignoring case) or one
 past max_path_chars becomes a stem cut to max_path_chars - 10, "-" and the first
 collision_hash_chars hex of the identity's digest. "When that suffixed path is itself held
 (ignoring case) or too long, the suffix is the full 64-hex digest instead, with the stem

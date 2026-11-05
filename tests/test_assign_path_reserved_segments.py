@@ -1,6 +1,6 @@
 """assign_path's segment rewrites inside pages/<host>/ (mirror.allium MovePage, at fed9ed8).
 
-The guidance (mirror.allium 674 to 697): each rewrite reads one sanitised segment alone
+The guidance (mirror.allium 681 to 704): each rewrite reads one sanitised segment alone
 and they apply together. A trailing run of "." becomes "-"; a leading "." becomes "-"
 (.git/ gives -git/, .rovo/ gives -rovo/); a directory segment equal, ignoring case, to a
 managed root file name has its last "." replaced with "-" (llms.txt/guide gives
@@ -146,14 +146,18 @@ def test_md_appended_unless_the_last_segment_ends_in_lower_case_md(
 
 
 def test_segment_rewrites_happen_before_the_collision_check(tmp_path: Path) -> None:
-    """A rewritten path another page holds gains the identity's hash suffix."""
+    """A rewritten path another page holds gains the identity's hash suffix.
+
+    Since bad753c the rewritten directory -ROVO folds onto the held spelling -rovo
+    (assign_path guidance, mirror.allium 715 to 726), so only the suffix tells them apart.
+    """
     mirror = new_mirror(tmp_path)
     holder = stored(mirror, requested=f"{SITE}/guide/-rovo/page.html")
     assert holder.path == f"{ROOT}-rovo/page.md"
     identity = f"{SITE}/guide/.ROVO/page.html"
     suffix = digest(identity)[: model.CONFIG.collision_hash_chars]
     path = assign_path(mirror, identity)
-    assert path == f"{ROOT}-ROVO/page-{suffix}.md"
+    assert path == f"{ROOT}-rovo/page-{suffix}.md"
     assert_avoids_managed_names(path, ROOT)
 
 

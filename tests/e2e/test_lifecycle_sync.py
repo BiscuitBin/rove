@@ -373,3 +373,110 @@ def test_discovery_follows_redirects_within_the_allowed_hosts(
     pages = page_root(base)
     assert markdown_files(out) == [f"{pages}orphan.md", f"{pages}start.md"]
     assert load(out / "crawl-report.json")["discovery_problems"] == []
+
+
+# The T15 follow-up (spec bad753c): rovo.toml's [mirror] prune, an absent row rechecked
+# when a later sync names it again, and one spelling per directory.
+
+
+def set_mirror_key(out: Path, key: str, value: str) -> None:
+    """rovo.toml's [mirror] `key = value`: replaced if present, else added under [mirror]."""
+    config = out / "rovo.toml"
+    text = config.read_text(encoding="utf-8")
+    line = f"{key} = {value}"
+    text, count = re.subn(rf"(?m)^{re.escape(key)} = .*$", line, text)
+    if not count:
+        if "[mirror]\n" in text:
+            text = text.replace("[mirror]\n", f"[mirror]\n{line}\n", 1)
+        else:
+            text = f"{text.rstrip()}\n\n[mirror]\n{line}\n"
+    config.write_text(text, encoding="utf-8")
+
+
+def test_mirror_prune_in_rovo_toml_deletes_a_removed_pages_file(
+    serve_site: SiteServer, tmp_path: Path
+) -> None:
+    """rovo.toml's [mirror] prune = true reaches RetirePage (rovo.allium Configuration).
+
+    gone.html answers 404 on the second sync: the page is removed as absent and reported
+    removed, and under prune its file is deleted rather than archived, so no _removed/
+    directory exists.
+    """
+    root, base = served(serve_site, tmp_path)
+    write(root, "guide/start.html", page_html("Getting started", ["gone.html"]))
+    write(root, "guide/gone.html", page_html("A topic that goes away"))
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    pages = page_root(base)
+    gone_url, gone_path = f"{base}guide/gone.html", f"{pages}gone.md"
+    assert (out / gone_path).is_file()
+
+    set_mirror_key(out, "prune", "true")
+    (root / "guide" / "gone.html").unlink()
+    assert synced(out) is ExitCode.ok
+    gone = record(out, gone_url)
+    assert (gone["status"], gone["removal_reason"]) == ("removed", "absent")
+    assert not (out / gone_path).exists()
+    assert not (out / "_removed").exists()
+    assert [row["url"] for row in changes(out) if row["kind"] == "removed"] == [gone_url]
+    assert markdown_files(out) == [f"{pages}start.md"]
+
+
+def test_a_link_absent_last_sync_is_fetched_when_the_next_sync_names_it_again(
+    serve_site: SiteServer, tmp_path: Path
+) -> None:
+    """crawl.allium PrepareRun and Enqueue (bad753c): an absent row is rechecked.
+
+    The seed links to later.html, which does not exist on the first sync: its row is
+    absent and no page is written. Before the second sync later.html is published and
+    the seed changes; the seed's link names later.html again, so it is requested,
+    written and reported added.
+    """
+    root, base = served(serve_site, tmp_path)
+    write(root, "guide/start.html", page_html("Getting started", ["later.html"]))
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    pages = page_root(base)
+    later_url, later_path = f"{base}guide/later.html", f"{pages}later.md"
+    assert frontier_status(out, later_url) == "absent"
+    assert markdown_files(out) == [f"{pages}start.md"]
+
+    write(root, "guide/later.html", page_html("A topic published later"))
+    write(root, "guide/start.html", page_html("Getting started again", ["later.html"]))
+    start = root / "guide" / "start.html"
+    moved_on = start.stat().st_mtime + A_MINUTE
+    os.utime(start, (moved_on, moved_on))
+    since = len(serve_site.paths(base))
+    assert synced(out) is ExitCode.ok
+    assert "/guide/later.html" in requested(serve_site, base, since)
+    assert frontier_status(out, later_url) == "done"
+    assert record(out, later_url)["status"] == "written"
+    assert (out / later_path).is_file()
+    assert {
+        "kind": "added",
+        "url": later_url,
+        "path": later_path,
+        "moved_from": None,
+    } in changes(out)
+
+
+def test_a_directory_has_one_spelling_across_pages(serve_site: SiteServer, tmp_path: Path) -> None:
+    """MovePage guidance (bad753c): sub/a and Sub/b land in one directory of pages/.
+
+    Whichever page is stored first sets the directory's spelling; the other folds onto
+    it, so both manifest paths share one directory and pages/<host>/ holds one directory
+    entry for it.
+    """
+    root, base = served(serve_site, tmp_path)
+    write(root, "guide/start.html", page_html("Getting started", ["sub/a.html", "Sub/b.html"]))
+    write(root, "guide/sub/a.html", page_html("The a topic"))
+    write(root, "guide/Sub/b.html", page_html("The b topic"))
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    pages = page_root(base)
+    a_path = str(record(out, f"{base}guide/sub/a.html")["path"])
+    b_path = str(record(out, f"{base}guide/Sub/b.html")["path"])
+    directory = a_path.removeprefix(pages).split("/")[0]
+    assert directory.casefold() == "sub"
+    assert (a_path, b_path) == (f"{pages}{directory}/a.md", f"{pages}{directory}/b.md")
+    assert [entry.name for entry in (out / pages).iterdir() if entry.is_dir()] == [directory]

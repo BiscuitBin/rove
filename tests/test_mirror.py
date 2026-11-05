@@ -4049,3 +4049,136 @@ def test_a_move_onto_a_removed_identity_replaces_its_record_and_archive(tmp_path
     assert (tmp_path / other.path).is_file()
     assert not (tmp_path / old_path).exists()
     assert not (tmp_path / "_removed").exists()
+
+
+# T15 follow-up (spec bad753c): the maintainer's answers. A directory segment folds onto
+# the spelling a held path already uses (MovePage's guidance, assign_path); an alias
+# rechecked by the crawl that now serves its own page moves the page it aliased; a page
+# revived at a new path and retired in the same run keeps its archived copy (RetirePage).
+SUB_A = f"{SITE}/guide/sub/a.html"
+SUB_B_UPPER = f"{SITE}/guide/Sub/b.html"
+
+
+def test_assign_path_folds_a_directory_onto_the_spelling_a_held_path_uses(
+    tmp_path: Path,
+) -> None:
+    """MovePage guidance (bad753c): one spelling per directory, compared ignoring case.
+
+    With pages/<host>/sub/a.md held, /Sub/b gives pages/<host>/sub/b.md, and StoreNewPage
+    writes it there; a deeper directory folds too, each segment onto the spelling held
+    under the same parent (sub/Deep/ for /SUB/deep/). The last segment keeps its own
+    spelling and meets the collision test: /sub/A collides with sub/a.md ignoring case.
+    """
+    mirror = new_mirror(tmp_path)
+    assert stored(mirror, requested=SUB_A).path == f"{ROOT}sub/a.md"
+    assert assign_path(mirror, SUB_B_UPPER) == f"{ROOT}sub/b.md"
+    assert stored(mirror, requested=SUB_B_UPPER).path == f"{ROOT}sub/b.md"
+    deep = stored(mirror, requested=f"{SITE}/guide/sub/Deep/c.html")
+    assert deep.path == f"{ROOT}sub/Deep/c.md"
+    assert assign_path(mirror, f"{SITE}/guide/SUB/deep/d.html") == f"{ROOT}sub/Deep/d.md"
+    leaf = f"{SITE}/guide/sub/A.html"
+    suffix = digest(leaf)[: model.CONFIG.collision_hash_chars]
+    assert assign_path(mirror, leaf) == f"{ROOT}sub/A-{suffix}.md"
+
+
+def test_assign_path_takes_the_spelling_first_by_code_point_and_moves_no_page(
+    tmp_path: Path,
+) -> None:
+    """MovePage guidance (bad753c): of several held spellings, the first by code point.
+
+    Held paths already spell one directory Sub/ and sub/; "Sub" sorts before "sub", so a
+    new page under /SUB/ goes to Sub/, and neither held page is moved.
+    """
+    mirror = new_mirror(tmp_path)
+    lower = stored(mirror, requested=f"{SITE}/guide/x.html")
+    lower.path = f"{ROOT}sub/x.md"
+    upper = stored(mirror, requested=f"{SITE}/guide/y.html")
+    upper.path = f"{ROOT}Sub/y.md"
+    page = stored(mirror, requested=f"{SITE}/guide/SUB/z.html")
+    assert page.path == f"{ROOT}Sub/z.md"
+    assert (lower.path, upper.path) == (f"{ROOT}sub/x.md", f"{ROOT}Sub/y.md")
+
+
+def test_a_move_to_a_url_differing_in_directory_case_keeps_the_directory(
+    tmp_path: Path,
+) -> None:
+    """MovePage guidance (bad753c): a page at sub/x.md whose URL becomes /Sub/x keeps it.
+
+    The page's own path is a held path, so its directory keeps its spelling and the path
+    does not change: no file moves and moved_from stays null.
+    """
+    old_url = f"{SITE}/guide/sub/x.html"
+    new_url = f"{SITE}/guide/Sub/x.html"
+    mirror, (page,) = written_mirror(tmp_path, old_url)
+    path = page.path
+    assert path == f"{ROOT}sub/x.md"
+    candidate = candidate_for(
+        mirror,
+        requested=old_url,
+        source=new_url,
+        hops=(old_url,),
+        converted=content(body=OTHER_BODY),
+    )
+    assert move_page(candidate, FixedClock(LATER)) is page
+    assert (page.identity, page.path, page.moved_from) == (new_url, path, None)
+    finalised_run(mirror)
+    assert (tmp_path / path).is_file()
+    assert [p.name for p in (tmp_path / ROOT).iterdir() if p.is_dir()] == ["sub"]
+
+
+def test_a_rechecked_alias_serving_its_own_page_moves_the_page_it_aliased(
+    tmp_path: Path,
+) -> None:
+    """MovePage guidance (bad753c): an alias URL that now answers as itself.
+
+    OTHER moved to NEW in the second run, leaving OTHER its alias. In the third run the
+    crawl rechecks OTHER, which answers its own page: the page it aliased moves back to
+    OTHER's identity and path, and OTHER is no longer an alias.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    old_path = other.path
+    assert move_page(moved_candidate(mirror), FixedClock(LATER)) is other
+    finalised_run(mirror)
+    assert alias_rows(mirror) == [(OTHER, NEW)]
+    rechecked = candidate_for(
+        mirror, requested=OTHER, run_id=THIRD_RUN, converted=content(body=OTHER_BODY)
+    )
+    assert settle_candidate(rechecked, FixedClock(LATEST)) is other
+    assert (other.identity, other.path) == (OTHER, old_path)
+    assert mirror.alias(OTHER) is None
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert (tmp_path / old_path).is_file()
+    assert not (tmp_path / f"{ROOT}new.md").exists()
+
+
+def test_a_page_revived_at_a_new_path_and_retired_in_one_run_keeps_its_archived_copy(
+    tmp_path: Path,
+) -> None:
+    """RetirePage guidance (bad753c): the existing _removed/ copy, its last bytes, stays.
+
+    OTHER, removed and archived by the second run, is revived in the third after the
+    scope's path prefix was dropped, so its old path is no longer the one assign_path
+    gives and it is revived at a new path; it answers 404 in that same run. The pending
+    ArchivedCopyDeleted is cancelled and the never-published new path is not archived:
+    _removed/ holds the old copy alone, and pages/ has no file at the new path.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    old_path = other.path
+    published_bytes = (tmp_path / old_path).read_bytes()
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    mirror.scope = dataclasses.replace(mirror.scope, path_prefixes=())
+    revived = candidate_for(
+        mirror, requested=OTHER, run_id=THIRD_RUN, converted=content(body=OTHER_BODY)
+    )
+    assert settle_candidate(revived, FixedClock(LATEST)) is other
+    new_path = other.path
+    assert new_path != old_path
+    gone = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
+    assert isinstance(settle_candidate(gone, FixedClock(LATEST)), PageRemoved)
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    removed_area = tmp_path / "_removed"
+    kept = [path for path in removed_area.rglob("*") if path.is_file()]
+    assert kept == [tmp_path / archived(old_path)]
+    assert kept[0].read_bytes() == published_bytes
+    assert not (tmp_path / new_path).exists()

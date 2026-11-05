@@ -199,6 +199,7 @@ def _start_sync(
     mirror.profile = profile
     mirror.scope = scope
     mirror.recorded_root_url = settings.root_url
+    mirror.prune = settings.prune
     mirror.processing_signature = signature_of(scope, profile)
     report = CrawlReport(
         mirror=mirror,

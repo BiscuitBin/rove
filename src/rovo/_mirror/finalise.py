@@ -1,4 +1,4 @@
-"""The finalise pass (mirror.allium 530, 1010 to 1176): bodies, frontmatter, page files.
+"""The finalise pass (mirror.allium 533, 1051 to 1217): bodies, frontmatter, page files.
 
 A page file is `---`, the frontmatter as YAML with its keys sorted and absent values
 omitted, `---`, then the body. Strings and string lists are JSON-quoted, which YAML

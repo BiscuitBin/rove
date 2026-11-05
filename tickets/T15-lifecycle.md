@@ -190,10 +190,11 @@ witness record says `PASS`; the checkpoint's adversarial review has run.
 - No `prune` key: `prune` stays the mirror's built-in `false`, reachable on unit inputs
   only (Open points item 3).
 - No harness change: `tests/e2e/conftest.py` is read, not changed (Facts).
-- No new `rovo.toml` key, flag or environment variable; no new dependency; no new
-  module, so `scripts/wheel_smoke.py`' `PACKAGE_FILES` does not move.
+- No new `rovo.toml` key, flag or environment variable, except the follow-up's
+  `[mirror] prune` (`bad753c`, the answer to Open points item 3); no new dependency; no
+  new module, so `scripts/wheel_smoke.py`' `PACKAGE_FILES` does not move.
 - No specification change: `docs/specs/` is read, not edited. The six `open question`
-  blocks stay open (`crawl.allium` 2355 to 2357, `convert.allium` 473 to 475). A
+  blocks stay open (`crawl.allium` 2410 to 2412, `convert.allium` 473 to 475). A
   specification gap found while planning, implementing, in weed or in review is never
   resolved in code or in the specification: every such gap joins the one batched
   needs-user question (Open points) and the ledger's `open_questions`.
@@ -206,39 +207,42 @@ witness record says `PASS`; the checkpoint's adversarial review has run.
 | Path | Class | Content |
 | --- | --- | --- |
 | `src/rovo/_crawl/fetch.py` | shared, own lines | `HttpxFetcher` records a 3xx's `Location` header in `SiteResponse.location`; the module docstring |
-| `src/rovo/_crawl/model.py` | shared, own lines | `SiteResponse.location`; `RedirectStop` and the redirect docstrings; nothing else unless step 4 shows a field missing |
+| `src/rovo/_crawl/model.py` | shared, own lines | `SiteResponse.location`; `RedirectStop` and the redirect docstrings; nothing else unless step 4 shows a field missing; follow-up (`bad753c`): `Run.recheckable_urls` |
 | `src/rovo/_crawl/pace.py` | shared, own lines | the redirect follower (Facts); `fetch_resource` following redirects within the allowed hosts, its docstring |
-| `src/rovo/_crawl/run.py` | shared, own lines | `attempt_tier` following in-scope redirects; `fetch_robots`, `fetch_sitemap` and `read_llms_txt` lose their 3xx raises; `dispose_fetch`'s `absent`, `redirected_out` and `unfollowed_redirect` branches, its raw-3xx raise removed and its last raise narrowed; `_handle_entry` routing an absent or redirected-out candidate to the mirror and a `CandidateDuplicate` to `settle_duplicate_entry`; `CrawlResult.removed`; the docstrings |
-| `src/rovo/_mirror/model.py` | shared, own lines | the mirror's pending file effects and their composition per page path (Facts); `PageRemoved`, `CandidateDuplicate` and the file-effect event types if absent; `RemovalReason` used |
-| `src/rovo/_mirror/intake.py` | shared, own lines | `reject_duplicate_candidate`, `move_page`, `revive_removed_page`, `remove_absent_page`, `accept_absent_without_page`, `remove_redirected_out_page`, `accept_redirected_out_without_page`, `retire_page`; `rewrite_known_page`'s merge branch; `settle_candidate`'s complete partition, its fallback raise removed; the module docstring |
-| `src/rovo/_mirror/urls.py` | shared, own lines | added at implement tick 2 (weed T15-1): `assign_path` takes the page `MovePage` moves, whose own path is not held by another page (mirror.allium 708 to 721) |
-| `src/rovo/_mirror/finalise.py` | shared, own lines | `retire_out_of_scope_pages`; `finalise` applying the file effects before `PublishPage` and removing emptied directories; `Finalisation.removed`; the docstrings |
+| `src/rovo/_crawl/run.py` | shared, own lines | `attempt_tier` following in-scope redirects; `fetch_robots`, `fetch_sitemap` and `read_llms_txt` lose their 3xx raises; `dispose_fetch`'s `absent`, `redirected_out` and `unfollowed_redirect` branches, its raw-3xx raise removed and its last raise narrowed; `_handle_entry` routing an absent or redirected-out candidate to the mirror and a `CandidateDuplicate` to `settle_duplicate_entry`; `CrawlResult.removed`; the docstrings; follow-up (`bad753c`): `prepare_run` notes a full run's absent, duplicate and done rows in `recheckable_urls` and `enqueue` re-pends a rediscovered one once |
+| `src/rovo/_mirror/model.py` | shared, own lines | the mirror's pending file effects and their composition per page path (Facts); `PageRemoved`, `CandidateDuplicate` and the file-effect event types if absent; `RemovalReason` used; follow-up (`bad753c`): `Mirror.prune` (in memory, the resolved `prune`), and an archive cancels a revived page's pending `ArchivedCopyDeleted` by the path the page is held at |
+| `src/rovo/_mirror/intake.py` | shared, own lines | `reject_duplicate_candidate`, `move_page`, `revive_removed_page`, `remove_absent_page`, `accept_absent_without_page`, `remove_redirected_out_page`, `accept_redirected_out_without_page`, `retire_page`; `rewrite_known_page`'s merge branch; `settle_candidate`'s complete partition, its fallback raise removed; the module docstring; follow-up (`bad753c`): `retire_page` reads the mirror's `prune`, `revive_removed_page` names the revived path on its `ArchivedCopyDeleted` |
+| `src/rovo/_mirror/urls.py` | shared, own lines | added at implement tick 2 (weed T15-1): `assign_path` takes the page `MovePage` moves, whose own path is not held by another page (mirror.allium 728 to 741); follow-up (`bad753c`): each directory segment folds onto the spelling a held path uses |
+| `src/rovo/_mirror/finalise.py` | shared, own lines | `retire_out_of_scope_pages`; `finalise` applying the file effects before `PublishPage` and removing emptied directories; `Finalisation.removed`; the docstrings; follow-up (`bad753c`): its spec citation moved |
 | `src/rovo/_mirror/state.py` | shared, own lines | only if step 4 shows it: a page record `MovePage` deletes leaves the manifest; `redirect_target` round-trips |
 | `src/rovo/_report.py` | shared, own lines | `tally_removal` (`TallyRemoval`) |
-| `src/rovo/_commands.py` | shared, own lines | `sync` tallies the run's and the pass's removals |
+| `src/rovo/_commands.py` | shared, own lines | `sync` tallies the run's and the pass's removals; follow-up (`bad753c`): the resolved `prune` set on the mirror |
+| `src/rovo/_report.py`, `src/rovo/_mirror/indexes.py`, `src/rovo/_mirror/links.py` | shared, own lines | follow-up (`bad753c`): their spec line citations moved, comments only |
+| `src/rovo/_config.py` | shared, own lines | follow-up (`bad753c`): `Configuration.prune`, read from `rovo.toml`'s `[mirror] prune`; `starter_config` writes the `[mirror]` section |
 | `tests/fakes.py` | shared, own lines | a `redirect_response(url, location, status=301)` helper beside `html_response` |
 | `tests/test_mirror.py` | shared, own lines | the mirror obligations of step 3 and the mirror guarantees |
 | `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3; `test_raw_unchanged_is_defeated_by_a_redirect_hop` re-propagated (a hopped answer now raises `PageFetched`; ledger note, T14) |
 | `tests/test_pace.py` | shared, own lines | the follower and `fetch_resource`'s redirects (hop limit, loop, off-host error, bytes, limiter per hop, retry restarting the chain) |
 | `tests/test_report.py` | shared, own lines | `TallyRemoval`'s three obligations |
+| `tests/test_config.py` | shared, own lines (re-propagated) | follow-up (`bad753c`): `config-default.prune`; `test_entity_fields_Configuration` and the template's keys gain `prune` (ledger note, T09) |
+| `tests/test_assign_path_fallback.py`, `tests/test_assign_path_reserved_segments.py`, `tests/test_page_namespace.py` | shared, own lines | follow-up (`bad753c`): their `mirror.allium` line citations moved, comments only; T09's `test_segment_rewrites_happen_before_the_collision_check` re-propagated (`-ROVO` folds onto the held `-rovo`) |
 | `tests/test_commands.py` | shared, own lines | two syncs over `FakeFetcher`: a 404 removes and archives, the report's `removed` row; a narrowed scope retires |
 | `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_a_later_slices_answer_stops_the_run` loses its `robots-redirect`, `absent-page` and `page-redirect` cases; `test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_placeholder_stop` keeps only the placeholder case, renamed `test_a_sitemap_filter_placeholder_stops`; `test_mirror_branches_of_later_slices_stop` and `test_a_canonical_merging_a_known_page_into_another_stops` replaced by assertions that the duplicate, the retirement and the merge now settle (renamed, ledger notes naming T10, T13 and T14); a soft verdict and a non-HTML answer asserted still to stop |
 | `tests/test_regressions.py` | shared, own lines | `test_a_raw_page_redirect_is_a_later_slices` re-propagated: a 3xx with no `Location` fails with its status text (T12 ledger note); one test per divergence planning, weed or review finds |
-| `tests/test_lifecycle_regressions.py` | new | added at review T15-2: one test per valid review finding (T15-2: C1/B1, C2/B2, C3/B3; T15-3: C1/B1), kept out of the hash-pinned `tests/test_regressions.py` so no generated test file changes |
+| `tests/test_lifecycle_regressions.py` | new | added at review T15-2: one test per valid review finding (T15-2: C1/B1, C2/B2, C3/B3; T15-3: C1/B1), kept out of the hash-pinned `tests/test_regressions.py` so no generated test file changes; hash-pinned at the follow-up (`bad753c`), its citations moved |
 | `tests/e2e/test_lifecycle_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and their site-generating helper; no unit test is named `test_lifecycle_sync.py` |
-| `docs/reference/cli.md` | shared, own lines | `rovo sync`: removal, archive, redirects, moves, merges, duplicates, revival, a narrowed scope, the report's `removed` rows; a robots.txt redirect that stops disallows its origin; an absent URL with no page is silent; the later-slice sentence loses a redirect, a 404 and a merging canonical |
-| `docs/reference/mirror.md` | shared, own lines | a `_removed/` section (the archive mirrors `pages/`, a removed page keeps its record and path, revival, `prune` not configurable); removed pages, `redirect_target` and aliases in the manifest; when files move (Facts); emptied directories |
+| `docs/reference/cli.md` | shared, own lines | `rovo sync`: removal, archive, redirects, moves, merges, duplicates, revival, a narrowed scope, the report's `removed` rows; a robots.txt redirect that stops disallows its origin; an absent URL with no page is silent; the later-slice sentence loses a redirect, a 404 and a merging canonical; follow-up (`bad753c`): `rovo init`'s starter file gains `[mirror]`, and a full sync rechecks a settled URL its discovery names again |
+| `docs/reference/mirror.md` | shared, own lines | a `_removed/` section (the archive mirrors `pages/`, a removed page keeps its record and path, revival, `prune` as `rovo.toml`'s `[mirror] prune` since the follow-up); removed pages, `redirect_target` and aliases in the manifest; when files move (Facts); emptied directories; follow-up (`bad753c`): `mirror.prune` in the `rovo.toml` table, one spelling per directory, a revived-then-retired page keeping its copy |
 | `docs/reference/testing.md` | shared, own lines | `tests/e2e/test_lifecycle_sync.py` |
 | `docs/project/repository-map.md` | shared, own lines | the tree gains `test_lifecycle_sync.py` |
-| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: the page lifecycle |
-| `tickets/README.md`, `tickets/T15-lifecycle.md` | ticket | index row, graph, slice bullet, this ticket |
-| `.allium-loop/T15-lifecycle.json`, `.allium-loop/T15-lifecycle.witness.json` | gitignored | the loop ledger and the witness record; never committed |
+| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: the page lifecycle; follow-up (`bad753c`): `[mirror] prune`, rediscovered rows rechecked, one spelling per directory |
+| `tickets/README.md`, `tickets/T15-lifecycle.md`, `tickets/T14-incremental.md` | ticket | index row, graph, slice bullet, this ticket; follow-up (`bad753c`): T14's follow-up items 1 to 4 marked ANSWERED |
+| `.allium-loop/T15-lifecycle.json`, `.allium-loop/T15-lifecycle.witness.json`, `.allium-loop/T14-incremental.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `pyproject.toml`, `uv.lock`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
 `Justfile`, `AGENTS.md` (line 10 stays true), `scripts/wheel_smoke.py`,
-`src/rovo/__init__.py`, `src/rovo/cli.py`, `src/rovo/_config.py`,
-`src/rovo/_crawl/sitemaps.py`, `src/rovo/_mirror/links.py`,
-`src/rovo/_mirror/indexes.py`, `src/rovo/_convert/`, `tests/e2e/conftest.py`,
+`src/rovo/__init__.py`, `src/rovo/cli.py`,
+`src/rovo/_crawl/sitemaps.py`, `src/rovo/_convert/`, `tests/e2e/conftest.py`,
 `tests/test_import_direction.py`, `docs/decisions/` and `docs/specs/` are read, not
 changed. A file not in this table that turns out to need a change is added to the table
 in the same change with its reason, or handed back if it is a decision record or a
@@ -591,13 +595,22 @@ one arrived; the verification output, each headed by its commit.
 
 ## Open points
 
-- **The T15 batched needs-user question: OPEN.** One question to the maintainer, its
-  items numbered so an answer can cite them; items 1 to 7 were found while planning
-  T15, items 8 and 9 in the checkpoint review (round 1), items 10 and 11 by the weed
-  passes. Each
-  states the interim built, never presented as the answer; none blocks an owned
-  obligation unless the witness says so.
-  1. **When a lifecycle rule's file effect happens on disk.** `RetirePage` (984),
+- **The T15 batched needs-user question: ANSWERED** (items 1 to 11, the addenda and
+  the carried T14 items a to d, specification `bad753c`). One question to the
+  maintainer, its items numbered so an answer can cite them; items 1 to 7 were found
+  while planning T15, items 8 and 9 in the checkpoint review (round 1), items 10 and 11
+  by the weed passes. Item 4 is answered "recheck when rediscovered", item 3 "a
+  `rovo.toml` key", item 11 "reuse the existing spelling"; every other interim is
+  accepted as built and stated as decided in the specification. The text of each item
+  is the question as asked, with line numbers at `a0814ab`.
+  1. **ANSWERED, accepted as built** (`RetirePage`'s guidance at `bad753c`), and the
+     unresolved case decided: a page revived at a new path (its old one no longer
+     free) and retired again in the same run keeps its existing `_removed/` copy, its
+     last published bytes; the pending `ArchivedCopyDeleted` is cancelled and the
+     never-published new path is not archived. A page moved, then retired in one run,
+     archives from its last published path to `_removed/<host>/<new path>` (deleted
+     under `prune`), as built. **When a lifecycle rule's file effect happens on
+     disk.** `RetirePage` (984),
      `MovePage` (619) and `ReviveRemovedPage` (728) raise `PageFileArchived`,
      `PageFileDeleted`, `PageFileMoved` and `ArchivedCopyDeleted` at intake, while the
      manifest is saved only after finalisation and `RefreshPage`'s guidance (817) keeps
@@ -618,23 +631,38 @@ one arrived; the verification output, each headed by its commit.
      last published bytes; interim: the archive is taken from the path the page was
      last published at and lands at `_removed/<host>/<new path>` (under `prune`, that
      file is deleted), so the page is never lost (review T15-2 and T15-3).
-  2. **Emptied directories under `pages/` and `_removed/`.** An archive, a move or a
+  2. **ANSWERED, accepted as built: removed, the namespace root included**
+     (`RetirePage`'s guidance at `bad753c`). **Emptied directories under `pages/` and
+     `_removed/`.** An archive, a move or a
      deletion can leave a directory empty; the specification does not say whether it
      stays. Interim: removed, the namespace root included, as `_indexes/` already is
      (`docs/reference/mirror.md`, the indexes section).
-  3. **`prune` reaches no configuration layer.** `mirror.allium` config (498) declares
+  3. **ANSWERED: a `rovo.toml` key.** `prune` is `rovo.allium`'s `Configuration.prune`
+     (default `mirror/config.prune`, false), in a new `[mirror]` section
+     (`mirror.prune`), wired to the mirror's `prune`; `init`'s starter file writes the
+     section. Only the layers `resolve_config` already has read it; the environment and
+     flag layers arrive in T16 like every other key. **`prune` reaches no
+     configuration layer.** `mirror.allium` config (498) declares
      `prune` (default false), but `rovo.allium`'s `Configuration` (69) names no `prune`
      key, and unlike `max_path_chars` the specification does not say it is not a key.
      Interim: `CONFIG.prune` false, no `rovo.toml` key; the delete branch is tested on
      unit inputs only.
-  4. **Rows a full sync never re-pends.** `PrepareRun` (645) re-pends written pages,
+  4. **ANSWERED: recheck when rediscovered.** A full sync's `PrepareRun` notes its
+     `absent`, `duplicate` and `done` rows in `Run.recheckable_urls`; `Enqueue`
+     re-pends one of them, once per run, when the run's discovery (a page link, a
+     sitemap entry or `llms.txt`) names it again and no page has that identity; a row
+     nothing names stays settled. A rediscovered alias that now serves its own page
+     moves the page it aliased (`MovePage`'s guidance). **Rows a full sync never
+     re-pends.** `PrepareRun` (645) re-pends written pages,
      removed pages and `retry_entries`, and `Enqueue` never changes an existing row's
      status in a standard run, so an `absent` row with no page
      (`AcceptAbsentWithoutPage`), a `duplicate` row (its URL now an alias) and the
      requested identity of a moved page (`done`) are never fetched again by a full
      sync: a URL that answered 404 and later appears, or an alias whose redirect is
      later removed, is never rechecked. Interim: as written.
-  5. **A redirect hop robots.txt disallows.** `RedirectStop` (202) has `out_of_scope`,
+  5. **ANSWERED, accepted as built**, the addendum included: a disallowed page hop is
+     retried under `HttpRetry` like any other error answer (`FetchRobots`' and
+     `AttemptTier`'s guidance at `bad753c`). **A redirect hop robots.txt disallows.** `RedirectStop` (202) has `out_of_scope`,
      `loop` and `hop_limit` only, while `Politeness` (2258) respects robots.txt in every
      standard run and `rovo.allium`'s fetch guidance (862) says every redirect respects
      robots. Interim: before a hop the destination origin's robots.txt is read when the
@@ -649,7 +677,8 @@ one arrived; the verification output, each headed by its commit.
      Also open: a disallowed page hop is an error answer, so `HttpRetry` retries the
      original URL up to `http_attempts` times and each try counts toward the breaker.
      Interim: as built.
-  6. **Validators across hops, and a 3xx with no `Location`.** `fetch_or_render` is
+  6. **ANSWERED, accepted as built** (`AttemptTier`, `FetchRobots` and `DisposeFetch`
+     at `bad753c`). **Validators across hops, and a 3xx with no `Location`.** `fetch_or_render` is
      called with `conditional` for the requested identity (`AttemptTier`, 1535); nothing
      says whether a hop carries the requested page's validators, nor what a 3xx without
      a usable `Location` is. Interim: validators on the first request only; a 3xx with
@@ -657,28 +686,39 @@ one arrived; the verification output, each headed by its commit.
      reaches `DisposeFetch`'s not-ok branch and fails with its status text, and
      `fetch_resource` returns it as an error answer, as it does a stopped redirect
      (Facts: robots.txt then disallows its origin).
-  7. **Which scope test a page's redirect hop meets.** The `AttemptTier` guidance
+  7. **ANSWERED, accepted as built** (`AttemptTier`'s guidance at `bad753c`). **Which
+     scope test a page's redirect hop meets.** The `AttemptTier` guidance
      (1564) follows "in-scope redirects" without naming the predicate. Interim:
      `within_bounds` of the hop's target (the test `PrepareRun` and
      `RetireOutOfScopePages` use; a redirect is not a link and carries no depth), a
      revisit compared by identity.
-  8. **Candidates settled with no event.** `EveryCandidateIsSettled` (1546) says
+  8. **ANSWERED, accepted as built**: `EveryCandidateIsSettled` now says at most one
+     event follows, none for the two `Accept...WithoutPage` rules (`bad753c`).
+     **Candidates settled with no event.** `EveryCandidateIsSettled` (1546) says
      exactly one of `PageStored`, `CandidateDuplicate`, `CandidateDiscarded` or
      `PageRemoved` follows every candidate, but `AcceptAbsentWithoutPage` (948) and
      `AcceptRedirectedOutWithoutPage` (967) only accept the candidate. Interim: the
      rules as written; the two answer no event (their frontier row is already settled
      by `DisposeFetch`).
-  9. **Duplicates with differing content.** `RejectDuplicateCandidate`'s guidance
+  9. **ANSWERED, accepted as built**: the content fetched first stands, so the mirror
+     is deterministic for a given frontier order (`RejectDuplicateCandidate`'s guidance
+     at `bad753c`). **Duplicates with differing content.** `RejectDuplicateCandidate`'s guidance
      (584 to 589) says the first store's content stands and that the order in which the
      two URLs were fetched never changes the mirror; for two URLs with one canonical and
      different content both cannot hold. Interim: the rule as written, the first
      store's content stands (frontier order is deterministic, so a given site still
      mirrors byte-stably).
-  10. **Base URL of a redirected `llms.txt` or sitemap.** `crawl.allium` (1181, 1229)
+  10. **ANSWERED, confirmed: the requested URL** (`ExpandSitemapEntries` and
+     `ReadLlmsTxt` at `bad753c`). **Base URL of a redirected `llms.txt` or sitemap.** `crawl.allium` (1181, 1229)
      resolves relative targets against the requested URL; RFC 3986 would use the URL
      that answered. Interim: the requested URL, as the specification states (pinned by
      `tests/test_regressions.py::test_a_redirected_llms_txt_resolves_its_targets_against_llms_txt_url`).
-  11. **Directory segments that differ only in case.** `UniquePagePathIgnoringCase`
+  11. **ANSWERED: reuse the existing spelling.** `assign_path` folds each directory
+     segment, ignoring case, onto the spelling a held page path already uses for that
+     directory (the page's own included); where held paths use several spellings, the
+     held path first by code point gives it; existing pages are not moved; the last
+     segment keeps its own spelling (`MovePage`'s guidance at `bad753c`). **Directory
+     segments that differ only in case.** `UniquePagePathIgnoringCase`
      (`mirror.allium` 1362 to 1366) compares whole page paths, so `pages/<host>/sub/a.md`
      and `pages/<host>/Sub/b.md` may coexist, and a page may move from `sub/x.md` to
      `Sub/x.md`; on a case-insensitive file system both land in one directory, which
@@ -686,22 +726,37 @@ one arrived; the verification output, each headed by its commit.
      lacks once the mirror is copied to a case-sensitive one. Interim: as built (the
      leaf file takes its new spelling; a directory keeps the spelling it was created
      with).
-- **Carried, OPEN** (from `tickets/T14-incremental.md` and
-  `.allium-loop/T14-incremental.json`, the T14 follow-up batched question, joined to
-  T15's): (a) `sitemap_lastmod` is still in the page frontmatter, so a moved sitemap
+- **Carried, ANSWERED at `bad753c`, accepted as built** (from
+  `tickets/T14-incremental.md` and `.allium-loop/T14-incremental.json`, the T14
+  follow-up batched question, joined to T15's, and marked there): (a) `sitemap_lastmod` is still in the page frontmatter, so a moved sitemap
   lastmod rewrites a byte-identical page; (b) navigation links are not stored with a
   page, so an unchanged page re-follows only its content links; (c) after a crash
   before finalisation a page's stored links are empty until the next finalised sync;
   (d) stored link targets were normalised under the last finalisation's scope. Each
-  keeps the interim T14 states. Carried to T17: `mslearn`'s `sitemap_include`
+  is now decided as T14 built it. Still carried, OPEN, to T17: `mslearn`'s `sitemap_include`
   placeholders, and a non-heading id anchor stopping the sync
   (`UncarryableBecomesIsland`). Carried to T18: a retired host's remaining discovery is
   still requested.
+- **The T15 follow-up batched needs-user question: OPEN.** Found while propagating the
+  answers at `bad753c`; it states the interim the specification implies, never
+  presented as the answer, and blocks no owned obligation.
+  1. **Which path a removed record holds when its kept copy is at its old path.**
+     `RetirePage`'s guidance (`mirror.allium` 1030 to 1047) keeps the existing
+     `_removed/` copy of a page revived at a new path and retired again in the same
+     run, but `ReviveRemovedPage` (748) set the record's `path` to the new path and
+     `RetirePage` leaves it there. `RemovedAreaKeepsPath` (1546) says a removed page's
+     copy is at `_removed/<host>/<its path>` and that the page keeps its path, so the
+     record names a path its copy is not at; a later revival raises
+     `ArchivedCopyDeleted` for the record's (new) path and the copy at the old path
+     stays in `_removed/` for ever. Should the record return to its old path, should
+     the copy move to the new one, or is the stale copy accepted? Interim: as the rules
+     are written (the record keeps the new path, the copy stays at the old one); the
+     tests assert the files only.
 - **Scope note, not a specification gap.** `DisposeFetch`'s `skipped_not_html` branch
   and the edges `in_progress -> skipped_not_html` and `skipped_not_html -> pending` are
   claimed by no slice in the T15 to T20 list; this slice keeps their stop. The
   orchestrator assigns them (T16 is the nearest, with failed and skipped URLs).
-- **The specification's open questions.** The three `crawl.allium` ones (2355 to 2357)
+- **The specification's open questions.** The three `crawl.allium` ones (2410 to 2412)
   and the three `convert.allium` ones (473 to 475) stay open; none is on this slice's
   path except the second (a URL that fails on every sync is retried for ever), which a
   redirect loop or an unknown URL redirected out now reaches: its interim holds and

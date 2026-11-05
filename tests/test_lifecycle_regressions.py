@@ -4,7 +4,7 @@ A page moved once or twice and then retired in one run keeps its file in the rem
 area (RetirePage, RemovedAreaKeepsPath); a robots.txt redirect to an allowed host not
 yet open is spaced by that host name's limiter (Politeness); and
 RefuseUnplaceableCandidate does not count the page a move would move as another page
-holding its path (mirror.allium 708).
+holding its path (mirror.allium 728).
 """
 
 import dataclasses
@@ -144,7 +144,7 @@ def test_a_robots_redirect_to_a_host_not_yet_open_is_spaced_by_that_hosts_limite
 def test_a_move_whose_only_path_is_its_own_is_not_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review T15-2 C3/B3, mirror.allium 708: a path held by another page is a collision.
+    """Review T15-2 C3/B3, mirror.allium 728: a path held by another page is a collision.
 
     With max_path_chars leaving room for the plain path alone, OTHER redirecting from
     http to https settles through MovePage, keeping its path, rather than being refused

@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 610 to 2127).
+"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2180).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -110,6 +110,8 @@ _MICROSECONDS = 6
 _PAST_EVERY_CAP = Decimal(f"1e{MAX_EMAX}")
 _TOO_MANY_REQUESTS = 429
 _SPA_ROOTS = ("root", "app", "__next", "__nuxt")
+# The rows a full run notes for a recheck when its discovery names them again (PrepareRun).
+_RECHECKABLE = frozenset({FrontierStatus.absent, FrontierStatus.duplicate, FrontierStatus.done})
 _UNRESOLVED = frozenset(
     {
         FrontierStatus.pending,
@@ -182,6 +184,7 @@ def start_run(request: RunRequest, clock: Timer) -> Run | None:
         targets=request.targets,
         forced_refetch=frozenset(),
         active_urls=frozenset(),
+        recheckable_urls=frozenset(),
         unresolved_urls=frozenset(),
         error=None,
         interrupt_requested=False,
@@ -223,7 +226,8 @@ def prepare_run(run: Run, frontier: Frontier | None) -> bool:
 
     Re-pends the row of every written page the scope admits, returns in-progress rows to
     pending, rechecks removed pages last and retries the failed, blocked and skipped rows
-    the scope admits.
+    the scope admits. Its absent, duplicate and done rows, as they stood before, are
+    noted in recheckable_urls for Enqueue to re-pend once if discovery names one again.
     """
     if run.status is not RunStatus.running or frontier is None:
         return False
@@ -232,6 +236,9 @@ def prepare_run(run: Run, frontier: Frontier | None) -> bool:
     mirror = run.target
     run.forced_refetch = _stale_pages(run) if run.kind is RunKind.update else frozenset()
     run.active_urls = frozenset(entry.identity for entry in frontier.entries)
+    run.recheckable_urls = frozenset(
+        entry.identity for entry in frontier.entries if entry.status in _RECHECKABLE
+    )
     for entry in frontier.in_progress_entries:
         entry.status = FrontierStatus.pending
     for page in mirror.written_pages:
@@ -573,7 +580,7 @@ def robots_allows(run: Run, url: str) -> bool:
     True under robots = ignore and for an origin whose stance is allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 1056 to 1096).
+    literal-$ copy included (crawl.allium 1070 to 1110).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True
@@ -596,10 +603,22 @@ def enqueue(  # noqa: PLR0913  The UrlDiscovered trigger's parameters.
     from_url: str | None = None,
     lastmod: str | None = None,
 ) -> FrontierEntry:
-    """Realises crawl.allium Enqueue: dedup by identity, never changing a row's status."""
+    """Realises crawl.allium Enqueue: dedup by identity.
+
+    A row's status changes only when an owner-testing run newly admits it, or when a full
+    run's discovery names a row PrepareRun noted as recheckable and no page has its
+    identity (re-pended once: the URL leaves recheckable_urls).
+    """
     newly_admitted = run.is_owner_testing and url not in run.active_urls
     run.active_urls = run.active_urls | {url}
     existing = frontier.entry(url)
+    rediscovered = (
+        url in run.recheckable_urls
+        and existing is not None
+        and existing.status in _RECHECKABLE
+        and run.target.page(url) is None
+    )
+    run.recheckable_urls = run.recheckable_urls - {url}
     if existing is None:
         entry = FrontierEntry(
             frontier=frontier,
@@ -614,7 +633,7 @@ def enqueue(  # noqa: PLR0913  The UrlDiscovered trigger's parameters.
         )
         frontier.entries.append(entry)
         return entry
-    if newly_admitted:
+    if newly_admitted or rediscovered:
         existing.status = FrontierStatus.pending
     existing.depth = min(existing.depth, depth)
     if lastmod is not None:
