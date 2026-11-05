@@ -936,7 +936,8 @@ surface MirrorCommands {
         -- stdout: start, page, host_backoff, breaker_tripped,
         -- owner_testing_warning and done. Without json_events
         -- ProgressReported has no sink: nothing is printed for it. A dry
-        -- run still prints its frontier as plain text.
+        -- run still prints its frontier as plain text, as crawl's DryRun
+        -- lists it: one identity per line, in next_pending order.
 
     @guarantee RefusalsInOrder
         -- A sync is refused once, for its first problem, in the order the

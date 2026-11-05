@@ -163,7 +163,6 @@ value SiteResponse {
     access_refused: status in {401, 403, 429}
     server_error: status >= 500
     retryable: error != null or status = 429 or status >= 500
-    may_carry_retry_after: status in {429, 503}
     is_html: content_type = null or declares_html(content_type)
     raw_digest: digest(markup)
 }
@@ -490,7 +489,10 @@ entity FetchAttempt {
     render_reason: RenderReason?        -- why an unblocked http answer still needs a browser
 
     -- A Retry-After past the cap retires the host, whatever try this is;
-    -- FetchRobots applies the same test to a robots.txt try.
+    -- FetchRobots applies the same test to a robots.txt try and
+    -- FetchSitemap to a declared sitemap's; a speculative probe's never
+    -- retires the host, but pauses it for retry_after_cap (FetchSitemap,
+    -- ReadLlmsTxt).
     retires_host:
         tier = http and response.retryable
         and response.retry_after != null
@@ -562,7 +564,7 @@ config {
     backoff_base: Duration = 1.second           -- doubles per try
     max_backoff: Duration = 16.seconds
     backoff_jitter: Decimal = 0.25
-    retry_after_cap: Duration = 120.seconds     -- a longer Retry-After or honoured Crawl-delay retires the host for the run
+    retry_after_cap: Duration = 120.seconds     -- a longer Retry-After or honoured Crawl-delay retires the host for the run; a longer Retry-After on a speculative probe pauses it this long instead
     owner_challenge_timeout: Duration = 5.minutes
     min_host_rate: Decimal = 0.05               -- per second; halving never goes below
 
@@ -737,6 +739,21 @@ rule Discover {
         -- read, and walks no seeds, sitemaps or llms.txt; an owner-testing
         -- run likewise. Every host is opened before any sitemap, llms.txt
         -- or page request to it.
+        -- Discovery runs in one order, which is the discovery order
+        -- next_pending breaks its last tie with (SelectBatch), so it decides
+        -- the dry run's listing and which rows a page budget admits. The
+        -- seeds are discovered first, in the scope's order. Then each
+        -- allowed host in sorted order finishes all of its discovery before
+        -- the next host opens: first its robots.txt (OpenHost); then the
+        -- sitemaps robots.txt declares, in the order the file lists them,
+        -- each sitemap index's children read as they fall due
+        -- (ExpandSitemapEntries), depth first, so a child and everything
+        -- below it are read before the index's next child and before the
+        -- next declared sitemap; then the well-known sitemaps robots.txt
+        -- did not declare, /sitemap.xml before /sitemap_index.xml, their
+        -- children likewise; last its llms.txt. A sitemap at another origin
+        -- of the host has that origin's robots.txt read just before it
+        -- (ReadRobotsBeforeSitemap).
 }
 
 rule OpenHost {
@@ -795,17 +812,23 @@ rule FetchRobots {
         -- without revisiting a URL; anything else comes back as an error.
         -- Its size covers every byte its retries received. It never
         -- classifies blocks and never feeds the breaker.
-        -- For robots.txt its tries are a page's http tries: a retryable
-        -- answer is retried while try < http_attempts, as HttpRetry does,
-        -- with the same retry_wait, the same host pause and a
-        -- HostBackedOff for each retry; every try that carries a
-        -- Retry-After on a 429 or 503 while honor_retry_after holds adds
-        -- one to the host's retry_after_honored, as CountRetryAfter does;
-        -- and a Retry-After past retry_after_cap, on any try, ends the
-        -- tries with that answer as the response and retires the host
-        -- for the run, as RetireHostOnLongRetryAfter does (retires_host
-        -- above, the same test as FetchAttempt.retires_host). The answer
-        -- then stands: a 429 or 5xx is robots_refused.
+        -- Whatever it fetches (robots.txt here, a sitemap in FetchSitemap,
+        -- llms.txt in ReadLlmsTxt), its tries are a page's http tries: a
+        -- retryable answer is retried while try < http_attempts, as
+        -- HttpRetry does, with the same retry_wait, the same host pause and
+        -- a HostBackedOff for each retry; every try whose retryable answer
+        -- carries a Retry-After while honor_retry_after holds adds one to
+        -- the host's retry_after_honored, as CountRetryAfter does; and a
+        -- Retry-After past retry_after_cap, on any try, ends the tries with
+        -- that answer as the response, with no wait and no host pause.
+        -- Whether that answer retires or pauses the host is the caller's
+        -- to say. A robots.txt try retires it for the run, as
+        -- RetireHostOnLongRetryAfter does (retires_host above, the same
+        -- test as FetchAttempt.retires_host), and so does a declared
+        -- sitemap's (FetchSitemap); a speculative probe's never does, but
+        -- pauses the host for retry_after_cap instead (QueueSitemaps,
+        -- FetchSitemap, ReadLlmsTxt). For robots.txt the answer then
+        -- stands: a 429 or 5xx is robots_refused.
 }
 
 rule AdoptRobotsRules {
@@ -901,10 +924,19 @@ rule AllowAllWhenRobotsAbsent {
     ensures: RobotsPolicy.created(run: run, origin: origin, stance: allow_all, crawl_delay: null, declared_sitemaps: [], problem: null)
 }
 
--- Sitemaps named by robots.txt are declared; /sitemap.xml and
--- /sitemap_index.xml are speculative probes. Default stated here (veto at
--- review): a speculative probe that fails never fails the run; a declared
--- sitemap that fails is reported and makes the run partial.
+-- A sitemap is declared when robots.txt names it, or when a declared
+-- sitemap index names it as a child (ExpandSitemapEntries). The well-known
+-- /sitemap.xml and /sitemap_index.xml that robots.txt does not name are
+-- speculative probes, as llms.txt is (ReadLlmsTxt), and so is every child
+-- of a speculative index: a child inherits its index's declaredness, at
+-- any depth. Default stated here (veto at review): a speculative probe
+-- that fails never fails the run and reports no problem; a declared
+-- sitemap that fails is reported and makes the run partial. A Retry-After
+-- past retry_after_cap on a declared sitemap retires the host for the
+-- run, as on robots.txt; on a speculative probe it never retires the
+-- host: it ends that probe as unavailable, silently, and pauses the host
+-- for retry_after_cap before its next request, after which the host's
+-- requests, its pages' included, carry on (FetchSitemap).
 rule QueueSitemaps {
     when: SitemapsRequested(run, name)
     requires: run.status = running
@@ -931,6 +963,7 @@ rule ReadRobotsBeforeSitemap {
     requires: run.status = running
     let host = Host{run: run, name: name}
     requires: exists host
+    requires: run.target.scope.identity_of(url) != null
     requires: hostname_of(url) = name
     requires: sitemap_admitted(url, run.target.profile, run.target.scope)
     requires: not exists RobotsPolicy{run: run, origin: origin_of(url)}
@@ -944,6 +977,7 @@ rule FetchSitemap {
     requires: run.status = running
     let host = Host{run: run, name: name}
     requires: exists host
+    requires: run.target.scope.identity_of(url) != null
     requires: hostname_of(url) = name
     requires: sitemap_admitted(url, run.target.profile, run.target.scope)
     requires: robots_allows(run, url)
@@ -951,15 +985,55 @@ rule FetchSitemap {
     let frontier = Frontier{mirror: run.target}
     let snapshot = SitemapSnapshot{frontier: frontier, url: url}
     let response = fetch_resource(url, snapshot?.etag, snapshot?.last_modified, run, host)
+    let breaker = host.breaker
+    let past_cap =
+        response.retryable and response.retry_after != null
+        and run.policy.honor_retry_after
+        and response.retry_after > run.policy.retry_after_cap
+    let retires_host = declared and past_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
+        if retires_host and exists breaker and breaker.status = watching:
+            breaker.status = tripped
+            BreakerTripped(host: host)
+        if past_cap and not declared:
+            host.paused_until = later_of(host.paused_until, now + run.policy.retry_after_cap)
+            HostBackedOff(host: host, until: now + run.policy.retry_after_cap)
         SitemapAnswered(run: run, host: host, url: url, declared: declared, response: response)
 
     @guidance
-        -- Each sitemap is read at most once per run. sitemap_admitted
-        -- applies the profile's sitemap_include filter, always, with the
-        -- scope's section and locale filled in. A sitemap on another host,
-        -- or one robots disallows, produces nothing and no problem.
+        -- Each sitemap is read at most once per run. fetch_resource tries
+        -- a sitemap as FetchRobots says: retried with a HostBackedOff per
+        -- retry, every honoured Retry-After counted, and a Retry-After
+        -- past retry_after_cap ending the tries with that answer. On a
+        -- declared sitemap that answer retires the host (retires_host
+        -- above, FetchRobots' test) and stands: SkipUnavailableSitemap
+        -- reports it sitemap_unavailable. On a speculative probe (an
+        -- undeclared well-known sitemap, or any child of a speculative
+        -- index) it never retires the host: the answer stands, the probe
+        -- ends unavailable, SkipUnavailableSitemap stays silent, and the
+        -- host is paused until retry_after_cap from now (never shortening
+        -- a longer pause already in place), with a HostBackedOff, so its
+        -- next request of any kind waits; page fetches then carry on.
+        -- When honor_retry_after is off, past_cap is false: a long
+        -- Retry-After neither retires nor pauses the host, and the answer
+        -- simply stands as unavailable.
+        -- A speculative probe's failures are silent whatever they are:
+        -- RejectNonSitemap and SkipUnavailableSitemap report only a
+        -- declared sitemap.
+        -- sitemap_admitted applies the profile's sitemap_include filter,
+        -- always: an empty filter admits every sitemap, and a non-empty one
+        -- admits a URL that one of its patterns matches, matched as the
+        -- scope's include patterns are (pattern_matches). How a {section}
+        -- or {locale} placeholder in a pattern is filled is not yet
+        -- specified (the scope has no section), so a profile whose
+        -- sitemap_include holds a placeholder is not yet covered here: a
+        -- run under it stops when the filter is first applied, before
+        -- that sitemap is read, rather than guess.
+        -- A sitemap on another host, one robots disallows, or one whose
+        -- URL has no identity (identity_of is null: a port out of range,
+        -- say) produces nothing and no problem; the identity is only that
+        -- test, and an admitted sitemap is fetched at its URL as written.
         -- robots_allows(run, url) reads the RobotsPolicy of the URL's own
         -- origin, origin_of(url), never another origin of the same host:
         -- it is true under robots = ignore, true when that origin's stance
@@ -1011,7 +1085,7 @@ rule ReuseUnchangedSitemap {
     requires: response.not_modified
     let snapshot = SitemapSnapshot{frontier: Frontier{mirror: run.target}, url: url}
     requires: exists snapshot
-    ensures: SitemapEntriesFound(run: run, host: host, url: url, is_index: snapshot.is_index, entries: snapshot.entries)
+    ensures: SitemapEntriesFound(run: run, host: host, url: url, declared: declared, is_index: snapshot.is_index, entries: snapshot.entries)
 }
 
 rule AcceptFreshSitemap {
@@ -1030,7 +1104,17 @@ rule AcceptFreshSitemap {
                 frontier: frontier, url: url, etag: response.etag, last_modified: response.last_modified,
                 is_index: sitemap_is_index(response), entries: sitemap_entries(response)
             )
-        SitemapEntriesFound(run: run, host: host, url: url, is_index: sitemap_is_index(response), entries: sitemap_entries(response))
+        SitemapEntriesFound(run: run, host: host, url: url, declared: declared, is_index: sitemap_is_index(response), entries: sitemap_entries(response))
+
+    @guidance
+        -- is_sitemap_document is true when the answer is XML whose root
+        -- element is urlset or sitemapindex, in any namespace or none, and
+        -- sitemap_is_index when that root is sitemapindex. Nothing else is
+        -- read as a sitemap: a gzipped or plain-text sitemap is not one, so
+        -- a declared one is not_a_sitemap (RejectNonSitemap).
+        -- sitemap_entries takes, in document order, each url or sitemap
+        -- child of the root that has a non-empty loc: its loc and its
+        -- lastmod, when it has one, with surrounding whitespace stripped.
 }
 
 rule RejectNonSitemap {
@@ -1049,30 +1133,43 @@ rule SkipUnavailableSitemap {
             DiscoveryFailed(run: run, url: url, problem: if response.error != null: sitemap_unreachable else: sitemap_unavailable)
 }
 
--- Index children are queued on the same host, at most sitemap_max_children
--- per host, ranked: one naming a token of the path prefixes first, then one
--- naming the pinned locale; one naming only other locales is dropped.
--- Entries are observed whatever their scope and admitted at sitemap_depth
--- when in scope, at most max_pages * sitemap_cap_multiplier per host.
+-- Index children are queued on the same host in document order, at most
+-- sitemap_max_children per host: no child is ranked above another and none
+-- is dropped for the locale it names. Each is declared exactly when the
+-- index is, so the children of a speculative index are speculative probes
+-- too. Entries are observed whatever their scope and admitted at
+-- sitemap_depth when in scope, at most max_pages * sitemap_cap_multiplier
+-- per host. A child or entry whose URL has no identity is skipped.
 rule ExpandSitemapEntries {
-    when: SitemapEntriesFound(run, host, url, is_index, entries)
+    when: SitemapEntriesFound(run, host, url, declared, is_index, entries)
     requires: run.status = running
     let scope = run.target.scope
     ensures:
         for entry in entries:
-            if is_index:
-                if host.sitemap_children_read < config.sitemap_max_children and hostname_of(resolve_url(url, entry.loc)) = host.name:
-                    host.sitemap_children_read = host.sitemap_children_read + 1
-                    SitemapDue(run: run, name: host.name, url: resolve_url(url, entry.loc), declared: true)
-            else:
-                UrlObserved(run: run, url: scope.identity_of(resolve_url(url, entry.loc)), via: sitemap)
-                if scope.allows(resolve_url(url, entry.loc), config.sitemap_depth)
-                    and host.sitemap_entries_admitted < config.max_pages * config.sitemap_cap_multiplier:
-                    host.sitemap_entries_admitted = host.sitemap_entries_admitted + 1
-                    UrlDiscovered(
-                        run: run, url: scope.identity_of(resolve_url(url, entry.loc)), depth: config.sitemap_depth,
-                        via: sitemap, priority: config.sitemap_priority, from: url, lastmod: entry.lastmod
-                    )
+            let loc_url = resolve_url(url, entry.loc)
+            if scope.identity_of(loc_url) != null:
+                if is_index:
+                    if host.sitemap_children_read < config.sitemap_max_children and hostname_of(loc_url) = host.name:
+                        host.sitemap_children_read = host.sitemap_children_read + 1
+                        SitemapDue(run: run, name: host.name, url: loc_url, declared: declared)
+                else:
+                    UrlObserved(run: run, url: scope.identity_of(loc_url), via: sitemap)
+                    if scope.allows(loc_url, config.sitemap_depth)
+                        and host.sitemap_entries_admitted < config.max_pages * config.sitemap_cap_multiplier:
+                        host.sitemap_entries_admitted = host.sitemap_entries_admitted + 1
+                        UrlDiscovered(
+                            run: run, url: scope.identity_of(loc_url), depth: config.sitemap_depth,
+                            via: sitemap, priority: config.sitemap_priority, from: url, lastmod: entry.lastmod
+                        )
+
+    @guidance
+        -- resolve_url(base, ref) resolves ref against base as RFC 3986
+        -- section 5 resolves a reference; a ref it cannot resolve (an
+        -- unclosed IPv6 bracket, say) gives a URL with no identity.
+        -- A loc whose URL has no identity (identity_of is null) is skipped
+        -- silently: it is neither observed nor discovered, is not queued,
+        -- counts toward neither sitemap_children_read nor
+        -- sitemap_entries_admitted, and reports no problem.
 }
 
 -- llms.txt is a speculative probe: read when robots allows it, never
@@ -1087,16 +1184,41 @@ rule ReadLlmsTxt {
     requires: robots_allows(run, llms_txt_url(name))
     let scope = run.target.scope
     let response = fetch_resource(llms_txt_url(name), null, null, run, host)
+    let past_cap =
+        response.retryable and response.retry_after != null
+        and run.policy.honor_retry_after
+        and response.retry_after > run.policy.retry_after_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
+        if past_cap:
+            host.paused_until = later_of(host.paused_until, now + run.policy.retry_after_cap)
+            HostBackedOff(host: host, until: now + run.policy.retry_after_cap)
         if response.ok:
             for url in llms_txt_targets(response, llms_txt_url(name)):
-                UrlObserved(run: run, url: scope.identity_of(url), via: llms_txt)
-                if scope.allows(url, config.llms_txt_depth):
-                    UrlDiscovered(
-                        run: run, url: scope.identity_of(url), depth: config.llms_txt_depth,
-                        via: llms_txt, priority: config.llms_txt_priority, from: llms_txt_url(name)
-                    )
+                if scope.identity_of(url) != null:
+                    UrlObserved(run: run, url: scope.identity_of(url), via: llms_txt)
+                    if scope.allows(url, config.llms_txt_depth):
+                        UrlDiscovered(
+                            run: run, url: scope.identity_of(url), depth: config.llms_txt_depth,
+                            via: llms_txt, priority: config.llms_txt_priority, from: llms_txt_url(name)
+                        )
+
+    @guidance
+        -- llms_txt_targets(response, base) is the destination of every
+        -- inline Markdown link in the file, [text](destination) with or
+        -- without a title, resolved against base as resolve_url resolves
+        -- (ExpandSitemapEntries), each taken once, in the order first met.
+        -- fetch_resource tries llms.txt as FetchRobots says, retries,
+        -- HostBackedOff and retry_after_honored included; a Retry-After
+        -- past retry_after_cap ends the tries with that answer, which is
+        -- not ok, so the probe ends unavailable and silent and never
+        -- retires the host; it pauses the host until retry_after_cap from
+        -- now instead (past_cap above, never shortening a longer pause),
+        -- with a HostBackedOff, and page fetches then carry on, as for a
+        -- speculative sitemap (FetchSitemap). When honor_retry_after is
+        -- off there is no such pause. A target whose URL has no identity
+        -- (identity_of is null) is skipped silently: neither observed nor
+        -- discovered, and no problem.
 }
 
 rule RecordObservation {
@@ -1161,6 +1283,16 @@ rule DryRun {
         -- under JSON progress. Discovery still reads robots.txt, sitemaps
         -- and llms.txt, the re-pended rows persist, and the dry run's
         -- report replaces the previous one.
+        -- The listing goes to standard output, one identity per line: the
+        -- identity of every row SelectBatch's pending_rows would hold at
+        -- this moment, rows on a retired host included, in next_pending
+        -- order (discovery order last, as Discover states), and nothing
+        -- else.
+        -- A dry run saves what every sync saves before its first page: the
+        -- mirror's fields StartSync sets and the record of the run, the
+        -- frontier (rows, observations, sitemap snapshots) and the report.
+        -- It writes no page and no index and requests no finalisation
+        -- pass (CloseRun).
 }
 
 rule BeginCrawl {
@@ -1491,14 +1623,16 @@ rule HttpRetry {
         -- such as a 500, 502 or 503) lengthens it when honor_retry_after
         -- is enabled. A retry never shortens a required
         -- host pause and never raises a host's rate. Retry counts and
-        -- request timeouts stay finite. A robots.txt try through
-        -- fetch_resource is retried the same way (FetchRobots).
+        -- request timeouts stay finite. A robots.txt, sitemap or llms.txt
+        -- try through fetch_resource is retried the same way (FetchRobots).
 }
 
 -- A Retry-After beyond the cap retires the host for the run, on any try,
--- the last included, a robots.txt try through fetch_resource too
--- (FetchRobots): the breaker trips without a pause, and the attempt
--- settles as it stands.
+-- the last included, a robots.txt try (FetchRobots) or a declared
+-- sitemap's (FetchSitemap) through fetch_resource too, never a speculative
+-- probe's, which pauses the host for retry_after_cap instead (FetchSitemap,
+-- ReadLlmsTxt). On retirement the breaker trips without a pause, and the
+-- attempt settles as it stands.
 rule RetireHostOnLongRetryAfter {
     when: AttemptReady(attempt)
     requires: attempt.retires_host
@@ -1518,13 +1652,15 @@ rule CountRetryAfter {
     when: attempt: FetchAttempt.created
     requires: attempt.walk.host.run.status = running
     requires: attempt.tier = http
-    requires: attempt.response.retry_after != null and attempt.response.may_carry_retry_after
+    requires: attempt.response.retry_after != null and attempt.response.retryable
     requires: attempt.walk.host.run.policy.honor_retry_after
     ensures: attempt.walk.host.retry_after_honored = attempt.walk.host.retry_after_honored + 1
 
     @guidance
-        -- A robots.txt try through fetch_resource is counted the same way
-        -- (FetchRobots).
+        -- Every honoured Retry-After is counted, on any retryable answer
+        -- (a 429 or any 5xx), the one that retires the host included. A
+        -- robots.txt, sitemap or llms.txt try through fetch_resource is
+        -- counted the same way (FetchRobots).
 }
 
 -- A standard run climbs only to render content, never to answer a block;
