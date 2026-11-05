@@ -204,7 +204,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 541 to 586), the one copy in code.
+# crawl.allium's config block (crawl.allium 548 to 593), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -481,6 +481,7 @@ class SitemapSnapshot:
     last_modified: str | None
     is_index: bool
     entries: tuple[SitemapEntry, ...]
+    last_requested_run: int
 
 
 @dataclass(kw_only=True, eq=False)
@@ -503,6 +504,7 @@ class Run:
     render_mode: RenderMode
     stealth_mode: StealthMode
     max_age: timedelta | None
+    refollow_unchanged_links: bool
     targets: frozenset[str]
     forced_refetch: frozenset[str]
     active_urls: frozenset[str]
@@ -827,7 +829,7 @@ class HostBackedOff:
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2136)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2219)."""
 
     operator: Operator
     mirror: Mirror
@@ -846,3 +848,5 @@ class RunRequest:
     preceding: Run | None = None
     requested_owner_test: None = None
     max_age: timedelta | None = None
+    # rovo.allium's config default; StartSync always passes the configuration's value.
+    refollow_unchanged_links: bool = True

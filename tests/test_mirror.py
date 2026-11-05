@@ -862,11 +862,39 @@ def test_value_equality_Frontmatter(tmp_path: Path) -> None:
     assert frontmatter_of(page) != dataclasses.replace(frontmatter_of(page), title="Other")
 
 
+# mirror.allium Frontmatter's fields at a0814ab: the validators live in .rovo/ alone.
+FRONTMATTER_FIELDS = {
+    "source_url",
+    "title",
+    "content_digest",
+    "quality_score",
+    "low_confidence",
+    "quality_flags",
+    "tier",
+    "method",
+    "profile",
+    "keywords",
+    "description",
+    "canonical_url",
+    "breadcrumbs",
+    "sitemap_lastmod",
+    "version",
+    "locale",
+}
+VALIDATOR_KEYS = {"etag", "last_modified"}
+
+
 def test_entity_fields_Frontmatter(tmp_path: Path) -> None:
-    """Verify all declared fields on Frontmatter are present with correct types."""
+    """Verify all declared fields on Frontmatter are present with correct types.
+
+    Re-propagated by T14 at a0814ab: the declared fields lose etag and last_modified,
+    which the page keeps in .rovo/ state alone, so neither is a field nor a line of the
+    page file, though the page was stored with both.
+    """
     mirror = new_mirror(tmp_path)
     page = stored(mirror)
     published(mirror, page)
+    assert (page.etag, page.last_modified) == (ETAG, LAST_MODIFIED)
     frontmatter = frontmatter_of(page)
     assert isinstance(frontmatter, Frontmatter)
     assert frontmatter.source_url == SEED
@@ -881,12 +909,14 @@ def test_entity_fields_Frontmatter(tmp_path: Path) -> None:
     assert frontmatter.keywords == page.keywords
     assert frontmatter.description == page.description
     assert frontmatter.canonical_url is None
-    assert frontmatter.etag == ETAG
-    assert frontmatter.last_modified == LAST_MODIFIED
     assert frontmatter.sitemap_lastmod is None
     assert frontmatter.version is None
     assert frontmatter.locale == "en"
     assert_fields(frontmatter, ("breadcrumbs",))
+    assert {field.name for field in dataclasses.fields(Frontmatter)} == FRONTMATTER_FIELDS
+    text = (tmp_path / page.path).read_text(encoding="utf-8")
+    keys = {line.split(":", 1)[0] for line in frontmatter_lines(text)}
+    assert keys.isdisjoint(VALIDATOR_KEYS)
 
 
 def test_entity_fields_Mirror(tmp_path: Path) -> None:
@@ -1971,7 +2001,6 @@ INDEX_FIELDS = (
     "low_confidence",
     "quality_flags",
     "content_digest",
-    "last_modified",
     "version",
     "locale",
     "word_count",
@@ -1995,7 +2024,6 @@ def index_entry(path: str, **changes: object) -> IndexEntry:
         low_confidence=False,
         quality_flags=frozenset(),
         content_digest=digest_of(path),
-        last_modified=None,
         version=None,
         locale="en",
         word_count=2,
@@ -2138,8 +2166,11 @@ def test_entity_fields_IndexEntry(tmp_path: Path) -> None:
 
     Every field comes from the written page; word_count is the measured word list's
     length (the ticket's interim) and the counts are the page's over Mirror.links.
+    Re-propagated by T14 at a0814ab: last_modified is no longer a field, since the
+    validators live in .rovo/ state alone.
     """
     mirror, start, other, _ = indexed_mirror(tmp_path)
+    assert {field.name for field in dataclasses.fields(IndexEntry)} == set(INDEX_FIELDS)
     entries = {entry.path: entry for entry in index_entries(mirror.written_pages)}
     assert set(entries) == {start.path, other.path}
     for page in (start, other):
@@ -2156,7 +2187,6 @@ def test_entity_fields_IndexEntry(tmp_path: Path) -> None:
         assert entry.low_confidence is page.low_confidence
         assert set(entry.quality_flags) == set(page.flags)
         assert entry.content_digest == page.content_digest
-        assert entry.last_modified == page.last_modified
         assert entry.version == page.version
         assert entry.locale == page.locale
         assert entry.word_count == len(page.quality.output.words)
@@ -2403,6 +2433,32 @@ def test_rule_failure_RecordUnchanged_2(tmp_path: Path) -> None:
     assert record_unchanged(candidate, FixedClock(LATER)) is None
     assert candidate.status is CandidateStatus.pending
     assert (removed.last_seen, removed.last_seen_run) == (START, FIRST_RUN)
+
+
+def test_a_moved_validator_over_an_unchanged_body_rewrites_no_page_file(
+    tmp_path: Path,
+) -> None:
+    """UnchangedRunIsStable and PageFileProvenance at a0814ab: validators stay out of files.
+
+    The published seed is recorded unchanged with a new ETag and Last-Modified: the
+    page keeps both in its state, and publishing it again is unchanged, the file's bytes
+    the same.
+    """
+    mirror = new_mirror(tmp_path)
+    page = stored(mirror)
+    published(mirror, page)
+    path = tmp_path / page.path
+    before = path.read_bytes()
+    candidate = unchanged_candidate(
+        mirror, etag=NEW_ETAG, last_modified=NEW_LAST_MODIFIED, run_id=SECOND_RUN
+    )
+    assert record_unchanged(candidate, FixedClock(LATER)) is page
+    assert (page.etag, page.last_modified) == (NEW_ETAG, NEW_LAST_MODIFIED)
+    pass_ = request_pass(Operator(), mirror, PassKind.finalise, SECOND_RUN)
+    finalise_page_body(pass_, page)
+    event = publish_page(pass_, page, FixedClock(LATER))
+    assert event.outcome is StoreOutcome.unchanged
+    assert path.read_bytes() == before
 
 
 def test_rule_success_DiscardUnchangedWithoutPage(tmp_path: Path) -> None:

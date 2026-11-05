@@ -107,3 +107,10 @@ policy.
   report), and a changed one is converted again. Sitemaps are saved in
   `.rovo/sitemaps.json` and requested with their validators, a `304` reusing the saved
   entries. A sync against an unchanged site rewrites no page file and no index.
+- An unchanged page's stored links are queued again on every sync, so a widened scope
+  reaches what it links to; `crawl.refollow_unchanged_links = false` turns that off.
+  A saved sitemap is dropped when it answers `404`, `410` or not a sitemap, or after
+  `observed_url_retention_syncs` runs unrequested (`last_requested_run` in
+  `.rovo/sitemaps.json`). The validators (`etag`, `last_modified`) live in
+  `.rovo/manifest.json` alone, never in a page's frontmatter or `index.jsonl`, so a
+  moved validator over an unchanged body rewrites nothing.

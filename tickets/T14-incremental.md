@@ -179,32 +179,37 @@ is green; the Allium loop's witness record says `PASS`.
 
 | Path | Class | Content |
 | --- | --- | --- |
-| `src/rovo/_crawl/run.py` | shared, own lines | `dispose_fetch`'s two unchanged branches and its `PageFetched` branch for a known page, its last `NotInThisSlice("DisposeFetch")` narrowed (Context); `_handle_entry` routing an unchanged `CandidateDelivered` to the mirror; `fetch_sitemap` sending the snapshot's validators; `reuse_unchanged_sitemap`; the discovery loop handing a 304 with a snapshot to it, then to `expand_sitemap_entries`; `load_frontier` and `save_frontier` reading and writing `.rovo/sitemaps.json`; the module, `fetch_sitemap` and `save_frontier` docstrings |
+| `src/rovo/_crawl/run.py` | shared, own lines | `dispose_fetch`'s two unchanged branches and its `PageFetched` branch for a known page, its last `NotInThisSlice("DisposeFetch")` narrowed (Context); `_handle_entry` routing an unchanged `CandidateDelivered` to the mirror; `fetch_sitemap` sending the snapshot's validators; `reuse_unchanged_sitemap`; the discovery loop handing a 304 with a snapshot to it, then to `expand_sitemap_entries`; `load_frontier` and `save_frontier` reading and writing `.rovo/sitemaps.json`; the module, `fetch_sitemap` and `save_frontier` docstrings. Follow-up at `a0814ab`: `refollow_unchanged_links` (`RefollowUnchangedLinks`) and `_handle_entry` calling it for an unchanged page; `start_run` carrying the setting; `fetch_sitemap` stamping `last_requested_run`; `accept_fresh_sitemap` creating with it; `reject_non_sitemap` and `skip_unavailable_sitemap` dropping the snapshot (a `frontier` keyword); `drop_stale_observations` dropping unrequested snapshots; `sitemaps.json` rows gaining `last_requested_run` |
 | `src/rovo/_crawl/pace.py` | shared, own lines | `fetch_resource` gains `validators: Validators \| None = None`, passed to every try's `fetcher.fetch` |
-| `src/rovo/_crawl/model.py` | shared, own lines | `SitemapSnapshot`'s docstring ("kept one run, T13") says the snapshots are saved; nothing else, unless step 4 shows a field missing |
+| `src/rovo/_crawl/model.py` | shared, own lines | `SitemapSnapshot`'s docstring ("kept one run, T13") says the snapshots are saved; nothing else, unless step 4 shows a field missing. Follow-up at `a0814ab`: `SitemapSnapshot.last_requested_run`, `Run.refollow_unchanged_links` and `RunRequest.refollow_unchanged_links` |
+| `src/rovo/_config.py` | shared, own lines (follow-up at `a0814ab`) | `refollow_unchanged_links`: the built-in default (true), `Configuration`'s field, `crawl.refollow_unchanged_links` read from `rovo.toml` and written by the template; no environment or flag layer (T16's) |
+| `src/rovo/_commands.py` | shared, own lines (follow-up at `a0814ab`) | `StartSync` passes the setting in `RunRequested` |
+| `src/rovo/_mirror/model.py`, `src/rovo/_mirror/finalise.py`, `src/rovo/_mirror/indexes.py` | shared, own lines (follow-up at `a0814ab`) | `Frontmatter` loses `etag` and `last_modified`, `IndexEntry` loses `last_modified`: validators live in `.rovo/` state alone |
+| `tests/test_config.py` | shared, own lines (follow-up at `a0814ab`) | `config-default.refollow_unchanged_links`; `entity-fields.Configuration` and the template's crawl keys re-propagated (T09, ledger note) |
 | `src/rovo/_mirror/intake.py` | shared, own lines | `record_unchanged`, `discard_unchanged_without_page`, `rewrite_known_page` (its merge branch `NotInThisSlice("RewriteKnownPage")`); `settle_candidate`'s partition (Facts); the module docstring |
 | `tests/fakes.py` | shared, own lines | only if step 3 needs it: a helper giving a `SiteResponse` with an `ETag` or `Last-Modified`, or a 304, beside `html_response` and `xml_response` |
-| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3 and the crawl guarantees; `test_rule_success_FetchSitemap`'s docstring (re-propagated) |
-| `tests/test_mirror.py` | shared, own lines | the mirror obligations of step 3 |
+| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3 and the crawl guarantees; `test_rule_success_FetchSitemap`'s docstring (re-propagated). Follow-up at `a0814ab`: `RefollowUnchangedLinks`' four obligations and `entity-relationship.Frontier.sitemap_snapshots`; earlier slices' tests re-propagated for the snapshot drop and stamp and `Run`'s new field (T09, T13; ledger notes) |
+| `tests/test_mirror.py` | shared, own lines | the mirror obligations of step 3. Follow-up at `a0814ab`: `entity-fields.Frontmatter` (T09) and `entity-fields.IndexEntry` (T11) re-propagated without the validators; a moved validator over an unchanged body rewrites no page file |
 | `tests/test_pace.py` | shared, own lines | `fetch_resource` sends the validators it is given on every try and none by default |
-| `tests/test_commands.py` | shared, own lines | a second `sync` over `FakeFetcher`: exit 0, the rows `unchanged`, `skipped_unchanged`, the page file untouched |
+| `tests/test_commands.py` | shared, own lines | a second `sync` over `FakeFetcher`: exit 0, the rows `unchanged`, `skipped_unchanged`, the page file untouched; follow-up at `a0814ab`: a moved validator over the same document rewrites no page or index file |
 | `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_a_second_sync_of_a_known_page_stops` per Facts, renamed `test_a_second_sync_of_a_known_page_keeps_it` (ledger note); `RewriteKnownPage`'s merge branch and a known page's non-HTML answer asserted to stop |
 | `tests/test_regressions.py` | shared, own lines | one test per divergence planning, weed or review finds |
 | `tests/e2e/test_discovery_sync.py` | shared, own lines (re-propagated) | `test_observations_are_forgotten_after_the_retention_syncs` moves the rewritten `maps/guide.xml`'s mtime forward a minute (`os.utime`), else the sitemap answers 304 and `ReuseUnchangedSitemap` replays the orphan (ledger note) |
-| `tests/e2e/test_second_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and their site-generating helper; no unit test is named `test_second_sync.py` |
+| `tests/e2e/test_second_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and their site-generating helper; no unit test is named `test_second_sync.py`. Follow-up at `a0814ab`: an unchanged page re-follows its stored links unless `crawl.refollow_unchanged_links` is false; a moved validator rewrites no file; a sitemap gone since the last sync loses its snapshot |
 | `docs/reference/cli.md` | shared, own lines | `rovo sync`: a second sync is incremental (validators, 304, an unchanged raw document, reconversion, `max_age`, reused sitemaps, nothing rewritten on an unchanged site, the report's counts); the later-slice sentence loses "a page already in the mirror" and gains a canonical that merges a known page into another |
-| `docs/reference/mirror.md` | shared, own lines | `.rovo/sitemaps.json`; "A sitemap's validators and entries last one run and are not yet saved" replaced; the `crawl.max_age` row, if its wording moves |
+| `docs/reference/mirror.md` | shared, own lines | `.rovo/sitemaps.json`; "A sitemap's validators and entries last one run and are not yet saved" replaced; the `crawl.max_age` row, if its wording moves. Follow-up at `a0814ab`: the `crawl.refollow_unchanged_links` row; snapshots dropped and `last_requested_run`; frontmatter and `index.jsonl` without the validators |
+| `tickets/T13-discovery.md`, `.allium-loop/T13-discovery.json` | ticket, gitignored (follow-up at `a0814ab`) | the T13 follow-up items 1 to 3 marked ANSWERED (text only) |
 | `docs/reference/testing.md` | shared, own lines | `tests/e2e/test_second_sync.py` |
 | `docs/project/repository-map.md` | shared, own lines | the tree gains `test_second_sync.py` |
-| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: incremental sync |
+| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: incremental sync; follow-up at `a0814ab`: one more Added entry (re-following, snapshot drops, validators in state alone) |
+| `src/rovo/_report.py`, `src/rovo/_mirror/links.py`, `src/rovo/_mirror/urls.py` | shared, own lines (follow-up at `a0814ab`) | specification line citations only, re-pointed at `a0814ab` (several were already stale at `6a50e9d`); the same in `_config.py`, `_crawl/model.py`, `_crawl/run.py`, `_mirror/model.py`, `intake.py`, `finalise.py` and `indexes.py` |
 | `tickets/README.md`, `tickets/T14-incremental.md` | ticket | index row, graph, slice bullet, this ticket |
 | `.allium-loop/T14-incremental.json`, `.allium-loop/T14-incremental.witness.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `pyproject.toml`, `uv.lock`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
 `Justfile`, `AGENTS.md` (line 10 stays true), `scripts/wheel_smoke.py`,
-`src/rovo/__init__.py`, `src/rovo/cli.py`, `src/rovo/_commands.py`, `src/rovo/_report.py`,
-`src/rovo/_config.py`, `src/rovo/_crawl/fetch.py`, `src/rovo/_crawl/sitemaps.py`,
-`src/rovo/_mirror/finalise.py`, `src/rovo/_mirror/indexes.py`, `src/rovo/_mirror/state.py`,
+`src/rovo/__init__.py`, `src/rovo/cli.py`,
+`src/rovo/_crawl/fetch.py`, `src/rovo/_crawl/sitemaps.py`, `src/rovo/_mirror/state.py`,
 `src/rovo/_convert/`, `tests/e2e/conftest.py`, `tests/test_import_direction.py`,
 `docs/decisions/` and `docs/specs/` are read, not changed. A file not in this table that
 turns out to need a change is added to the table in the same change with its reason, or
@@ -425,10 +430,11 @@ are its review.
 - `fetch_resource` is called with validators only from `fetch_sitemap`
   (`rg -n 'fetch_resource\(' src`, quoted).
 - `.allium-loop/T14-incremental.witness.json` exists with `"verdict": "PASS"`, and the
-  ledger validates against `ledger.schema.json` with the batched question's items OPEN
-  unless the maintainer answered them.
+  ledger validates against `ledger.schema.json` with the batched question's items 1 to
+  3 ANSWERED at `a0814ab` and the follow-up question's items 1 to 4 OPEN unless the
+  maintainer answered them.
 - `just check-specs` and `just analyse-specs` pass with `docs/specs/` unchanged since
-  `ecfa257` (`git diff --stat ecfa257 -- docs/specs` empty).
+  `a0814ab` (`git diff --stat a0814ab -- docs/specs` empty).
 - `import rovo` loads no module outside the standard library and `rovo`; `__all__` is
   `["__version__"]`; `just wheel-smoke` passes with the package-file count unchanged.
 - `just coverage` stays at or above the floor of 95.
@@ -483,47 +489,57 @@ arrived; the verification output, each headed by its commit.
 
 ## Open points
 
-- **The T14 batched needs-user question: OPEN.** One question to the maintainer, its
-  items numbered so an answer can cite them; all three were found while planning T14.
-  Each states the interim this slice builds, which is the specification as written,
-  reversible and never presented as the answer; propagate copies every item into the
-  ledger's `open_questions` as OPEN, and the witness escalates one that blocks
-  convergence (none blocks an owned obligation). A gap found later (propagate,
-  implement, weed) joins this question as a new item, never resolved in code. Line
-  numbers are at `ecfa257`.
-  1. **An unchanged page's links are not followed again.** `RecordUnchanged`
-     (`mirror.allium` 903 to 922) raises `PageStored` and no `LinksFound`, so
-     `EnqueuePageLinks` (`crawl.allium` 1961) never sees an unchanged page's links. The
-     rows its earlier runs enqueued persist and are re-pended, so a stable scope loses
-     nothing; but when the scope widens between syncs (a path prefix or an include
-     pattern added, which moves neither the processing signature nor the raw digest), a
+- **The T14 batched needs-user question: ANSWERED** (items 1 to 3, specification
+  `a0814ab`). One question to the maintainer, its items numbered so an answer can cite
+  them; all three were found while planning T14 and their text below is kept, with line
+  numbers at `ecfa257`.
+  1. **ANSWERED: re-follow, configurable, default true.** `RefollowUnchangedLinks`
+     (`crawl.allium` 2037 to 2075 at `a0814ab`) queues an unchanged page's stored
+     links again when the run's `refollow_unchanged_links` is true (`rovo.toml`
+     `crawl.refollow_unchanged_links`, default true). The question was: an unchanged
+     page's links are not followed again. `RecordUnchanged` (`mirror.allium` 903 to 922)
+     raises `PageStored` and no `LinksFound`, so `EnqueuePageLinks` (`crawl.allium`
+     1961) never sees an unchanged page's links; when the scope widens between syncs, a
      link an unchanged page holds to a newly admitted URL is never enqueued until that
-     page changes or `max_age` forces its reconversion. Should a sync re-enqueue an
-     unchanged page's stored links, or is a scope change meant to need `max_age` or a
-     changed page? Interim: as written, no `LinksFound` for an unchanged page.
-  2. **Sitemap snapshots are never dropped.** No rule removes a `SitemapSnapshot`
-     (`crawl.allium` 358 to 368, `AcceptFreshSitemap` 1091 only creates or updates one),
-     so a sitemap no longer declared, now absent, or no longer a sitemap keeps its
-     snapshot, and `.rovo/sitemaps.json` only grows; a later 304 to it would reuse
-     entries read long before. Should a snapshot be dropped when its sitemap answers
-     absent or not a sitemap, or after some runs unseen, as `ObservedUrl` is after
-     `observed_url_retention_syncs`? Interim: every snapshot is kept.
-  3. **An unchanged body can still rewrite its page file.** `UnchangedRunIsStable`
-     (`mirror.allium` 1480 to 1485) says a sync against an unchanged site rewrites no
-     page file and no index file, yet `PageFileProvenance` (1460) puts `etag` and
-     `last_modified` in the frontmatter and `IndexEntry` (185 to 203) puts
-     `last_modified` in `index.jsonl`, and `RecordUnchanged` takes a new value of each.
-     A server that stamps every answer with a fresh `Last-Modified` or `ETag` while the
-     body stays byte-identical (common on generated sites) therefore makes every sync
-     rewrite every page file and `index.jsonl`. Is a moved validator an upstream change
-     the mirror should show, or should validators stay out of the files the guarantee
-     covers? Interim: as written, the validators are written and the file moves.
-- **Carried, not touched by T14.** The T13 follow-up batched question's items 1 to 3
-  (one URL falling due twice with different `declared` values; the speculative pause's
-  length; speculative children counting toward `sitemap_children_read`) stay OPEN in
-  `tickets/T13-discovery.md` and its ledger; this slice changes none of those
-  behaviours, so they are not part of T14's batch. Items 4 and 5 there stay carried to
-  T17 and T18.
+     page changes or `max_age` forces its reconversion.
+  2. **ANSWERED: drop when gone or unseen.** A snapshot is dropped when its sitemap
+     answers absent (404 or 410, `SkipUnavailableSitemap`) or not a sitemap
+     (`RejectNonSitemap`), and after `observed_url_retention_syncs` runs unrequested
+     (`DropStaleObservations`, over `SitemapSnapshot.last_requested_run`, which
+     `FetchSitemap` stamps on every request). The question was: no rule removed a
+     `SitemapSnapshot` (`crawl.allium` 358 to 368), so `.rovo/sitemaps.json` only grew.
+  3. **ANSWERED: validators out of files.** `etag` and `last_modified` live in `.rovo/`
+     state alone, never in a page's frontmatter (`PageFileProvenance`) or
+     `index.jsonl` (`IndexEntry`), so a moved validator over an unchanged body rewrites
+     nothing (`UnchangedRunIsStable`). The question was: a server stamping every answer
+     with a fresh `Last-Modified` or `ETag` over a byte-identical body made every sync
+     rewrite every page file and `index.jsonl`.
+- **The T14 follow-up batched needs-user question: OPEN.** Gaps the answers leave, found
+  while specifying them; each states the interim the specification at `a0814ab`
+  implies, built and never presented as the answer, and none blocks an owned
+  obligation.
+  1. **A moved sitemap lastmod still rewrites a page file.** `sitemap_lastmod` is still
+     in the frontmatter, and `RecordUnchanged` takes a moved value, so a sitemap whose
+     lastmod moves over a byte-identical page still rewrites the page file (the answer
+     named only `etag` and `last_modified`). Interim: as written, the lastmod is written
+     and the file moves.
+  2. **Navigation links are not re-followed.** Navigation links are not stored with a
+     page, so an unchanged page re-follows its content links only. Interim: content
+     links only.
+  3. **A crash before finalisation empties a page's stored links.** `RefreshPage`
+     empties a page's outbound links and only finalisation refills them; after a crash
+     before finalisation that page's stored links are empty, and it re-follows nothing,
+     until the next finalised sync. Interim: as written.
+  4. **Stored targets keep the last finalisation's normalisation.** A link's target
+     identity was normalised under the scope in force at the last finalisation, so a
+     changed `meaningful_query_params` cannot recover a dropped parameter until the page
+     changes. Interim: the stored identity, re-tested against the scope in force.
+- **Carried.** The T13 follow-up items 1 to 3 (one URL falling due twice; the
+  speculative pause's length; speculative children counting toward
+  `sitemap_children_read`) are ANSWERED at `a0814ab` (the interims accepted, stated as
+  decided) and marked so in `tickets/T13-discovery.md` and its ledger. Carried to T17:
+  `mslearn`'s `sitemap_include` placeholders. Carried to T18: a retired host's remaining
+  discovery is still requested.
 - **The specification's open questions.** The three `crawl.allium` ones (2272 to 2274)
   and the three `convert.allium` ones (473 to 475) stay open; none is on this slice's
   path. The second (a URL that fails on every sync is retried for ever) is reached by

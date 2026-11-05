@@ -42,14 +42,16 @@ class RootConfig:
     render_mode: RenderMode
     max_depth: int
     fail_on_low_quality: bool
+    refollow_unchanged_links: bool
 
 
-# rovo.allium's config block (rovo.allium 249 to 256), the one copy in code.
+# rovo.allium's config block (rovo.allium 250 to 258), the one copy in code.
 CONFIG = RootConfig(
     report_percentile=0.10,
     render_mode=RenderMode.never,
     max_depth=10,
     fail_on_low_quality=False,
+    refollow_unchanged_links=True,
 )
 
 
@@ -76,6 +78,7 @@ class Configuration:
     max_age: timedelta | None
     fail_on_low_quality: bool
     unblocking_provider: str | None
+    refollow_unchanged_links: bool = CONFIG.refollow_unchanged_links
 
     @property
     def has_seeds(self) -> bool:
@@ -99,7 +102,7 @@ class Configuration:
 
 @dataclass(frozen=True, kw_only=True)
 class SyncOptions:
-    """What one sync invocation asked for, beyond the configuration (rovo.allium 98)."""
+    """What one sync invocation asked for, beyond the configuration (rovo.allium 99)."""
 
     dry_run: bool
     confirmed: bool
@@ -155,6 +158,7 @@ robots = {_toml(RobotsMode.respect.value)}
 render_mode = {_toml(CONFIG.render_mode.value)}
 stealth_mode = {_toml(StealthMode.off.value)}
 # max_age = 86400  # Seconds before a page is refetched unconditionally; absent, never.
+refollow_unchanged_links = {_toml(CONFIG.refollow_unchanged_links)}
 
 [quality]
 fail_on_low_quality = {_toml(CONFIG.fail_on_low_quality)}
@@ -388,6 +392,7 @@ _SCHEMA: dict[str, dict[str, tuple[str, Callable[[object], object]]]] = {
         "render_mode": ("render_mode", _member(RenderMode)),
         "stealth_mode": ("stealth_mode", _member(StealthMode)),
         "max_age": ("max_age", _seconds),
+        "refollow_unchanged_links": ("refollow_unchanged_links", _boolean),
     },
     "quality": {"fail_on_low_quality": ("fail_on_low_quality", _boolean)},
     "unblocking": {"provider": ("unblocking_provider", _string)},
@@ -415,6 +420,7 @@ def _with_defaults(values: dict[str, Any]) -> dict[str, Any]:
         "render_mode": CONFIG.render_mode,
         "stealth_mode": StealthMode.off,
         "max_age": None,
+        "refollow_unchanged_links": CONFIG.refollow_unchanged_links,
         "fail_on_low_quality": CONFIG.fail_on_low_quality,
         "unblocking_provider": None,
     }

@@ -63,6 +63,7 @@ in the last column. The standard library reads the file with `tomllib`.
 | `crawl.render_mode` | `"never"` | `config.render_mode`, `rovo.allium` |
 | `crawl.stealth_mode` | `"off"` | `StealthIsOwnerOnly`, `crawl.allium` |
 | `crawl.max_age` | absent: a page never goes stale; a number of seconds | `PrepareRun`, `crawl.allium` |
+| `crawl.refollow_unchanged_links` | `true`: a page answered unchanged queues its stored links again | `config.refollow_unchanged_links`, `rovo.allium` |
 | `quality.fail_on_low_quality` | `false` | `config.fail_on_low_quality`, `rovo.allium` |
 | `unblocking.provider` | absent; any value is a configuration problem | `Configuration`, `rovo.allium` |
 
@@ -80,7 +81,9 @@ locale), `declared_owned_hosts`, `recorded_root_url` (the root URL the last run 
 `pages`, `aliases` and `links`. Each page row holds every `Page` field: its identity,
 path, source and canonical URLs, title, description, extraction method, tier, quality
 result, flags, keywords, digests, validators, both bodies, frontmatter, the runs that
-last saw and stored it, and its fetch times. An alias row is a URL and the identity of
+last saw and stored it, and its fetch times. The validators (`etag` and
+`last_modified`) live here alone, never in a page file or an index, so a validator that
+moves over an unchanged body rewrites nothing. An alias row is a URL and the identity of
 the page it resolves to. A link row is one link of a page as the last finalisation
 resolved it: `source` (the linking page's identity), `target_identity` (the
 destination's identity, before alias resolution), `fragment` (`null` when there is
@@ -100,11 +103,15 @@ per URL a sitemap or `llms.txt` named, in scope or not, sorted by `url`: `url`,
 the last run that saw it; a row unseen for more than `observed_url_retention_syncs` (3)
 runs is dropped when the next run's discovery ends. `tier_hints` stays empty until the
 browser slice fills it. `sitemaps.json` holds `snapshots`, one row per sitemap ever
-read as a sitemap, sorted by `url`: `url`, `etag`, `last_modified`, `is_index` and
-`entries` (each `loc` and `lastmod`, in document order). It is written with
+read as a sitemap, sorted by `url`: `url`, `etag`, `last_modified`, `is_index`,
+`entries` (each `loc` and `lastmod`, in document order) and `last_requested_run`, the
+id of the last run that requested the sitemap, whatever it answered. It is written with
 `frontier.json`, a dry run's included; a later sync sends a snapshot's validators, and a
-`304` answer reuses its entries. No snapshot is ever dropped. An absent file holds no
-snapshot. `runs.json` holds `runs`, one row per run, oldest
+`304` answer reuses its entries. A snapshot is dropped when its sitemap answers absent
+(`404` or `410`) or with something that is not a sitemap, and, when the next run's
+discovery ends, once it has gone unrequested for more than
+`observed_url_retention_syncs` (3) runs; an unavailable or unreachable answer keeps it.
+An absent file holds no snapshot. `runs.json` holds `runs`, one row per run, oldest
 first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
 `finished_at` and `unresolved_urls`. A run's id is one more than the highest id there.
 Both files are written only after the manifest, so a frontier row marked `done` always
@@ -173,7 +180,6 @@ keys are sorted and an absent value is left out. Strings and lists are JSON-quot
 content_digest: "8c90353f671f675a46e7d5cc41bb2f97c6cb10b81c79cc679794f485025d869e"
 description: "How to start with the example product."
 keywords: ["product", "getting", "started", "example", "mirrors", "documentation", "websites", "markdown"]
-last_modified: "Sun, 01 Nov 2026 04:24:19 GMT"
 locale: "en"
 low_confidence: false
 method: "profile"
@@ -188,7 +194,6 @@ title: "Getting started"
 ```
 
 That is the start of `pages/127.0.0.1_8000/start.md` after `rovo sync` of the `one-page` fixture site.
-`last_modified` and `etag` are the site's own validators, not a time rovo recorded.
 In the body, only a heading with an id in the source ends in that id, after `#` and
 inside braces, written as the page records it, and fenced code holds the code text
 unchanged, each `<br>` in it a line break. `content_digest` covers the body only. A page file is written only when its text would
@@ -305,8 +310,8 @@ and a line feed after every line, so an empty mirror writes an empty file.
 
 `index.jsonl` holds one `IndexEntry` per written page, sorted by `path`: `path`,
 `identity`, `source_url`, `title`, `description`, `keywords`, `headings`,
-`quality_score`, `low_confidence`, `quality_flags`, `content_digest`, `last_modified`,
-`version`, `locale`, `word_count` (the number of words the quality measurement counted
+`quality_score`, `low_confidence`, `quality_flags`, `content_digest`, `version`,
+`locale`, `word_count` (the number of words the quality measurement counted
 outside code), and `outbound_internal` and `inbound_internal`, the page's counts of
 internal links out and in.
 

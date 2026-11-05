@@ -1,4 +1,4 @@
-"""Page intake (mirror.allium 517 to 890): candidates become pages and aliases.
+"""Page intake (mirror.allium 515 to 896): candidates become pages and aliases.
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
 `settle_candidate` fires the one whose guards hold. This slice implements StoreNewPage,
@@ -189,7 +189,7 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> LinksFou
 
 
 def links_found(candidate: PageCandidate, page: Page) -> LinksFound:
-    """The LinksFound RefreshPage raises for the stored page (mirror.allium 856)."""
+    """The LinksFound RefreshPage raises for the stored page (mirror.allium 858)."""
     content = candidate.content
     return LinksFound(
         candidate=candidate,

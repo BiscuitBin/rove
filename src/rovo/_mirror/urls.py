@@ -128,7 +128,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def assign_path(mirror: "Mirror", identity: str) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 649 to 715).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 648 to 714).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or
@@ -175,7 +175,7 @@ def page_root(identity: str) -> str:
 
 
 def host_segment(identity: str) -> str:
-    """The directory under pages/ for the identity's host (MovePage guidance, 649 to 660).
+    """The directory under pages/ for the identity's host (MovePage guidance, 648 to 659).
 
     The host lower-cased, a trailing "." dropped, every character outside [a-z0-9.-]
     replaced with "-", the device-name rewrite applied, then a non-default port appended
@@ -222,7 +222,7 @@ def _relative_path(mirror: "Mirror", identity: str) -> str:
 
 
 def _rewrite_segment(segment: str, *, directory: bool) -> str:
-    """The segment rewrites inside pages/<host>/ (MovePage guidance, 677 to 694).
+    """The segment rewrites inside pages/<host>/ (MovePage guidance, 676 to 693).
 
     Each reads the sanitised segment alone and they apply together, agreeing where they
     overlap: a trailing run of "." and a leading "." become "-"; a directory named,

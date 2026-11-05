@@ -130,7 +130,7 @@ class MirrorConfig:
     prune: bool
 
 
-# mirror.allium's config block (mirror.allium 489 to 497), the one copy in code.
+# mirror.allium's config block (mirror.allium 491 to 499), the one copy in code.
 CONFIG = MirrorConfig(
     max_path_chars=200,
     collision_hash_chars=6,
@@ -213,7 +213,7 @@ class CrawlScope:
 
 @dataclass(frozen=True, kw_only=True)
 class Frontmatter:
-    """The YAML block at the top of every page file."""
+    """The YAML block at the top of every page file; the validators live in .rovo/ alone."""
 
     source_url: str
     title: str
@@ -228,8 +228,6 @@ class Frontmatter:
     description: str | None = None
     canonical_url: str | None = None
     breadcrumbs: tuple[str, ...] | None = None
-    etag: str | None = None
-    last_modified: str | None = None
     sitemap_lastmod: str | None = None
     version: str | None = None
     locale: str | None = None
@@ -259,7 +257,6 @@ class IndexEntry:
     low_confidence: bool
     quality_flags: frozenset[QualityFlag]
     content_digest: str
-    last_modified: str | None
     version: str | None
     locale: str | None
     word_count: int
@@ -475,7 +472,7 @@ class Link:
 
 @dataclass(frozen=True, kw_only=True)
 class CandidateDelivered:
-    """The trigger the crawl raises through PageIntake (mirror.allium 1481)."""
+    """The trigger the crawl raises through PageIntake (mirror.allium 1544)."""
 
     run_id: int
     mirror: Mirror
@@ -548,7 +545,7 @@ class Index:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexBuildDue:
-    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1182, 1200)."""
+    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1188, 1206)."""
 
     pass_: MirrorPass
 
@@ -562,7 +559,7 @@ class IndexFilesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexesWritten:
-    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1227)."""
+    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1233)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -571,7 +568,7 @@ class IndexesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksFound:
-    """The trigger RefreshPage raises (mirror.allium 856): the stored page's targets."""
+    """The trigger RefreshPage raises (mirror.allium 858): the stored page's targets."""
 
     candidate: PageCandidate
     page: Page
@@ -582,7 +579,7 @@ class LinksFound:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksRewritten:
-    """The trigger FinishLinkPass raises (mirror.allium 1182)."""
+    """The trigger FinishLinkPass raises (mirror.allium 1187)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -592,7 +589,7 @@ class LinksRewritten:
 
 @dataclass(frozen=True, kw_only=True)
 class PageFinalised:
-    """The trigger PublishPage raises (mirror.allium 1156)."""
+    """The trigger PublishPage raises (mirror.allium 1166)."""
 
     pass_: MirrorPass
     page: Page

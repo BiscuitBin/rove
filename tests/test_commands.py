@@ -7,6 +7,7 @@ refusals slice, a failed StartSync guard other than the missing mirror exits usa
 no report too (the ticket's Deviation row).
 """
 
+import dataclasses
 import importlib.metadata
 import json
 import re
@@ -670,5 +671,42 @@ def test_UnchangedRunIsStable_a_second_sync_of_an_unchanged_site_rewrites_nothin
     assert second["exit_code"] == "ok"
     assert (second["converted"], second["skipped_unchanged"]) == (0, 1)
     assert second["changes"] == [
+        {"kind": "unchanged", "url": SEED, "path": START_PATH, "moved_from": None}
+    ]
+
+
+FIRST_STAMP = "Sat, 31 Oct 2026 12:00:00 GMT"
+SECOND_STAMP = "Sun, 01 Nov 2026 12:00:00 GMT"
+VALIDATOR_LINE = re.compile(r"(?m)^(etag|last_modified):")
+
+
+def test_UnchangedRunIsStable_a_moved_validator_rewrites_no_page_or_index_file(
+    tmp_path: Path,
+) -> None:
+    """mirror.allium UnchangedRunIsStable and PageFileProvenance at a0814ab, unit inputs.
+
+    The seed answers with an ETag and a Last-Modified; on the second sync the same raw
+    document comes back with a new ETag and Last-Modified. Neither validator is a line of
+    the page file or a key of index.jsonl, so no page or index file is rewritten, and the
+    manifest under .rovo/ keeps the new validators.
+    """
+    out = initialised(tmp_path / "out")
+    page = html_response(SEED, PAGE)
+    first = dataclasses.replace(page, etag='"v1"', last_modified=FIRST_STAMP)
+    fetcher = FakeFetcher({SEED: first})
+    assert synced(out, fetcher) is ExitCode.ok
+    assert not VALIDATOR_LINE.search((out / START_PATH).read_text(encoding="utf-8"))
+    lines = (out / "index.jsonl").read_text(encoding="utf-8").splitlines()
+    rows = [json.loads(line) for line in lines]
+    assert rows
+    assert all({"etag", "last_modified"}.isdisjoint(row) for row in rows)
+    before = file_states(out)
+    fetcher.responses[SEED] = dataclasses.replace(page, etag='"v2"', last_modified=SECOND_STAMP)
+    assert synced(out, fetcher) is ExitCode.ok
+    assert file_states(out) == before
+    manifest = json.loads(manifest_path(out).read_text(encoding="utf-8"))
+    (stored,) = manifest["pages"]
+    assert (stored["etag"], stored["last_modified"]) == ('"v2"', SECOND_STAMP)
+    assert report(out)["changes"] == [
         {"kind": "unchanged", "url": SEED, "path": START_PATH, "moved_from": None}
     ]

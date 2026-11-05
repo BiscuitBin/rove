@@ -229,6 +229,7 @@ def _start_sync(
         render_mode=settings.render_mode,
         stealth_mode=settings.stealth_mode,
         max_age=settings.max_age,
+        refollow_unchanged_links=settings.refollow_unchanged_links,
         targets=frozenset(),
     )
     result = drive_run(request, load_frontier(mirror), fetcher, clock)

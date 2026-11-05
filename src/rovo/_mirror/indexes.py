@@ -1,11 +1,11 @@
-"""The generated indexes (mirror.allium 1199 to 1307): BuildIndexes and RebuildIndexes.
+"""The generated indexes (mirror.allium 1202 to 1310): BuildIndexes and RebuildIndexes.
 
 Every index is a pure function of the written pages, their links and the config, and no
 index carries a wall-clock time, so rebuilding from unchanged input rewrites nothing. The
 index pass reads no page body: every field comes from the manifest, and the page files
 are only checked to be readable. Paths an index records are mirror-relative
 (`pages/<host>/...`); links are relative to the index file. The exact text of each file
-and the JSON Lines encoding are BuildIndexes' guidance (mirror.allium 1232 to 1306),
+and the JSON Lines encoding are BuildIndexes' guidance (mirror.allium 1235 to 1309),
 which docs/reference/mirror.md restates.
 """
 
@@ -73,7 +73,6 @@ def index_entries(pages: Iterable[Page]) -> list[IndexEntry]:
             low_confidence=page.low_confidence,
             quality_flags=frozenset(page.flags),
             content_digest=page.content_digest,
-            last_modified=page.last_modified,
             version=page.version,
             locale=page.locale,
             word_count=len(page.quality.output.words),

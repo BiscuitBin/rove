@@ -1,4 +1,4 @@
-"""The finalise pass (mirror.allium 528, 1025 to 1223): bodies, frontmatter, page files.
+"""The finalise pass (mirror.allium 530, 1010 to 1176): bodies, frontmatter, page files.
 
 A page file is `---`, the frontmatter as YAML with its keys sorted and absent values
 omitted, `---`, then the body. Strings and string lists are JSON-quoted, which YAML
@@ -269,8 +269,6 @@ def frontmatter_of(page: Page) -> Frontmatter:
         description=page.description or None,
         canonical_url=page.canonical_url,
         breadcrumbs=page.breadcrumbs or None,
-        etag=page.etag,
-        last_modified=page.last_modified,
         sitemap_lastmod=page.sitemap_lastmod,
         version=page.version,
         locale=page.locale,

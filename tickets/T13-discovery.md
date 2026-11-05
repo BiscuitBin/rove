@@ -719,19 +719,23 @@ commit.
       (`DiscoveryProblem` has no member for it), and does such a child count toward
       `sitemap_children_read`? Interim: skipped, no problem, not counted; the run never
       crashes on one.
-- **The T13 follow-up batched needs-user question: OPEN.** Gaps the answers leave,
-  found while specifying them; each states the interim the specification at `ecfa257`
-  implies, built and never presented as the answer. Line numbers are at `ecfa257`.
-  1. **One URL falling due twice with different `declared` values** (a robots-declared
+- **The T13 follow-up batched needs-user question: items 1 to 3 ANSWERED, 4 and 5
+  carried.** Gaps the answers leave, found while specifying them; each states the
+  interim the specification at `ecfa257` implies. The maintainer accepted the interims
+  of items 1 to 3, now stated as decided in the specification at `a0814ab`
+  (`crawl.allium` `FetchSitemap` guidance 1016 to 1022, the `QueueSitemaps` comment 946
+  to 948, the `ExpandSitemapEntries` comment 1166 to 1170); the built behaviour is
+  unchanged. Line numbers below are at `ecfa257`.
+  1. **ANSWERED: one URL falling due twice with different `declared` values** (a robots-declared
      sitemap that a speculative index also names, or a speculative well-known sitemap
      a declared index names). Interim: each sitemap is read at most once per run, so
      the first due wins; declared sitemaps come first in discovery order (`Discover`
      guidance, 742 to 756).
-  2. **The speculative pause's length.** A speculative probe's Retry-After past the cap
+  2. **ANSWERED: the speculative pause's length.** A speculative probe's Retry-After past the cap
      pauses the host for `retry_after_cap`, not for the longer time the server asked
      (`FetchSitemap` 999 to 1001, `ReadLlmsTxt` 1193 to 1195), and further discovery to
      that host carries on after it. Interim: `retry_after_cap`, as stated.
-  3. **Speculative children and `sitemap_children_read`.** A speculative index's
+  3. **ANSWERED: speculative children and `sitemap_children_read`.** A speculative index's
      children count toward the per-host `sitemap_max_children` cap shared with declared
      ones, so a speculative index can use the cap up with silent probes. Interim: they
      count (`ExpandSitemapEntries`, 1143 to 1173).

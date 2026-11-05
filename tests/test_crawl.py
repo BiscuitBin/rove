@@ -113,6 +113,7 @@ from rovo._crawl.run import (
     read_robots_before_sitemap,
     read_robots_for_new_origin,
     record_observation,
+    refollow_unchanged_links,
     reject_non_sitemap,
     render_reason_of,
     retires_host_on_long_crawl_delay,
@@ -133,9 +134,13 @@ from rovo._mirror.model import (
     CandidateDelivered,
     CandidateOutcome,
     CrawlScope,
+    Link,
+    LinkKind,
     LinksFound,
     Mirror,
     Operator,
+    Page,
+    PageCandidate,
     Tier,
 )
 from rovo._mirror.state import save_mirror
@@ -220,6 +225,7 @@ BAD_GATEWAY = 502
 SERVICE_UNAVAILABLE = 503
 TOO_MANY = 429
 NOT_FOUND = 404
+GONE = 410
 FORBIDDEN = 403
 MOVED = 301
 SECOND_RUN = 2
@@ -450,7 +456,11 @@ def test_rule_failure_StartRun_1(tmp_path: Path) -> None:
 
 
 def test_rule_entity_creation_StartRun_1(tmp_path: Path) -> None:
-    """Verify entity creation in rule StartRun ensures clause produces the specified fields."""
+    """Verify entity creation in rule StartRun ensures clause produces the specified fields.
+
+    Re-propagated by T14 at a0814ab: Run.created carries the trigger's
+    refollow_unchanged_links, true or false.
+    """
     mirror = new_mirror(tmp_path)
     trigger = request(mirror)
     run = start_run(trigger, FixedClock())
@@ -471,6 +481,7 @@ def test_rule_entity_creation_StartRun_1(tmp_path: Path) -> None:
     assert run.render_mode is RenderMode.never
     assert run.stealth_mode is StealthMode.off
     assert run.max_age is None
+    assert run.refollow_unchanged_links is True
     assert run.targets == frozenset()
     assert run.forced_refetch == frozenset()
     assert run.active_urls == frozenset()
@@ -484,6 +495,9 @@ def test_rule_entity_creation_StartRun_1(tmp_path: Path) -> None:
     assert run.started_at == START
     assert run.status is RunStatus.running
     assert run.finished_at is None
+    off = start_run(dataclasses.replace(trigger, refollow_unchanged_links=False), FixedClock())
+    assert off is not None
+    assert off.refollow_unchanged_links is False
 
 
 def test_rule_success_CreateFrontier(tmp_path: Path) -> None:
@@ -1127,17 +1141,42 @@ def aged_observations(frontier: Frontier, run_id: int) -> tuple[ObservedUrl, Obs
     return stale, fresh
 
 
+def aged_snapshots(frontier: Frontier, run_id: int) -> tuple[SitemapSnapshot, SitemapSnapshot]:
+    """MAPS' snapshot last requested too long before `run_id`, and MAPS_INDEX's just within.
+
+    Each is created by AcceptFreshSitemap in a run of its own over the same mirror.
+    """
+    retention = model.CONFIG.observed_url_retention_syncs
+    made: list[SitemapSnapshot] = []
+    for url, document, requested in (
+        (MAPS, urlset((ORPHAN, None)), run_id - retention - 1),
+        (MAPS_INDEX, sitemapindex(MAPS), run_id - retention),
+    ):
+        earlier = start_run(request(frontier.mirror, run_id=requested), FixedClock())
+        assert earlier is not None
+        snapshot = accept_fresh_sitemap(earlier, frontier, url, xml_response(url, document))
+        assert snapshot is not None
+        assert snapshot.last_requested_run == requested
+        made.append(snapshot)
+    stale, kept = made
+    return stale, kept
+
+
 def test_rule_success_DropStaleObservations(tmp_path: Path) -> None:
     """Verify rule DropStaleObservations succeeds when all preconditions are met.
 
     T13: a row unseen for more than observed_url_retention_syncs runs is dropped and a
-    row seen within them is kept; DiscoveryDone follows either way.
+    row seen within them is kept; DiscoveryDone follows either way. Re-propagated by T14
+    at a0814ab: a sitemap snapshot unrequested for more than those runs is dropped too,
+    one requested exactly that many runs ago kept.
     """
     run_id = model.CONFIG.observed_url_retention_syncs + 2
     run, frontier = started(tmp_path, run_id=run_id)
     _, fresh = aged_observations(frontier, run_id)
+    _, kept = aged_snapshots(frontier, run_id)
     assert drop_stale_observations(run, frontier)
     assert frontier.observed_urls == [fresh]
+    assert frontier.sitemap_snapshots == [kept]
     empty, nothing_seen = started(tmp_path / "empty")
     assert drop_stale_observations(empty, nothing_seen)
     assert nothing_seen.observed_urls == []
@@ -1151,9 +1190,11 @@ def test_rule_failure_DropStaleObservations_1(tmp_path: Path) -> None:
     run_id = model.CONFIG.observed_url_retention_syncs + 2
     run, frontier = started(tmp_path, run_id=run_id)
     stale, fresh = aged_observations(frontier, run_id)
+    snapshots = list(aged_snapshots(frontier, run_id))
     run.status = RunStatus.finished
     assert not drop_stale_observations(run, frontier)
     assert frontier.observed_urls == [stale, fresh]
+    assert frontier.sitemap_snapshots == snapshots
 
 
 def test_rule_success_BeginCrawl(tmp_path: Path) -> None:
@@ -1974,7 +2015,10 @@ def test_invariant_OneRobotsPolicyPerOrigin(tmp_path: Path) -> None:
 
 
 def test_entity_fields_Run(tmp_path: Path) -> None:
-    """Verify all declared fields on Run are present with correct types."""
+    """Verify all declared fields on Run are present with correct types.
+
+    Re-propagated by T14 at a0814ab: Run gains refollow_unchanged_links.
+    """
     result = crawl_once(tmp_path, site())
     run = result.run
     assert_fields(
@@ -1996,6 +2040,7 @@ def test_entity_fields_Run(tmp_path: Path) -> None:
             "render_mode",
             "stealth_mode",
             "max_age",
+            "refollow_unchanged_links",
             "targets",
             "forced_refetch",
             "active_urls",
@@ -2012,6 +2057,7 @@ def test_entity_fields_Run(tmp_path: Path) -> None:
             "hosts",
         ),
     )
+    assert run.refollow_unchanged_links is True
     assert run.tripped_hosts == []
     assert run.has_tripped_host is False
     assert run.targeted is False
@@ -2025,11 +2071,15 @@ def test_entity_fields_Run(tmp_path: Path) -> None:
 
 
 def test_entity_fields_Frontier(tmp_path: Path) -> None:
-    """Verify all declared fields on Frontier are present with correct types."""
+    """Verify all declared fields on Frontier are present with correct types.
+
+    Re-propagated by T14 at a0814ab: Frontier declares sitemap_snapshots.
+    """
     run, frontier, entry = selected(tmp_path, site())
     assert frontier.mirror is run.target
     assert frontier.entries == [entry]
     assert frontier.observed_urls == []
+    assert frontier.sitemap_snapshots == []
     assert frontier.pending_entries == []
     assert frontier.in_progress_entries == [entry]
     assert frontier.retry_entries == []
@@ -3797,6 +3847,37 @@ def test_entity_relationship_Frontier_observed_urls(tmp_path: Path) -> None:
     assert other.observed_urls == []
 
 
+def test_entity_relationship_Frontier_sitemap_snapshots(tmp_path: Path) -> None:
+    """Verify relationship Frontier.sitemap_snapshots navigates to the correct related entities.
+
+    Each snapshot a run's sitemaps create is the run's frontier's, and no other
+    frontier's; a snapshot dropped (its sitemap absent) is no longer navigated to, in
+    memory or once the frontier is saved and loaded again.
+    """
+    run, frontier, _ = host_open(tmp_path / "one", site())
+    _, other = started(tmp_path / "two")
+    kept = accept_fresh_sitemap(run, frontier, MAPS, xml_response(MAPS, urlset((ORPHAN, None))))
+    gone = accept_fresh_sitemap(
+        run, frontier, MAPS_INDEX, xml_response(MAPS_INDEX, sitemapindex(MAPS))
+    )
+    assert kept is not None
+    assert gone is not None
+    assert frontier.sitemap_snapshots == [kept, gone]
+    assert all(snapshot.frontier is frontier for snapshot in frontier.sitemap_snapshots)
+    assert other.sitemap_snapshots == []
+    absent = not_found(MAPS_INDEX)
+    assert (
+        skip_unavailable_sitemap(run, MAPS_INDEX, absent, declared=False, frontier=frontier)
+        is None
+    )
+    assert frontier.sitemap_snapshots == [kept]
+    save_frontier(frontier)
+    loaded = load_frontier(run.target)
+    assert loaded is not None
+    assert [snapshot.url for snapshot in loaded.sitemap_snapshots] == [MAPS]
+    assert all(snapshot.frontier is loaded for snapshot in loaded.sitemap_snapshots)
+
+
 def test_entity_optional_FrontierEntry_discovered_from(tmp_path: Path) -> None:
     """Verify optional field FrontierEntry.discovered_from accepts null and non-null values.
 
@@ -3838,7 +3919,10 @@ def test_entity_fields_ObservedUrl(tmp_path: Path) -> None:
 
 
 def test_entity_fields_SitemapSnapshot(tmp_path: Path) -> None:
-    """Verify all declared fields on SitemapSnapshot are present with correct types."""
+    """Verify all declared fields on SitemapSnapshot are present with correct types.
+
+    Re-propagated by T14 at a0814ab: last_requested_run, the run that created it.
+    """
     run, frontier, _ = host_open(tmp_path, site())
     response = dataclasses.replace(
         xml_response(MAPS_INDEX, sitemapindex(MAPS)), etag='"v1"', last_modified="Sat, 31 Oct"
@@ -3852,6 +3936,7 @@ def test_entity_fields_SitemapSnapshot(tmp_path: Path) -> None:
     assert snapshot.last_modified == "Sat, 31 Oct"
     assert snapshot.is_index is True
     assert snapshot.entries == (SitemapEntry(loc=MAPS, lastmod=None),)
+    assert snapshot.last_requested_run == run.id
 
 
 def test_entity_optional_SitemapSnapshot_etag(tmp_path: Path) -> None:
@@ -4066,7 +4151,9 @@ def test_rule_success_FetchSitemap(tmp_path: Path) -> None:
     """Verify rule FetchSitemap succeeds when all preconditions are met.
 
     The sitemap is read through fetch_resource without validators (no snapshot is saved
-    yet) and its bytes count toward the run's, not its attempts.
+    yet) and its bytes count toward the run's, not its attempts. Re-propagated by T14 at
+    a0814ab: a later run's request stamps the URL's snapshot with that run
+    (last_requested_run), whatever it answers: a 404 and a 304 alike.
     """
     robots = declaring(MAPS)
     fetcher = site(robots=robots)
@@ -4078,6 +4165,16 @@ def test_rule_success_FetchSitemap(tmp_path: Path) -> None:
     assert fetcher.validators == [None, None]
     assert run.bytes_fetched == robots.size + response.size
     assert run.fetch_attempts == 0
+
+    first, frontier, _, snapshot = snapshot_of(tmp_path / "stamped")
+    assert snapshot.last_requested_run == first.id
+    for run_id, answer in ((SECOND_RUN, not_found(MAPS)), (THIRD_RUN, not_modified(MAPS))):
+        again = site(robots=declaring(MAPS))
+        again.responses[MAPS] = answer
+        later = later_run(frontier, again, run_id=run_id)
+        stamped = fetch_sitemap(later, HOST, MAPS, again, declared=True, frontier=frontier)
+        assert stamped == answer
+        assert snapshot.last_requested_run == run_id
 
 
 def test_rule_failure_FetchSitemap_1(tmp_path: Path) -> None:
@@ -4174,13 +4271,15 @@ def test_rule_success_AcceptFreshSitemap(tmp_path: Path) -> None:
     """Verify rule AcceptFreshSitemap succeeds when all preconditions are met.
 
     An ok sitemap document creates its snapshot; a second answer for the same URL updates
-    it in place (unit inputs: within one run each sitemap is read once).
+    it in place (unit inputs: within one run each sitemap is read once). Re-propagated by
+    T14 at a0814ab: the snapshot is created with last_requested_run the run's id.
     """
     run, frontier, _ = host_open(tmp_path, site())
     first = dataclasses.replace(xml_response(MAPS, urlset((ORPHAN, LASTMOD))), etag='"v1"')
     created = accept_fresh_sitemap(run, frontier, MAPS, first)
     assert created is not None
     assert (created.is_index, created.etag) == (False, '"v1"')
+    assert created.last_requested_run == run.id
     assert created.entries == (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),)
     second = dataclasses.replace(xml_response(MAPS, sitemapindex(MAPS_INDEX)), etag='"v2"')
     updated = accept_fresh_sitemap(run, frontier, MAPS, second)
@@ -4206,7 +4305,8 @@ def test_rule_success_RejectNonSitemap(tmp_path: Path) -> None:
     """Verify rule RejectNonSitemap succeeds when all preconditions are met.
 
     A declared sitemap that answers but is no sitemap is not_a_sitemap; a speculative
-    probe that does so is silent.
+    probe that does so is silent. Re-propagated by T14 at a0814ab: either loses its
+    snapshot.
     """
     run, _, _ = host_open(tmp_path, site())
     page = html_response(MAPS, PAGE)
@@ -4215,24 +4315,43 @@ def test_rule_success_RejectNonSitemap(tmp_path: Path) -> None:
     )
     assert reject_non_sitemap(run, SITEMAP, html_response(SITEMAP, PAGE), declared=False) is None
 
+    held, frontier, _, snapshot = snapshot_of(tmp_path / "dropped")
+    probe = accept_fresh_sitemap(
+        held, frontier, SITEMAP, xml_response(SITEMAP, urlset((ORPHAN, None)))
+    )
+    assert probe is not None
+    assert frontier.sitemap_snapshots == [snapshot, probe]
+    assert reject_non_sitemap(
+        held, MAPS, html_response(MAPS, PAGE), declared=True, frontier=frontier
+    ) == DiscoveryFailed(run=held, url=MAPS, problem=DiscoveryProblem.not_a_sitemap)
+    assert frontier.sitemap_snapshots == [probe]
+    speculative = html_response(SITEMAP, PAGE)
+    assert (
+        reject_non_sitemap(held, SITEMAP, speculative, declared=False, frontier=frontier) is None
+    )
+    assert frontier.sitemap_snapshots == []
+
 
 def test_rule_failure_RejectNonSitemap_1(tmp_path: Path) -> None:
     """Verify rule RejectNonSitemap is rejected when requires clause fails.
 
     requires: response.ok and not is_sitemap_document(response).
     """
-    run, _, _ = host_open(tmp_path, site())
+    run, frontier, _, snapshot = snapshot_of(tmp_path)
     sitemap = xml_response(MAPS, urlset((ORPHAN, None)))
-    assert reject_non_sitemap(run, MAPS, sitemap, declared=True) is None
+    assert reject_non_sitemap(run, MAPS, sitemap, declared=True, frontier=frontier) is None
     failed = html_response(MAPS, PAGE, status=SERVER_ERROR)
-    assert reject_non_sitemap(run, MAPS, failed, declared=True) is None
+    assert reject_non_sitemap(run, MAPS, failed, declared=True, frontier=frontier) is None
+    assert frontier.sitemap_snapshots == [snapshot]
 
 
 def test_rule_success_SkipUnavailableSitemap(tmp_path: Path) -> None:
     """Verify rule SkipUnavailableSitemap succeeds when all preconditions are met.
 
     A declared sitemap that fails is sitemap_unavailable, or sitemap_unreachable when no
-    answer arrived; a declared 404 and every speculative probe are silent.
+    answer arrived; a declared 404 and every speculative probe are silent. Re-propagated
+    by T14 at a0814ab: an absent answer (404 or 410) drops the URL's snapshot, declared
+    or not; an unavailable or unreachable one keeps it.
     """
     run, _, _ = host_open(tmp_path, site())
     broken = xml_response(MAPS, "", status=SERVER_ERROR)
@@ -4246,12 +4365,30 @@ def test_rule_success_SkipUnavailableSitemap(tmp_path: Path) -> None:
     assert skip_unavailable_sitemap(run, SITEMAP, broken, declared=False) is None
     assert skip_unavailable_sitemap(run, SITEMAP, unreachable(SITEMAP), declared=False) is None
 
+    held, frontier, _, snapshot = snapshot_of(tmp_path / "dropped")
+    probe = accept_fresh_sitemap(
+        held, frontier, SITEMAP, xml_response(SITEMAP, urlset((ORPHAN, None)))
+    )
+    assert probe is not None
+    for answer in (broken, unreachable(MAPS)):
+        assert skip_unavailable_sitemap(held, MAPS, answer, declared=True, frontier=frontier)
+        assert frontier.sitemap_snapshots == [snapshot, probe]
+    gone = dataclasses.replace(not_found(MAPS), status=GONE)
+    assert skip_unavailable_sitemap(held, MAPS, gone, declared=True, frontier=frontier) is None
+    assert frontier.sitemap_snapshots == [probe]
+    absent = not_found(SITEMAP)
+    assert (
+        skip_unavailable_sitemap(held, SITEMAP, absent, declared=False, frontier=frontier) is None
+    )
+    assert frontier.sitemap_snapshots == []
+
 
 def test_rule_failure_SkipUnavailableSitemap_1(tmp_path: Path) -> None:
     """Verify rule SkipUnavailableSitemap is rejected when requires clause fails.
 
     requires: not response.ok and not response.not_modified. A 304 with no snapshot meets
-    no rule at all.
+    no rule at all. Re-propagated by T14 at a0814ab: neither an ok sitemap nor a 304
+    drops the URL's snapshot.
     """
     run, frontier, _ = host_open(tmp_path, site())
     sitemap = xml_response(MAPS, urlset((ORPHAN, None)))
@@ -4260,6 +4397,11 @@ def test_rule_failure_SkipUnavailableSitemap_1(tmp_path: Path) -> None:
     assert skip_unavailable_sitemap(run, MAPS, unchanged, declared=True) is None
     assert reject_non_sitemap(run, MAPS, unchanged, declared=True) is None
     assert accept_fresh_sitemap(run, frontier, MAPS, unchanged) is None
+
+    held, kept, _, snapshot = snapshot_of(tmp_path / "kept")
+    for answer in (sitemap, unchanged):
+        assert skip_unavailable_sitemap(held, MAPS, answer, declared=True, frontier=kept) is None
+    assert kept.sitemap_snapshots == [snapshot]
 
 
 def test_rule_success_ExpandSitemapEntries(tmp_path: Path) -> None:
@@ -4840,12 +4982,28 @@ def seed_site(page: str = PAGE) -> FakeFetcher:
 
 
 def update_request(
-    mirror: Mirror, *, run_id: int = SECOND_RUN, max_age: timedelta | None = None
+    mirror: Mirror,
+    *,
+    run_id: int = SECOND_RUN,
+    max_age: timedelta | None = None,
+    refollow_unchanged_links: bool = True,
 ) -> RunRequest:
     """The RunRequested of a later standard update run over `mirror`."""
     return dataclasses.replace(
-        request(mirror, run_id=run_id, kind=RunKind.update), max_age=max_age
+        request(mirror, run_id=run_id, kind=RunKind.update),
+        max_age=max_age,
+        refollow_unchanged_links=refollow_unchanged_links,
     )
+
+
+def later_run(frontier: Frontier, fetcher: FakeFetcher, *, run_id: int = SECOND_RUN) -> Run:
+    """A later update run attached to `frontier`, prepared, its host docs.example open."""
+    run = start_run(update_request(frontier.mirror, run_id=run_id), FixedClock())
+    assert run is not None
+    assert attach_frontier(run, frontier) is frontier
+    assert prepare_run(run, frontier)
+    assert open_host(run, HOST, SITE, fetcher) is not None
+    return run
 
 
 def first_synced(out_dir: Path, fetcher: FakeFetcher) -> Mirror:
@@ -4855,17 +5013,23 @@ def first_synced(out_dir: Path, fetcher: FakeFetcher) -> Mirror:
     return mirror
 
 
-def synced_again(
+def synced_again(  # noqa: PLR0913  One keyword per RunRequested field a test varies.
     mirror: Mirror,
     fetcher: FakeFetcher,
     *,
     run_id: int = SECOND_RUN,
     max_age: timedelta | None = None,
     clock: FixedClock | None = None,
+    refollow_unchanged_links: bool = True,
 ) -> CrawlResult:
     """A later whole update run over the same mirror and its saved frontier."""
     return run_crawl(
-        update_request(mirror, run_id=run_id, max_age=max_age),
+        update_request(
+            mirror,
+            run_id=run_id,
+            max_age=max_age,
+            refollow_unchanged_links=refollow_unchanged_links,
+        ),
         load_frontier(mirror),
         fetcher,
         clock or FixedClock(),
@@ -4878,9 +5042,13 @@ def known_entry(
     *,
     max_age: timedelta | None = None,
     clock: FixedClock | None = None,
+    refollow_unchanged_links: bool = True,
 ) -> tuple[Run, Frontier, FrontierEntry]:
     """A second run over a mirror holding the seed, through discovery to the seed in progress."""
-    run = start_run(update_request(mirror, max_age=max_age), clock or FixedClock())
+    trigger = update_request(
+        mirror, max_age=max_age, refollow_unchanged_links=refollow_unchanged_links
+    )
+    run = start_run(trigger, clock or FixedClock())
     assert run is not None
     frontier = load_frontier(mirror)
     assert frontier is not None
@@ -5306,7 +5474,8 @@ def test_sitemap_snapshots_round_trip_through_sitemaps_json(tmp_path: Path) -> N
     """save_frontier writes .rovo/sitemaps.json beside frontier.json; load_frontier reads it.
 
     One row per snapshot, sorted by URL, keys sorted, entries in document order; an
-    absent file is no snapshot.
+    absent file is no snapshot. Re-derived at a0814ab: each row carries
+    last_requested_run.
     """
     run, frontier, _ = host_open(tmp_path, site())
     later = validated(xml_response(MAPS, urlset((ORPHAN, LASTMOD), (OUT_OF_SCOPE, None))))
@@ -5326,6 +5495,7 @@ def test_sitemap_snapshots_round_trip_through_sitemaps_json(tmp_path: Path) -> N
         "etag": SEED_ETAG,
         "is_index": False,
         "last_modified": STAMP,
+        "last_requested_run": run.id,
         "url": MAPS,
     }
     assert by_url[MAPS_INDEX]["is_index"] is True
@@ -5333,7 +5503,13 @@ def test_sitemap_snapshots_round_trip_through_sitemaps_json(tmp_path: Path) -> N
     loaded = load_frontier(run.target)
     assert loaded is not None
     kept = {
-        snapshot.url: (snapshot.etag, snapshot.last_modified, snapshot.is_index, snapshot.entries)
+        snapshot.url: (
+            snapshot.etag,
+            snapshot.last_modified,
+            snapshot.is_index,
+            snapshot.entries,
+            snapshot.last_requested_run,
+        )
         for snapshot in loaded.sitemap_snapshots
     }
     assert kept == {
@@ -5345,8 +5521,9 @@ def test_sitemap_snapshots_round_trip_through_sitemaps_json(tmp_path: Path) -> N
                 SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),
                 SitemapEntry(loc=OUT_OF_SCOPE, lastmod=None),
             ),
+            run.id,
         ),
-        MAPS_INDEX: (None, None, True, (SitemapEntry(loc=MAPS, lastmod=None),)),
+        MAPS_INDEX: (None, None, True, (SitemapEntry(loc=MAPS, lastmod=None),), run.id),
     }
     assert all(snapshot.frontier is loaded for snapshot in loaded.sitemap_snapshots)
     (tmp_path / ".rovo" / "sitemaps.json").unlink()
@@ -5402,3 +5579,172 @@ def test_a_second_discovery_sends_the_snapshots_validators_and_reuses_it_on_304(
     row = second.frontier.entry(ORPHAN)
     assert row is not None
     assert row.status is FrontierStatus.unchanged
+
+
+# --- Re-following an unchanged page's stored links (T14 follow-up, crawl.allium a0814ab) --
+
+WIDENED = ("/guide/", "/outside/")
+
+
+def stored_links(mirror: Mirror, *targets: tuple[str, LinkKind]) -> Page:
+    """The seed's outbound links as the last finalisation resolved them (unit inputs)."""
+    (page,) = mirror.pages
+    mirror.links = [
+        Link(
+            source=page,
+            target_identity=target,
+            fragment=None,
+            kind=kind,
+            target=page if target == page.identity else None,
+            fragment_resolved=True,
+        )
+        for target, kind in targets
+    ]
+    return page
+
+
+def seed_links(mirror: Mirror) -> Page:
+    """The seed linking itself, OTHER (uncrawled), OUT_OF_SCOPE and OFF_SITE (external)."""
+    return stored_links(
+        mirror,
+        (SEED, LinkKind.internal),
+        (OTHER, LinkKind.uncrawled),
+        (OUT_OF_SCOPE, LinkKind.external),
+        (OFF_SITE, LinkKind.external),
+    )
+
+
+def unchanged_seed(
+    out_dir: Path, *, refollow_unchanged_links: bool = True, **scope: object
+) -> tuple[Run, Frontier, PageCandidate, Page]:
+    """A second run's seed answered 304 and recorded unchanged (PageStored's pair).
+
+    The first run stored the seed; its stored links are seed_links'; `scope` changes the
+    mirror's scope between the runs.
+    """
+    mirror = first_synced(out_dir, seed_site())
+    seed_links(mirror)
+    mirror.scope = dataclasses.replace(mirror.scope, **scope)  # type: ignore[arg-type]  # Test overrides by name.
+    again = FakeFetcher({SEED: not_modified(SEED)})
+    run, frontier, entry = known_entry(
+        mirror, again, refollow_unchanged_links=refollow_unchanged_links
+    )
+    walk = fetch_entry(run, entry, again)
+    assert walk is not None
+    (attempt,) = walk.attempts
+    assert prepare_attempt(attempt)
+    assert settle_walk(attempt)
+    delivered = dispose_fetch(walk)
+    assert isinstance(delivered, CandidateDelivered)
+    candidate = admit_candidate(delivered)
+    assert candidate.outcome is CandidateOutcome.unchanged
+    page = take_candidate(candidate, FixedClock())
+    assert page is not None
+    return run, frontier, candidate, page
+
+
+def identities(frontier: Frontier) -> list[str]:
+    """Every row's identity, in queue order."""
+    return [entry.identity for entry in frontier.entries]
+
+
+def test_rule_success_RefollowUnchangedLinks(tmp_path: Path) -> None:
+    """Verify rule RefollowUnchangedLinks succeeds when all preconditions are met.
+
+    The scope widened to /outside/ since the seed last changed: its stored links are
+    tested again, so the uncrawled OTHER and the once external OUT_OF_SCOPE are
+    discovered at depth + 1 via link with the link priority, from the seed; the self-link
+    and the foreign host are not. Under a scope whose max_depth is the seed's own, the
+    rule fires and queues nothing.
+    """
+    run, frontier, candidate, page = unchanged_seed(tmp_path / "wide", path_prefixes=WIDENED)
+    assert page.identity == SEED
+    before = identities(frontier)
+    queued = refollow_unchanged_links(run, frontier, candidate, page)
+    assert queued is not None
+    assert [entry.identity for entry in queued] == [OTHER, OUT_OF_SCOPE]
+    assert identities(frontier) == [*before, OTHER, OUT_OF_SCOPE]
+    for entry in queued:
+        assert entry.depth == candidate.depth + 1
+        assert entry.discovered_via is DiscoverySource.link
+        assert entry.discovered_from == SEED
+        assert entry.priority == model.CONFIG.link_priority
+        assert entry.status is FrontierStatus.pending
+        assert entry.identity in run.active_urls
+    assert OFF_SITE not in identities(frontier)
+
+    shallow = unchanged_seed(tmp_path / "shallow", max_depth=0)
+    run, frontier, candidate, page = shallow
+    before = identities(frontier)
+    assert refollow_unchanged_links(run, frontier, candidate, page) == []
+    assert identities(frontier) == before
+
+
+def test_rule_failure_RefollowUnchangedLinks_1(tmp_path: Path) -> None:
+    """Verify rule RefollowUnchangedLinks is rejected when requires clause fails.
+
+    requires: candidate.outcome = unchanged. A converted candidate's links are
+    EnqueuePageLinks', not this rule's.
+    """
+    run, frontier, candidate, page = unchanged_seed(tmp_path, path_prefixes=WIDENED)
+    before = identities(frontier)
+    candidate.outcome = CandidateOutcome.converted
+    assert refollow_unchanged_links(run, frontier, candidate, page) is None
+    assert identities(frontier) == before
+
+
+def test_rule_failure_RefollowUnchangedLinks_2(tmp_path: Path) -> None:
+    """Verify rule RefollowUnchangedLinks is rejected when requires clause fails.
+
+    requires: exists run and run.status = running. No run, or one that has finished,
+    queues nothing.
+    """
+    run, frontier, candidate, page = unchanged_seed(tmp_path, path_prefixes=WIDENED)
+    before = identities(frontier)
+    assert refollow_unchanged_links(None, frontier, candidate, page) is None
+    run.status = RunStatus.finished
+    assert refollow_unchanged_links(run, frontier, candidate, page) is None
+    assert identities(frontier) == before
+
+
+def test_rule_failure_RefollowUnchangedLinks_3(tmp_path: Path) -> None:
+    """Verify rule RefollowUnchangedLinks is rejected when requires clause fails.
+
+    requires: run.refollow_unchanged_links. A run that has it off queues nothing for an
+    unchanged page.
+    """
+    run, frontier, candidate, page = unchanged_seed(
+        tmp_path, refollow_unchanged_links=False, path_prefixes=WIDENED
+    )
+    assert run.refollow_unchanged_links is False
+    before = identities(frontier)
+    assert refollow_unchanged_links(run, frontier, candidate, page) is None
+    assert identities(frontier) == before
+
+
+def test_a_second_run_fetches_what_an_unchanged_page_links_unless_refollow_is_off(
+    tmp_path: Path,
+) -> None:
+    """The driver: a 304 seed's stored links reach the frontier only with the setting on.
+
+    On, OTHER and the widened OUT_OF_SCOPE are queued from the unchanged seed and fetched
+    in the same run, the seed's row unchanged; off, nothing but the seed is fetched.
+    """
+    outcomes: dict[bool, list[str]] = {}
+    for refollow in (True, False):
+        mirror = first_synced(tmp_path / str(refollow), seed_site())
+        seed_links(mirror)
+        mirror.scope = dataclasses.replace(mirror.scope, path_prefixes=WIDENED)
+        again = FakeFetcher(
+            {
+                SEED: not_modified(SEED),
+                OTHER: html_response(OTHER, PAGE),
+                OUT_OF_SCOPE: html_response(OUT_OF_SCOPE, PAGE),
+            }
+        )
+        result = synced_again(mirror, again, refollow_unchanged_links=refollow)
+        row = result.frontier.entry(SEED)
+        assert row is not None
+        assert row.status is FrontierStatus.unchanged
+        outcomes[refollow] = sorted(url for url in again.requests if url in {OTHER, OUT_OF_SCOPE})
+    assert outcomes == {True: sorted([OTHER, OUT_OF_SCOPE]), False: []}

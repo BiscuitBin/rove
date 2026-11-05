@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 603 to 2044).
+"""One standard run, RunRequested to RunEnded (crawl.allium 610 to 2127).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -165,6 +165,7 @@ def start_run(request: RunRequest, clock: Timer) -> Run | None:
         render_mode=request.render_mode,
         stealth_mode=request.stealth_mode,
         max_age=request.max_age,
+        refollow_unchanged_links=request.refollow_unchanged_links,
         targets=request.targets,
         forced_refetch=frozenset(),
         active_urls=frozenset(),
@@ -553,7 +554,7 @@ def robots_allows(run: Run, url: str) -> bool:
     True under robots = ignore and for an origin whose stance is allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 1037 to 1077).
+    literal-$ copy included (crawl.allium 1056 to 1096).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True
@@ -643,6 +644,43 @@ def enqueue_page_links(
     return discovered
 
 
+def refollow_unchanged_links(
+    run: Run | None, frontier: Frontier, candidate: PageCandidate, page: Page
+) -> list[FrontierEntry] | None:
+    """Realises crawl.allium RefollowUnchangedLinks; None when its guard does not hold.
+
+    Each of the page's stored outbound links, every kind, is tested again against the
+    scope in force as EnqueuePageLinks tests a content link, so a link external under an
+    older scope is queued once the scope admits it. Navigation links are not stored.
+    """
+    if candidate.outcome is not CandidateOutcome.unchanged:
+        return None
+    if run is None or run.status is not RunStatus.running or not run.refollow_unchanged_links:
+        return None
+    if run.mode is not RunMode.standard:
+        raise NotInThisSlice(rule="RefollowUnchangedLinks")
+    scope = candidate.mirror.scope
+    depth = candidate.depth + 1
+    discovered: list[FrontierEntry] = []
+    for link in page.outbound_links:
+        if not scope.allows(link.target_identity, depth):
+            continue  # Tested first, as EnqueuePageLinks does.
+        identity = scope.identity_of(link.target_identity)
+        if identity != page.identity:
+            discovered.append(
+                enqueue(
+                    run,
+                    frontier,
+                    identity,
+                    depth=depth,
+                    via=DiscoverySource.link,
+                    priority=CONFIG.link_priority,
+                    from_url=page.identity,
+                )
+            )
+    return discovered
+
+
 # --- Sitemaps and llms.txt ----------------------------------------------------------
 
 
@@ -686,7 +724,8 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
     """Realises crawl.allium FetchSitemap: the SitemapAnswered response, else None.
 
     Each sitemap is read at most once per run, through fetch_resource, its bytes counted.
-    A snapshot the frontier holds for the URL sends its validators. A Retry-After
+    A snapshot the frontier holds for the URL sends its validators and is stamped with
+    the run (last_requested_run), whatever the answer. A Retry-After
     past the cap retires the host of a declared sitemap (the breaker slice's trip) and
     pauses it for retry_after_cap after a speculative probe, whose answer then stands. A
     3xx answer other than a 304 (redirect following) is a later slice's branch.
@@ -707,6 +746,8 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
     )
     response = fetch_resource(url, run, host, fetcher, validators)
     run.bytes_fetched += response.size
+    if snapshot is not None:
+        snapshot.last_requested_run = run.id
     if past_cap(response, run.policy):
         if declared:
             raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
@@ -721,9 +762,9 @@ def accept_fresh_sitemap(
 ) -> SitemapSnapshot | None:
     """Realises crawl.allium AcceptFreshSitemap: the snapshot created or updated, else None.
 
-    The snapshot's is_index and entries are SitemapEntriesFound's.
+    The snapshot's is_index and entries are SitemapEntriesFound's; one created is
+    stamped with the run.
     """
-    del run  # SitemapEntriesFound names the run; the snapshot is the frontier's.
     if not response.ok or not sitemaps.is_sitemap_document(response):
         return None
     is_index = sitemaps.sitemap_is_index(response)
@@ -737,6 +778,7 @@ def accept_fresh_sitemap(
             last_modified=response.last_modified,
             is_index=is_index,
             entries=entries,
+            last_requested_run=run.id,
         )
         frontier.sitemap_snapshots.append(snapshot)
         return snapshot
@@ -765,20 +807,52 @@ def _snapshot(frontier: Frontier, url: str) -> SitemapSnapshot | None:
     return next((kept for kept in frontier.sitemap_snapshots if kept.url == url), None)
 
 
+def _drop_snapshot(frontier: Frontier | None, url: str) -> None:
+    """Drop SitemapSnapshot{frontier: frontier, url: url}: the rules' `not exists`."""
+    if frontier is not None:
+        frontier.sitemap_snapshots = [
+            kept for kept in frontier.sitemap_snapshots if kept.url != url
+        ]
+
+
 def reject_non_sitemap(
-    run: Run, url: str, response: SiteResponse, *, declared: bool
+    run: Run,
+    url: str,
+    response: SiteResponse,
+    *,
+    declared: bool,
+    frontier: Frontier | None = None,
 ) -> DiscoveryFailed | None:
-    """Realises crawl.allium RejectNonSitemap: not_a_sitemap for a declared sitemap."""
-    if not declared or not response.ok or sitemaps.is_sitemap_document(response):
+    """Realises crawl.allium RejectNonSitemap: not_a_sitemap for a declared sitemap.
+
+    The URL's snapshot in `frontier`, declared or not, is dropped.
+    """
+    if not response.ok or sitemaps.is_sitemap_document(response):
+        return None
+    _drop_snapshot(frontier, url)
+    if not declared:
         return None
     return DiscoveryFailed(run=run, url=url, problem=DiscoveryProblem.not_a_sitemap)
 
 
 def skip_unavailable_sitemap(
-    run: Run, url: str, response: SiteResponse, *, declared: bool
+    run: Run,
+    url: str,
+    response: SiteResponse,
+    *,
+    declared: bool,
+    frontier: Frontier | None = None,
 ) -> DiscoveryFailed | None:
-    """Realises crawl.allium SkipUnavailableSitemap: a declared, not absent failure's problem."""
-    if response.ok or response.not_modified or not declared or response.absent:
+    """Realises crawl.allium SkipUnavailableSitemap: a declared, not absent failure's problem.
+
+    An absent answer (404 or 410) drops the URL's snapshot in `frontier`, declared or
+    not; an unavailable or unreachable one keeps it.
+    """
+    if response.ok or response.not_modified:
+        return None
+    if response.absent:
+        _drop_snapshot(frontier, url)
+    if not declared or response.absent:
         return None
     problem = (
         DiscoveryProblem.sitemap_unavailable
@@ -905,8 +979,9 @@ def record_observation(
 def drop_stale_observations(run: Run, frontier: Frontier) -> bool:
     """Realises crawl.allium DropStaleObservations, then records the discovered count.
 
-    A row unseen for more than observed_url_retention_syncs runs is dropped. The
-    frontier's row count now is rovo.allium CloseRun's discovered_count.
+    A row unseen, or a sitemap snapshot unrequested, for more than
+    observed_url_retention_syncs runs is dropped. The frontier's row count now is
+    rovo.allium CloseRun's discovered_count.
     """
     if run.status is not RunStatus.running:
         return False
@@ -914,6 +989,11 @@ def drop_stale_observations(run: Run, frontier: Frontier) -> bool:
         observed
         for observed in frontier.observed_urls
         if observed.last_seen_run + CONFIG.observed_url_retention_syncs >= run.id
+    ]
+    frontier.sitemap_snapshots = [
+        snapshot
+        for snapshot in frontier.sitemap_snapshots
+        if snapshot.last_requested_run + CONFIG.observed_url_retention_syncs >= run.id
     ]
     run.discovered_count = len(frontier.entries)
     return True
@@ -960,8 +1040,8 @@ def _read_sitemaps(
             stack.extend((child, declared) for child in reversed(children or []))
             continue
         failed = reject_non_sitemap(
-            run, url, response, declared=declared
-        ) or skip_unavailable_sitemap(run, url, response, declared=declared)
+            run, url, response, declared=declared, frontier=frontier
+        ) or skip_unavailable_sitemap(run, url, response, declared=declared, frontier=frontier)
         if failed is not None:
             run.discovery_failures.append(failed)
 
@@ -1577,8 +1657,11 @@ def _handle_entry(
         return entry_fails(disposed)
     if isinstance(disposed, CandidateDelivered):
         # An unchanged row is settled already: the mirror records it (RecordUnchanged),
-        # which raises no LinksFound.
-        settle_candidate(admit_candidate(disposed), clock)
+        # which raises no LinksFound; its stored links are queued again instead.
+        candidate = admit_candidate(disposed)
+        settled = settle_candidate(candidate, clock)
+        if isinstance(settled, Page):
+            refollow_unchanged_links(run, frontier, candidate, settled)
         return None
     return _store(run, frontier, walk, clock)
 
@@ -1757,6 +1840,7 @@ def _encode_snapshot(snapshot: SitemapSnapshot) -> dict[str, object]:
         "last_modified": snapshot.last_modified,
         "is_index": snapshot.is_index,
         "entries": [{"loc": entry.loc, "lastmod": entry.lastmod} for entry in snapshot.entries],
+        "last_requested_run": snapshot.last_requested_run,
     }
 
 
@@ -1771,6 +1855,7 @@ def _decode_snapshot(frontier: Frontier, row: dict[str, Any]) -> SitemapSnapshot
             SitemapEntry(loc=str(entry["loc"]), lastmod=entry["lastmod"])
             for entry in row["entries"]
         ),
+        last_requested_run=int(row["last_requested_run"]),
     )
 
 

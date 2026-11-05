@@ -106,13 +106,19 @@ seen more than `crawl.max_age` seconds before the sync started, the processing s
 changed, or a sitemap now gives it a newer `<lastmod>`, when it is fetched without them.
 A page answered `304`, or answered with the same raw document under the same settings
 and with no redirect, is kept as it is: its row in the frontier is `unchanged`, its body
-is not converted again and its links are not followed again; only the validators and the
-sitemap `<lastmod>` the answer carries replace the stored ones. A page whose raw
+is not converted again; only the validators and the sitemap `<lastmod>` the answer
+carries replace the stored ones. Its stored links (the content links the last sync
+resolved, not its navigation links) are tested again against the scope in force and
+queued, so a scope widened since the page last changed reaches the pages it links to;
+`crawl.refollow_unchanged_links = false` in `rovo.toml` turns that off. A page whose raw
 document changed, or that `max_age` forces, is converted again and its page file
-rewritten only when its text differs. A sitemap read before is requested with its saved
-validators, and a `304` reuses the entries saved for it (`.rovo/sitemaps.json`, in the
-[mirror reference](mirror.md#rovofrontierjson-and-rovorunsjson)). Against a site that
-has not changed, a sync rewrites no page file and no index and exits 0. In
+rewritten only when its text differs. The validators live in `.rovo/manifest.json`
+alone, so a server that sends a new `ETag` or `Last-Modified` over the same document
+rewrites nothing. A sitemap read before is requested with its saved validators, and a
+`304` reuses the entries saved for it (`.rovo/sitemaps.json`, in the
+[mirror reference](mirror.md#rovofrontierjson-and-rovorunsjson)); a sitemap that now
+answers `404`, `410` or not a sitemap loses its saved entries. Against a site that has
+not changed, a sync rewrites no page file and no index and exits 0. In
 `crawl-report.json`, `fetched` counts every page request, `304` answers included;
 `per_host`'s `fetched` counts only pages answered with a document; `converted` counts
 the pages whose body changed and `skipped_unchanged` the pages seen whose body did not.
