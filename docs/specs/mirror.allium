@@ -155,8 +155,9 @@ value CrawlScope {
 }
 
 -- The YAML block at the top of every page file. Keys are sorted and absent
--- values are omitted. It carries no wall-clock time: fetch times live in
--- the manifest, so an unchanged page's file never changes.
+-- values are omitted. It carries no wall-clock time and none of the site's
+-- validators: fetch times, etag and last_modified live in the manifest,
+-- so an unchanged page's file never changes.
 value Frontmatter {
     source_url: String
     title: String
@@ -171,8 +172,6 @@ value Frontmatter {
     description: String?
     canonical_url: String?
     breadcrumbs: List<String>?
-    etag: String?
-    last_modified: String?
     sitemap_lastmod: String?
     version: String?
     locale: String?
@@ -182,6 +181,7 @@ value Frontmatter {
 -- Every path an index records is mirror-relative, so a page's path starts
 -- with pages/<host>/. Every field comes from the manifest's page and its
 -- links, never from the page file; BuildIndexes states the line encoding.
+-- The site's validators (etag, last_modified) are not among its fields.
 value IndexEntry {
     path: String                        -- the page's mirror-relative path, under pages/<host>/
     identity: String
@@ -194,7 +194,6 @@ value IndexEntry {
     low_confidence: Boolean
     quality_flags: Set<convert/QualityFlag>
     content_digest: String
-    last_modified: String?
     version: String?
     locale: String?
     word_count: Integer                 -- words the quality measurement counted outside code (quality.output.words)
@@ -918,7 +917,11 @@ rule RecordUnchanged {
         -- A not-modified answer or an unchanged raw document. The page
         -- file is untouched; the stored measurement is carried, not
         -- re-measured. Taking the entry's sitemap lastmod means the same
-        -- lastmod does not force a refetch again.
+        -- lastmod does not force a refetch again. The new etag and
+        -- last_modified are kept in the manifest only (Frontmatter). The
+        -- page's stored links are queued again by the crawl
+        -- (crawl/RefollowUnchangedLinks, on PageStored) unless the run
+        -- turns that off; no LinksFound is raised here.
 }
 
 rule DiscardUnchangedWithoutPage {
@@ -1462,10 +1465,12 @@ surface MirrorContents {
         -- sorted. It always carries source_url, title, content_digest,
         -- quality_score, low_confidence, quality_flags, tier, method,
         -- profile and keywords; description, canonical_url, breadcrumbs,
-        -- etag, last_modified, sitemap_lastmod, version and locale appear
-        -- only when they have a value. The content digest covers the body
-        -- after the frontmatter only, so a frontmatter edit never moves
-        -- it. No page file carries a wall-clock time.
+        -- sitemap_lastmod, version and locale appear only when they have a
+        -- value. The content digest covers the body after the frontmatter
+        -- only, so a frontmatter edit never moves it. No page file carries
+        -- a wall-clock time or the site's validators (etag and
+        -- last_modified), which are kept in the mirror's state under .rovo/
+        -- alone.
 
     @guarantee RelativeLinksOnly
         -- A link to a written page is a relative path from the linking
@@ -1481,7 +1486,9 @@ surface MirrorContents {
         -- A sync against an unchanged site rewrites no page file and no
         -- index file: change detection, keywords, frontmatter and indexes
         -- are pure functions of the page bodies, links and configuration,
-        -- and no generated file carries a wall-clock time. A diff of the
+        -- and no generated file carries a wall-clock time or the site's
+        -- validators, so a validator that moves over an unchanged body
+        -- rewrites nothing. A diff of the
         -- mirror after a sync therefore shows only what changed upstream.
 
     @guarantee DeterministicIndexes
@@ -1530,6 +1537,8 @@ surface PageIntake {
             p.sitemap_lastmod
             p.processing_signature
             p.low_confidence
+            for l in p.outbound_links:
+                l.target_identity
 
     provides:
         CandidateDelivered(run, mirror, requested_identity, source_url, redirect_hops, redirect_target?, depth, outcome, content?, tier, etag?, last_modified?, sitemap_lastmod?, raw_digest)

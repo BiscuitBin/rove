@@ -58,12 +58,12 @@ use "./convert.allium" as convert
 ------------------------------------------------------------
 
 -- The resolved configuration of one mirror: built-in defaults (config's
--- render_mode, max_depth and fail_on_low_quality among them), then
--- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
--- layers winning key by key. Invalid when the file is unreadable, a key is
--- unknown or a value is bad, a profile name the catalogue lacks included;
--- problems names every bad key path. The mirror's layout is fixed
--- (mirror.allium: pages under pages/<host>/, the template
+-- render_mode, max_depth, fail_on_low_quality and refollow_unchanged_links
+-- among them), then rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then
+-- flags, later layers winning key by key. Invalid when the file is
+-- unreadable, a key is unknown or a value is bad, a profile name the
+-- catalogue lacks included; problems names every bad key path. The mirror's
+-- layout is fixed (mirror.allium: pages under pages/<host>/, the template
 -- "pages/{host}/{path}"), so path_template is not a key and a layer that
 -- sets it names an unknown key; max_path_chars is the mirror's own
 -- parameter, not a key, and lies within [128, 240] (MaxPathCharsInRange).
@@ -85,6 +85,7 @@ value Configuration {
     render_mode: crawl/RenderMode
     stealth_mode: crawl/StealthMode
     max_age: Duration?
+    refollow_unchanged_links: Boolean   -- crawl.refollow_unchanged_links: re-queue an unchanged page's stored links
     fail_on_low_quality: Boolean
     unblocking_provider: String?        -- reserved; any value is a configuration error
 
@@ -253,6 +254,7 @@ config {
     render_mode: crawl/RenderMode = never
     max_depth: Integer = 10
     fail_on_low_quality: Boolean = false
+    refollow_unchanged_links: Boolean = true
 }
 
 ------------------------------------------------------------
@@ -505,7 +507,8 @@ rule StartSync {
             owned_hosts: owned, requested_owner_test: options.owner_test, policy: policy,
             dry_run: options.dry_run, interactive: options.interactive,
             render_mode: settings.render_mode, stealth_mode: settings.stealth_mode,
-            max_age: settings.max_age, targets: targets
+            max_age: settings.max_age,
+            refollow_unchanged_links: settings.refollow_unchanged_links, targets: targets
         )
 
     @guidance

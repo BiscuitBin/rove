@@ -235,6 +235,7 @@ entity Run {
     render_mode: RenderMode
     stealth_mode: StealthMode
     max_age: Duration?
+    refollow_unchanged_links: Boolean   -- an unchanged page's stored links are queued again (RefollowUnchangedLinks)
     targets: Set<String>                -- operator-named identities, or an owner-testing run's seeds
     forced_refetch: Set<String>         -- refetched without validators: targets, else pages past max_age
     active_urls: Set<String>            -- owner testing: seeds plus admitted links
@@ -293,6 +294,7 @@ entity Frontier {
 
     entries: FrontierEntry with frontier = this
     observed_urls: ObservedUrl with frontier = this
+    sitemap_snapshots: SitemapSnapshot with frontier = this
 
     pending_entries: entries where status = pending
     in_progress_entries: entries where status = in_progress
@@ -354,7 +356,11 @@ entity ObservedUrl {
 }
 
 -- Remembered validators and entries of a sitemap, so the next run can ask
--- whether it changed instead of reading it again.
+-- whether it changed instead of reading it again. Dropped when its sitemap
+-- answers absent or not a sitemap (SkipUnavailableSitemap,
+-- RejectNonSitemap), and forgotten after
+-- config.observed_url_retention_syncs runs in which it was not requested
+-- (DropStaleObservations).
 entity SitemapSnapshot {
     frontier: Frontier
     url: String
@@ -362,6 +368,7 @@ entity SitemapSnapshot {
     last_modified: String?
     is_index: Boolean
     entries: List<SitemapEntry>
+    last_requested_run: Integer         -- the last run that requested the sitemap, whatever it answered
 }
 
 -- The starting tier learned for a host and path pattern on a client-rendered
@@ -547,7 +554,7 @@ config {
     sitemap_depth: Integer = 1
     llms_txt_depth: Integer = 1
     discovery_max_redirects: Integer = 5
-    observed_url_retention_syncs: Integer = 3
+    observed_url_retention_syncs: Integer = 3   -- runs an observed URL goes unseen, or a sitemap snapshot unrequested, before it is forgotten
     start_priority: Integer = 100
     recheck_priority: Integer = 90
     sitemap_priority: Integer = 50
@@ -601,7 +608,7 @@ config {
 -- bad configuration, a changed root, an off-host target, an invalid owner
 -- request, a configured engine that is not installed.
 rule StartRun {
-    when: RunRequested(operator, mirror, id, kind, mode, baseline?, preceding?, scope_hash, owned_hosts, requested_owner_test?, policy, dry_run, interactive, render_mode, stealth_mode, max_age?, targets)
+    when: RunRequested(operator, mirror, id, kind, mode, baseline?, preceding?, scope_hash, owned_hosts, requested_owner_test?, policy, dry_run, interactive, render_mode, stealth_mode, max_age?, refollow_unchanged_links, targets)
     requires: mode = standard or (baseline != null and preceding != null and owned_hosts.count > 0)
     ensures: Run.created(
         target: mirror, operator: operator, id: id, kind: kind, mode: mode,
@@ -609,7 +616,7 @@ rule StartRun {
         owned_hosts: owned_hosts, requested_owner_test: requested_owner_test,
         policy: policy, dry_run: dry_run, interactive: interactive,
         render_mode: render_mode, stealth_mode: stealth_mode, max_age: max_age,
-        targets: targets, forced_refetch: {}, active_urls: {}, unresolved_urls: {},
+        refollow_unchanged_links: refollow_unchanged_links, targets: targets, forced_refetch: {}, active_urls: {}, unresolved_urls: {},
         error: null, interrupt_requested: false, crawling: false, budget_stopped: false,
         bytes_fetched: 0, fetch_attempts: 0, started_at: now, status: running
     )
@@ -936,7 +943,9 @@ rule AllowAllWhenRobotsAbsent {
 -- run, as on robots.txt; on a speculative probe it never retires the
 -- host: it ends that probe as unavailable, silently, and pauses the host
 -- for retry_after_cap before its next request, after which the host's
--- requests, its pages' included, carry on (FetchSitemap).
+-- requests, its pages' included, carry on (FetchSitemap). Decided: the
+-- pause lasts retry_after_cap, never the longer Retry-After the server
+-- asked for.
 rule QueueSitemaps {
     when: SitemapsRequested(run, name)
     requires: run.status = running
@@ -993,6 +1002,8 @@ rule FetchSitemap {
     let retires_host = declared and past_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
+        if exists snapshot:
+            snapshot.last_requested_run = run.id
         if retires_host and exists breaker and breaker.status = watching:
             breaker.status = tripped
             BreakerTripped(host: host)
@@ -1002,7 +1013,15 @@ rule FetchSitemap {
         SitemapAnswered(run: run, host: host, url: url, declared: declared, response: response)
 
     @guidance
-        -- Each sitemap is read at most once per run. fetch_resource tries
+        -- Each sitemap is read at most once per run, so when one URL falls
+        -- due twice with different declared values (a robots-declared
+        -- sitemap a speculative index also names, or a well-known sitemap
+        -- a declared index names), the first SitemapDue to reach it wins
+        -- and the later one reads nothing; declared sitemaps and their
+        -- children fall due before the well-known probes in discovery
+        -- order (Discover), so the declared reading wins. Every request
+        -- stamps the URL's snapshot, when it has one, with this run
+        -- (last_requested_run), whatever the answer. fetch_resource tries
         -- a sitemap as FetchRobots says: retried with a HostBackedOff per
         -- retry, every honoured Retry-After counted, and a Retry-After
         -- past retry_after_cap ending the tries with that answer. On a
@@ -1102,7 +1121,8 @@ rule AcceptFreshSitemap {
         else:
             SitemapSnapshot.created(
                 frontier: frontier, url: url, etag: response.etag, last_modified: response.last_modified,
-                is_index: sitemap_is_index(response), entries: sitemap_entries(response)
+                is_index: sitemap_is_index(response), entries: sitemap_entries(response),
+                last_requested_run: run.id
             )
         SitemapEntriesFound(run: run, host: host, url: url, declared: declared, is_index: sitemap_is_index(response), entries: sitemap_entries(response))
 
@@ -1117,25 +1137,37 @@ rule AcceptFreshSitemap {
         -- lastmod, when it has one, with surrounding whitespace stripped.
 }
 
+-- A sitemap that answers with something other than a sitemap loses its
+-- snapshot, declared or not.
 rule RejectNonSitemap {
     when: SitemapAnswered(run, host, url, declared, response)
     requires: response.ok and not is_sitemap_document(response)
+    let snapshot = SitemapSnapshot{frontier: Frontier{mirror: run.target}, url: url}
     ensures:
+        if exists snapshot:
+            not exists snapshot
         if declared:
             DiscoveryFailed(run: run, url: url, problem: not_a_sitemap)
 }
 
+-- A sitemap that answers absent (404 or 410) loses its snapshot, declared
+-- or not; one that is unavailable or unreachable keeps it.
 rule SkipUnavailableSitemap {
     when: SitemapAnswered(run, host, url, declared, response)
     requires: not response.ok and not response.not_modified
+    let snapshot = SitemapSnapshot{frontier: Frontier{mirror: run.target}, url: url}
     ensures:
+        if response.absent and exists snapshot:
+            not exists snapshot
         if declared and not response.absent:
             DiscoveryFailed(run: run, url: url, problem: if response.error != null: sitemap_unreachable else: sitemap_unavailable)
 }
 
 -- Index children are queued on the same host in document order, at most
 -- sitemap_max_children per host: no child is ranked above another and none
--- is dropped for the locale it names. Each is declared exactly when the
+-- is dropped for the locale it names. A speculative index's children count
+-- toward sitemap_children_read exactly as a declared index's do, so a
+-- speculative index may use the host's cap up. Each is declared exactly when the
 -- index is, so the children of a speculative index are speculative probes
 -- too. Entries are observed whatever their scope and admitted at
 -- sitemap_depth when in scope, at most max_pages * sitemap_cap_multiplier
@@ -1261,6 +1293,8 @@ rule Enqueue {
                 existing.priority = priority
 }
 
+-- Observed URLs unseen, and sitemap snapshots unrequested, for more than
+-- observed_url_retention_syncs runs are forgotten.
 rule DropStaleObservations {
     when: FrontierReady(run)
     requires: run.status = running
@@ -1269,7 +1303,17 @@ rule DropStaleObservations {
         for o in frontier.observed_urls:
             if o.last_seen_run + config.observed_url_retention_syncs < run.id:
                 not exists o
+        for s in frontier.sitemap_snapshots:
+            if s.last_requested_run + config.observed_url_retention_syncs < run.id:
+                not exists s
         DiscoveryDone(run: run)
+
+    @guidance
+        -- Discovery has finished when this runs, so a sitemap requested
+        -- this run is already stamped with run.id and kept, as a URL
+        -- sighted this run is. A run that requests no sitemap (a targeted
+        -- or owner-testing run) still counts toward the runs a snapshot
+        -- goes unrequested.
 }
 
 rule DryRun {
@@ -1990,6 +2034,45 @@ rule EnqueuePageLinks {
         -- visible in the mirror but are never admitted.
 }
 
+-- Decided by the maintainer: a page the mirror records unchanged
+-- (mirror/RecordUnchanged) is neither refetched nor
+-- reconverted, but its stored links are queued again, as a stored page's
+-- are (EnqueuePageLinks), so a scope widened since the page last changed
+-- takes effect on the next sync. Off when the run's
+-- refollow_unchanged_links is false: an unchanged page then queues nothing.
+rule RefollowUnchangedLinks {
+    when: mirror/PageStored(candidate, page)
+    requires: candidate.outcome = unchanged
+    let run = Run{target: candidate.mirror, status: running}
+    requires: exists run and run.status = running
+    requires: run.refollow_unchanged_links
+    let scope = candidate.mirror.scope
+    ensures:
+        for l in page.outbound_links:
+            if scope.identity_of(l.target_identity) != page.identity
+                and scope.allows(l.target_identity, candidate.depth + 1)
+                and (run.mode = standard
+                    or (hostname_of(l.target_identity) in run.owned_hosts and owner_link_needed(run, scope.identity_of(l.target_identity)))):
+                UrlDiscovered(
+                    run: run, url: scope.identity_of(l.target_identity), depth: candidate.depth + 1, via: link,
+                    priority: config.link_priority, from: page.identity
+                )
+
+    @guidance
+        -- The stored links are the page's outbound links as the last
+        -- finalisation resolved them (mirror/ResolveMirrorLinks over the
+        -- page's converted body, the links links.jsonl is written from),
+        -- every kind alike: each target identity is tested again against
+        -- the scope in force, so a link that was external under the old
+        -- scope is queued when the new one admits it. Navigation links are
+        -- not stored with a page, so an unchanged page re-follows its
+        -- content links only. Enqueue deduplicates, so a link already
+        -- queued changes nothing but a shorter depth. The setting is the
+        -- configuration's refollow_unchanged_links (rovo.toml's
+        -- crawl.refollow_unchanged_links, true by default), carried on
+        -- the Run.
+}
+
 ------------------------------------------------------------
 -- Ending a run
 ------------------------------------------------------------
@@ -2137,7 +2220,7 @@ surface SyncControl {
     facing operator: mirror/Operator
 
     provides:
-        RunRequested(operator, mirror, id, kind, mode, baseline?, preceding?, scope_hash, owned_hosts, requested_owner_test?, policy, dry_run, interactive, render_mode, stealth_mode, max_age?, targets)
+        RunRequested(operator, mirror, id, kind, mode, baseline?, preceding?, scope_hash, owned_hosts, requested_owner_test?, policy, dry_run, interactive, render_mode, stealth_mode, max_age?, refollow_unchanged_links, targets)
 
     @guarantee ReportableOutcome
         -- Every run that starts ends with exactly one RunEnded, finished
