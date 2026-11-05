@@ -75,10 +75,14 @@ def sync(
     fetcher: "Fetcher",
     clock: "Timer",
     tier_installed: Callable[[Tier], bool] | None = None,
+    dry_run: bool = False,
 ) -> ExitCode:
     """Realises rovo.allium RefuseSyncWithoutDirectory, StartSync and the report's rules.
 
-    A missing directory or a missing or unparsable manifest exits usage with no report.
+    A dry run discovers, prints the identity of each row it would fetch, one a line on
+    standard output, and fetches, converts and writes no page; it saves the manifest,
+    the frontier and the run, and writes the report. A missing directory or a missing or
+    unparsable manifest exits usage with no report.
     Until the refusals slice, every other failed StartSync guard does too, rather than
     writing a refused report. A branch a later slice implements exits partial and
     leaves the previous report in place.
@@ -99,7 +103,7 @@ def sync(
     if problem is not None:
         return _refuse(f"sync: {problem}")
     try:
-        return _start_sync(mirror, settings, fetcher, clock)
+        return _start_sync(mirror, settings, fetcher, clock, dry_run=dry_run)
     except NotInThisSlice as stopped:
         sys.stderr.write(f"rovo: sync stopped: {stopped}\n")
         return ExitCode.partial
@@ -139,7 +143,7 @@ def _start_problem(
 
 
 def _start_sync(
-    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: "Timer"
+    mirror: Mirror, settings: "Configuration", fetcher: "Fetcher", clock: "Timer", *, dry_run: bool
 ) -> ExitCode:
     """StartSync, then the run, CloseRun, the finalise pass and RankAndWriteReport."""
     # Only a sync loads the configuration, the crawl and the report (rovo index never).
@@ -158,6 +162,7 @@ def _start_sync(
     )
     from rovo._crawl.run import (  # noqa: PLC0415  Only a sync loads the crawl.
         drive_run,
+        dry_run_listing,
         load_frontier,
         next_run_id,
         save_run,
@@ -177,7 +182,7 @@ def _start_sync(
 
     operator = Operator()
     options = SyncOptions(
-        dry_run=False,
+        dry_run=dry_run,
         confirmed=False,
         interactive=sys.stdin.isatty(),
         json_events=False,
@@ -232,15 +237,22 @@ def _start_sync(
     for failed in result.failed:
         tally_failed_url(report, failed)
     close_run(report, result.run, result.frontier)
-    finalised = finalise(operator, mirror, result.run.id, clock)
-    for event in finalised.finalised:
-        tally_finalised_page(report, event)
-    if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.
-        take_broken_links(report, finalised.rewritten)
-    save_mirror(mirror)
-    save_run(result)  # Only now: a done frontier row must have its page saved.
-    if finalised.indexes is not None:  # BuildIndexes completes every pending pass.
-        finalise_run_report(finalised.indexes.pass_, result.run)
+    if not options.dry_run:  # CloseRun requested the finalise pass.
+        finalised = finalise(operator, mirror, result.run.id, clock)
+        for event in finalised.finalised:
+            tally_finalised_page(report, event)
+        if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.
+            take_broken_links(report, finalised.rewritten)
+        save_mirror(mirror)
+        save_run(result)  # Only now: a done frontier row must have its page saved.
+        if finalised.indexes is not None:  # BuildIndexes completes every pending pass.
+            finalise_run_report(finalised.indexes.pass_, result.run)
+    else:  # CloseRun raised ReportReady at once; the dry run's listing is printed.
+        sys.stdout.writelines(
+            f"{identity}\n" for identity in dry_run_listing(result.run, result.frontier)
+        )
+        save_mirror(mirror)
+        save_run(result)
     code = rank_and_write_report(report, result.run, clock)
     return ExitCode.partial if code is None else code
 

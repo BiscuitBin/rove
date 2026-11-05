@@ -82,3 +82,17 @@ policy.
   HTTP date, on any retryable answer); a page whose tries run out on a 5xx or a
   transport error is listed under `failed_urls` and makes the sync exit 1 (a 429 that
   runs out stops the sync as a later slice's branch).
+- `rovo sync` discovers pages beyond the seeds: for each allowed host, after its
+  robots.txt, it reads the sitemaps robots.txt declares, then `/sitemap.xml` and
+  `/sitemap_index.xml`, sitemap indexes' children only on the index's own host (at most
+  `sitemap_max_children` per host), then `/llms.txt`. Every URL they name is recorded
+  under `observed_urls` in `frontier.json` and forgotten after
+  `observed_url_retention_syncs` syncs unseen; the ones in scope are queued at depth 1
+  with their priorities, at most `max_pages * sitemap_cap_multiplier` sitemap entries
+  per host, a sitemap's `lastmod` kept on the page. A declared sitemap that fails or is
+  not a sitemap is listed under `discovery_problems` and makes the sync exit 1; a
+  missing declared sitemap and every failing probe are silent. `crawl-report.json`'s
+  `discovered` counts the frontier's rows when discovery ends.
+- `rovo sync --dry-run OUT_DIR` discovers as a sync does, prints the URL of each page
+  it would fetch, one per line in the order it would take them, fetches and writes no
+  page or index, and saves the manifest, the frontier, the run and the report.

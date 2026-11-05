@@ -88,8 +88,11 @@ answers a scripted URL from a sequence of answers, one per request, before its m
 `StampingFetcher`, which wraps any fetcher and records `(url, timer.now())` per request;
 `FixedClock`, a clock that stands still and records each `sleep` without moving;
 `SteppingTimer`, a timer whose time moves only when it sleeps, by exactly that much, so
-the gap between two stamps is the wait the limiter chose; and `html_response` and
-`text_response` to build answers. `tests/test_pace.py` tests the pacing on unit inputs:
+the gap between two stamps is the wait the limiter chose; and `html_response`,
+`text_response` and `xml_response` to build answers (`fixture_site` answers an `.xml`
+file with the last). `tests/test_sitemaps.py` pins the discovery black boxes of
+`rovo._crawl.sitemaps` with hand-written tables: what is a sitemap document, its
+entries, an entity never expanded, the links of `llms.txt` and the sitemap filter. `tests/test_pace.py` tests the pacing on unit inputs:
 the limiter's spacing, `retry_wait`, robots matching and the robots.txt retries, and the
 real `SystemTimer` only with `time.sleep` and `time.monotonic` replaced. No test sleeps
 or reaches the network.
@@ -102,7 +105,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the twenty-six package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-seven package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -136,7 +139,10 @@ pages link across servers; `cross-host` holds the placeholder `@TARGET_BASE@`, w
 test replaces with the other server's base URL. `polite` is a seed, two pages, a page
 the scripted tests make flaky and a page under a path its `robots.txt` disallows, with a
 `Crawl-delay`; `tests/e2e/test_polite_sync.py` syncs it to check robots.txt, pacing,
-retries and the partial exit.
+retries and the partial exit. `tests/e2e/test_discovery_sync.py` generates its sites
+into a temporary directory, since a sitemap names absolute URLs with the server's port,
+and syncs them to check sitemaps, sitemap indexes, `llms.txt`, the observations, the
+page budget and `rovo sync --dry-run`.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

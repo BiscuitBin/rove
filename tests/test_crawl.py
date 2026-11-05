@@ -10,11 +10,13 @@ FetchEntry makes its first attempt); the run's driver, `run_crawl`, does the res
 
 import dataclasses
 import importlib.metadata
+import sys
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
+import pytest
 
 from fakes import (
     START,
@@ -25,10 +27,12 @@ from fakes import (
     html_response,
     not_found,
     text_response,
+    xml_response,
 )
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag
-from rovo._crawl import model
+from rovo._crawl import model, sitemaps
+from rovo._crawl import run as run_module
 from rovo._crawl.fetch import HttpxFetcher
 from rovo._crawl.model import (
     BlockKind,
@@ -45,6 +49,7 @@ from rovo._crawl.model import (
     FrontierStatus,
     Host,
     LadderWalk,
+    ObservedUrl,
     RenderMode,
     RenderReason,
     RobotsMode,
@@ -55,6 +60,8 @@ from rovo._crawl.model import (
     RunMode,
     RunRequest,
     RunStatus,
+    SitemapEntry,
+    SitemapSnapshot,
     SiteResponse,
     StealthMode,
     WalkStatus,
@@ -62,6 +69,7 @@ from rovo._crawl.model import (
 )
 from rovo._crawl.run import (
     CrawlResult,
+    accept_fresh_sitemap,
     adopt_robots_rules,
     allow_all_when_robots_absent,
     attach_frontier,
@@ -75,13 +83,17 @@ from rovo._crawl.run import (
     discover,
     dispose_fetch,
     drop_stale_observations,
+    dry_run,
+    dry_run_listing,
     end_run,
     enqueue,
     enqueue_page_links,
     entry_fails,
+    expand_sitemap_entries,
     feed_breaker,
     fetch_entry,
     fetch_robots,
+    fetch_sitemap,
     finish_run,
     http_retry,
     load_frontier,
@@ -93,16 +105,23 @@ from rovo._crawl.run import (
     prepare_attempt,
     prepare_run,
     proceed_with_known_host,
+    queue_sitemaps,
+    read_llms_txt,
+    read_robots_before_sitemap,
     read_robots_for_new_origin,
+    record_observation,
+    reject_non_sitemap,
     render_reason_of,
     retires_host_on_long_crawl_delay,
     robots_allows,
     run_crawl,
+    save_frontier,
     select_batch,
     settle_stored_entry,
     settle_walk,
     skip_robots_disallowed,
     skip_robots_disallowed_on_new_host,
+    skip_unavailable_sitemap,
     start_run,
 )
 from rovo._mirror.intake import admit_candidate, take_candidate
@@ -199,6 +218,13 @@ MOVED = 301
 SECOND_RUN = 2
 TWO_TRIES = 2
 THIRD_RUN = 3
+SITEMAP = f"{SITE}/sitemap.xml"
+SITEMAP_INDEX = f"{SITE}/sitemap_index.xml"
+LLMS_TXT = f"{SITE}/llms.txt"
+# T13: the speculative probes a host whose robots.txt allows them gets after its robots.txt, in
+# order (QueueSitemaps, ReadLlmsTxt; tickets/T13-discovery.md Facts).
+PROBES = [SITEMAP, SITEMAP_INDEX, LLMS_TXT]
+DISCOVERY = [ROBOTS, *PROBES]
 # The links fixture site served from SITE (tests/fixtures/sites/links, T10).
 B_PAGE = f"{SITE}/guide/b.html"
 C_PAGE = f"{SITE}/guide/deep/c.html"
@@ -564,6 +590,8 @@ def test_rule_success_Discover(tmp_path: Path) -> None:
 
     The seeds are enqueued at depth 0 and every allowed host is opened, in sorted order,
     its robots.txt read at the origin of its first seed, else https on the bare name.
+    T13: after its robots.txt each host's sitemaps and llms.txt are requested at that
+    origin, before the next host is opened.
     """
     fetcher = site()
     run, frontier = started(
@@ -587,7 +615,11 @@ def test_rule_success_Discover(tmp_path: Path) -> None:
     assert api is not None
     assert docs.origin == SITE
     assert api.origin == "https://api.example"
-    assert fetcher.requests == ["https://api.example/robots.txt", ROBOTS]
+    api_discovery = [
+        f"https://api.example/{path}"
+        for path in ("robots.txt", "sitemap.xml", "sitemap_index.xml", "llms.txt")
+    ]
+    assert fetcher.requests == [*api_discovery, *DISCOVERY]
 
 
 def test_rule_failure_Discover_1(tmp_path: Path) -> None:
@@ -716,7 +748,7 @@ def test_rule_success_FetchRobots(tmp_path: Path) -> None:
 
     order = site(robots=robots)
     crawl_once(tmp_path / "order", order)
-    assert order.requests == [ROBOTS, SEED]
+    assert order.requests == [*DISCOVERY, SEED]
 
 
 def test_rule_failure_FetchRobots_1(tmp_path: Path) -> None:
@@ -1069,11 +1101,39 @@ def test_rule_success_Enqueue(tmp_path: Path) -> None:
     assert SECRET_PAGE in identities
 
 
+def aged_observations(frontier: Frontier, run_id: int) -> tuple[ObservedUrl, ObservedUrl]:
+    """A row unseen for more than observed_url_retention_syncs runs, and one seen within."""
+    retention = model.CONFIG.observed_url_retention_syncs
+    stale = ObservedUrl(
+        frontier=frontier,
+        url=f"{SITE}/guide/stale.html",
+        sources=frozenset({DiscoverySource.sitemap}),
+        last_seen_run=run_id - retention - 1,
+    )
+    fresh = ObservedUrl(
+        frontier=frontier,
+        url=f"{SITE}/guide/fresh.html",
+        sources=frozenset({DiscoverySource.llms_txt}),
+        last_seen_run=run_id - retention,
+    )
+    frontier.observed_urls.extend([stale, fresh])
+    return stale, fresh
+
+
 def test_rule_success_DropStaleObservations(tmp_path: Path) -> None:
-    """Verify rule DropStaleObservations succeeds when all preconditions are met."""
-    run, frontier = started(tmp_path)
+    """Verify rule DropStaleObservations succeeds when all preconditions are met.
+
+    T13: a row unseen for more than observed_url_retention_syncs runs is dropped and a
+    row seen within them is kept; DiscoveryDone follows either way.
+    """
+    run_id = model.CONFIG.observed_url_retention_syncs + 2
+    run, frontier = started(tmp_path, run_id=run_id)
+    _, fresh = aged_observations(frontier, run_id)
     assert drop_stale_observations(run, frontier)
-    assert frontier.observed_urls == []
+    assert frontier.observed_urls == [fresh]
+    empty, nothing_seen = started(tmp_path / "empty")
+    assert drop_stale_observations(empty, nothing_seen)
+    assert nothing_seen.observed_urls == []
 
 
 def test_rule_failure_DropStaleObservations_1(tmp_path: Path) -> None:
@@ -1081,9 +1141,12 @@ def test_rule_failure_DropStaleObservations_1(tmp_path: Path) -> None:
 
     requires: run.status = running.
     """
-    run, frontier = started(tmp_path)
+    run_id = model.CONFIG.observed_url_retention_syncs + 2
+    run, frontier = started(tmp_path, run_id=run_id)
+    stale, fresh = aged_observations(frontier, run_id)
     run.status = RunStatus.finished
     assert not drop_stale_observations(run, frontier)
+    assert frontier.observed_urls == [stale, fresh]
 
 
 def test_rule_success_BeginCrawl(tmp_path: Path) -> None:
@@ -1151,7 +1214,7 @@ def test_rule_success_NextBatch(tmp_path: Path) -> None:
     # depth-0 batch, then depth 1 (the robots-disallowed row skipped unrequested), then 2.
     fetcher = links_site()
     result = crawl_once(tmp_path / "links", fetcher)
-    assert fetcher.requests == [ROBOTS, SEED, B_PAGE, C_PAGE, D_PAGE]
+    assert fetcher.requests == [*DISCOVERY, SEED, B_PAGE, C_PAGE, D_PAGE]
     assert sorted(page.identity for page in result.run.target.pages) == sorted(
         [SEED, B_PAGE, C_PAGE, D_PAGE]
     )
@@ -1241,7 +1304,7 @@ def test_rule_failure_OpenHostForEntry_2(tmp_path: Path) -> None:
     run, _, entry = selected(tmp_path, fetcher)
     assert not open_host_for_entry(run, entry, fetcher)
     assert len(run.hosts) == 1
-    assert fetcher.requests == [ROBOTS]
+    assert fetcher.requests == DISCOVERY
 
 
 def test_rule_success_ProceedWithKnownHost(tmp_path: Path) -> None:
@@ -1335,8 +1398,10 @@ def test_rule_success_FetchEntry(tmp_path: Path) -> None:
     assert isinstance(walk, LadderWalk)
     assert walk.status is WalkStatus.walking
     assert len(walk.attempts) == 1  # FetchEntry raises the first TierRequested
-    assert fetcher.requests == [ROBOTS, SEED]
-    assert fetcher.validators == [None, None]  # no known page: an unconditional fetch
+    assert fetcher.requests == [*DISCOVERY, SEED]
+    assert fetcher.validators == [None] * len(
+        [*DISCOVERY, SEED]
+    )  # no known page: an unconditional fetch
 
 
 def test_rule_failure_FetchEntry_1(tmp_path: Path) -> None:
@@ -1351,7 +1416,7 @@ def test_rule_failure_FetchEntry_1(tmp_path: Path) -> None:
     entry.status = FrontierStatus.in_progress
     run.status = RunStatus.finished
     assert fetch_entry(run, entry, fetcher) is None
-    assert fetcher.requests == [ROBOTS]
+    assert fetcher.requests == DISCOVERY
     assert entry.attempts == 0
     assert run.fetch_attempts == 0
 
@@ -1364,7 +1429,7 @@ def test_rule_failure_FetchEntry_2(tmp_path: Path) -> None:
     fetcher = site(robots=text_response(ROBOTS, DISALLOW_GUIDE))
     run, _, entry = selected(tmp_path, fetcher)
     assert fetch_entry(run, entry, fetcher) is None
-    assert fetcher.requests == [ROBOTS]
+    assert fetcher.requests == DISCOVERY
     assert entry.attempts == 0
 
 
@@ -1431,7 +1496,7 @@ def test_rule_failure_AttemptTier_2(tmp_path: Path) -> None:
     run, _, walk = walked(tmp_path, fetcher)
     run.status = RunStatus.interrupted
     assert attempt_tier(walk, Tier.http, SECOND_RUN, fetcher) is None
-    assert fetcher.requests == [ROBOTS, SEED]
+    assert fetcher.requests == [*DISCOVERY, SEED]
     assert len(walk.attempts) == 1
 
 
@@ -3148,7 +3213,7 @@ def test_rule_success_ReadRobotsForNewOrigin(tmp_path: Path) -> None:
     run, frontier = crawling(tmp_path, fetcher)
     entry = in_progress(run, frontier, PORTED_PAGE)
     assert read_robots_for_new_origin(run, entry, fetcher)
-    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
+    assert fetcher.requests == [*DISCOVERY, PORTED_ROBOTS]
     assert [host.name for host in run.hosts] == [HOST]
     policy = run.robots_policy(PORTED)
     assert policy is not None
@@ -3170,7 +3235,7 @@ def test_rule_failure_ReadRobotsForNewOrigin_1(tmp_path: Path) -> None:
     assert not read_robots_for_new_origin(None, entry, fetcher)
     run.status = RunStatus.finished
     assert not read_robots_for_new_origin(run, entry, fetcher)
-    assert fetcher.requests == [ROBOTS]
+    assert fetcher.requests == DISCOVERY
     assert run.robots_policy(PORTED) is None
 
 
@@ -3193,7 +3258,7 @@ def test_rule_failure_ReadRobotsForNewOrigin_2(tmp_path: Path) -> None:
     host.breaker.status = BreakerStatus.tripped
     row = in_progress(tripped, tripped_frontier, PORTED_PAGE)
     assert not read_robots_for_new_origin(tripped, row, tripped_fetcher)
-    assert tripped_fetcher.requests == [ROBOTS]
+    assert tripped_fetcher.requests == DISCOVERY
     assert tripped.robots_policy(PORTED) is None
 
 
@@ -3205,7 +3270,7 @@ def test_rule_failure_ReadRobotsForNewOrigin_3(tmp_path: Path) -> None:
     fetcher = site()
     run, _, entry = selected(tmp_path, fetcher)
     assert not read_robots_for_new_origin(run, entry, fetcher)
-    assert fetcher.requests == [ROBOTS]
+    assert fetcher.requests == DISCOVERY
     assert [policy.origin for policy in run.robots_policies] == [SITE]
 
 
@@ -3553,3 +3618,937 @@ def test_surface_exposure_SiteExchange(tmp_path: Path) -> None:
     }
     assert host.paused_until is not None
     assert host.paused_until >= START + timedelta(seconds=4)
+
+
+# --- Discovery from sitemaps and llms.txt (T13) -----------------------------------------
+
+MAPS = f"{SITE}/maps/guide.xml"
+MAPS_INDEX = f"{SITE}/maps/index.xml"
+ORPHAN = f"{SITE}/guide/orphan.html"
+FROM_LLMS = f"{SITE}/guide/from-llms.html"
+RELATIVE = f"{SITE}/guide/relative.html"
+OUT_OF_SCOPE = f"{SITE}/outside/page.html"
+OFF_HOST_MAP = "http://elsewhere.example/maps/child.xml"
+PORTED_MAP = f"{PORTED}/maps/guide.xml"
+LASTMOD = "2026-10-01"
+SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
+
+
+def urlset(*entries: tuple[str, str | None]) -> str:
+    """A sitemap urlset naming each (loc, lastmod)."""
+    rows = "".join(
+        f"    <url>\n        <loc>{loc}</loc>\n"
+        + ("" if lastmod is None else f"        <lastmod>{lastmod}</lastmod>\n")
+        + "    </url>\n"
+        for loc, lastmod in entries
+    )
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="{SITEMAP_NS}">\n{rows}</urlset>\n'
+    )
+
+
+def sitemapindex(*locs: str) -> str:
+    """A sitemap index naming each child sitemap."""
+    rows = "".join(f"    <sitemap>\n        <loc>{loc}</loc>\n    </sitemap>\n" for loc in locs)
+    return (
+        f'<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="{SITEMAP_NS}">\n'
+        f"{rows}</sitemapindex>\n"
+    )
+
+
+def declaring(*sitemaps: str, disallow: str = "/guide/private/") -> SiteResponse:
+    """A robots.txt that disallows `disallow` and declares each sitemap, in order."""
+    lines = "".join(f"Sitemap: {url}\n" for url in sitemaps)
+    return text_response(ROBOTS, f"User-agent: *\nDisallow: {disallow}\n{lines}")
+
+
+def llms(*links: str) -> SiteResponse:
+    """An llms.txt with one inline Markdown link per URL."""
+    body = "".join(f"- [Page {n}]({url})\n" for n, url in enumerate(links, start=1))
+    return text_response(LLMS_TXT, f"# Example docs\n\n{body}")
+
+
+def observation(frontier: Frontier, url: str) -> ObservedUrl | None:
+    """ObservedUrl{frontier: frontier, url: url}, or None."""
+    return next((seen for seen in frontier.observed_urls if seen.url == url), None)
+
+
+def host_open(
+    out_dir: Path, fetcher: FakeFetcher, **changes: object
+) -> tuple[Run, Frontier, Host]:
+    """A prepared run whose host docs.example is open and its robots.txt answered."""
+    run, frontier = started(out_dir, **changes)
+    assert prepare_run(run, frontier)
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    return run, frontier, host
+
+
+def dry(out_dir: Path) -> tuple[Run, Frontier]:
+    """A running dry run with a new frontier."""
+    mirror = new_mirror(out_dir)
+    run = start_run(dataclasses.replace(request(mirror), dry_run=True), FixedClock())
+    assert run is not None
+    frontier = create_frontier(run, None)
+    assert frontier is not None
+    return run, frontier
+
+
+def refuse_every_sitemap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sitemap_admitted false for every sitemap, wherever the crawl looks it up."""
+
+    def refuse(url: str, profile: object, scope: object) -> bool:
+        del url, profile, scope
+        return False
+
+    monkeypatch.setattr(sitemaps, "sitemap_admitted", refuse)
+    monkeypatch.setattr(run_module, "sitemap_admitted", refuse, raising=False)
+
+
+def replace_config(monkeypatch: pytest.MonkeyPatch, **changes: object) -> None:
+    """Replace crawl's CONFIG in every loaded module that binds it (Facts)."""
+    original = model.CONFIG
+    replaced = dataclasses.replace(original, **changes)  # type: ignore[arg-type]  # Test overrides by name.
+    for module in list(sys.modules.values()):
+        if getattr(module, "CONFIG", None) is original:
+            monkeypatch.setattr(module, "CONFIG", replaced)
+
+
+def discovered(out_dir: Path, fetcher: FakeFetcher) -> tuple[Run, Frontier]:
+    """A run through Discover over `fetcher`."""
+    run, frontier = started(out_dir)
+    assert prepare_run(run, frontier)
+    assert discover(run, frontier, fetcher)
+    return run, frontier
+
+
+def test_value_equality_SitemapEntry() -> None:
+    """Verify value type SitemapEntry has structural equality."""
+    entry = SitemapEntry(loc=ORPHAN, lastmod=LASTMOD)
+    assert entry == SitemapEntry(loc=ORPHAN, lastmod=LASTMOD)
+    assert hash(entry) == hash(SitemapEntry(loc=ORPHAN, lastmod=LASTMOD))
+    assert entry != SitemapEntry(loc=ORPHAN, lastmod=None)
+    assert entry != SitemapEntry(loc=OTHER, lastmod=LASTMOD)
+    read = sitemaps.sitemap_entries(xml_response(MAPS, urlset((ORPHAN, LASTMOD))))
+    assert read == (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),)
+
+
+def test_entity_fields_SitemapEntry(tmp_path: Path) -> None:
+    """Verify all declared fields on SitemapEntry are present with correct types."""
+    run, frontier, _ = host_open(tmp_path, site())
+    response = xml_response(MAPS, urlset((ORPHAN, LASTMOD), (OTHER, None)))
+    snapshot = accept_fresh_sitemap(run, frontier, MAPS, response)
+    assert snapshot is not None
+    first, second = snapshot.entries
+    assert (first.loc, first.lastmod) == (ORPHAN, LASTMOD)
+    assert (second.loc, second.lastmod) == (OTHER, None)
+
+
+def test_enum_comparable_DiscoverySource(tmp_path: Path) -> None:
+    """Verify fields typed with enum DiscoverySource are comparable.
+
+    A seed row is discovered via start, a sitemap entry via sitemap and an llms.txt link
+    via llms_txt; each compares equal to its own member only.
+    """
+    assert tuple(source.value for source in DiscoverySource) == spec_enum(
+        "crawl", "DiscoverySource"
+    )
+    fetcher = site(robots=declaring(MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    _, frontier = discovered(tmp_path, fetcher)
+    via = {entry.identity: entry.discovered_via for entry in frontier.entries}
+    assert via == {
+        SEED: DiscoverySource.start,
+        ORPHAN: DiscoverySource.sitemap,
+        FROM_LLMS: DiscoverySource.llms_txt,
+    }
+    assert via[ORPHAN] != DiscoverySource.llms_txt
+    seen = observation(frontier, FROM_LLMS)
+    assert seen is not None
+    assert seen.sources == {DiscoverySource.llms_txt}
+
+
+def test_entity_relationship_Frontier_observed_urls(tmp_path: Path) -> None:
+    """Verify relationship Frontier.observed_urls navigates to the correct related entities.
+
+    Every URL a sitemap names is observed in the run's frontier, in scope or not, and no
+    other frontier holds it.
+    """
+    run, frontier, host = host_open(tmp_path / "one", site())
+    _, other = started(tmp_path / "two")
+    entries = (
+        SitemapEntry(loc=ORPHAN, lastmod=None),
+        SitemapEntry(loc=OUT_OF_SCOPE, lastmod=None),
+    )
+    assert expand_sitemap_entries(run, frontier, host, MAPS, entries, is_index=False) == []
+    assert sorted(seen.url for seen in frontier.observed_urls) == [ORPHAN, OUT_OF_SCOPE]
+    assert all(seen.frontier is frontier for seen in frontier.observed_urls)
+    assert other.observed_urls == []
+
+
+def test_entity_optional_FrontierEntry_discovered_from(tmp_path: Path) -> None:
+    """Verify optional field FrontierEntry.discovered_from accepts null and non-null values.
+
+    Null for a seed; the sitemap's URL for a sitemap entry; llms_txt_url for an llms.txt
+    link.
+    """
+    fetcher = site(robots=declaring(MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    _, frontier = discovered(tmp_path, fetcher)
+    origins = {entry.identity: entry.discovered_from for entry in frontier.entries}
+    assert origins == {SEED: None, ORPHAN: MAPS, FROM_LLMS: LLMS_TXT}
+
+
+def test_entity_optional_FrontierEntry_sitemap_lastmod(tmp_path: Path) -> None:
+    """Verify optional field FrontierEntry.sitemap_lastmod accepts null and non-null values.
+
+    A sitemap entry's lastmod reaches its row; an entry without one, and a seed, have none.
+    """
+    run, frontier, host = host_open(tmp_path, site())
+    enqueue(run, frontier, SEED, depth=0, via=DiscoverySource.start, priority=0)
+    entries = (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD), SitemapEntry(loc=OTHER, lastmod=None))
+    assert expand_sitemap_entries(run, frontier, host, MAPS, entries, is_index=False) == []
+    lastmods = {entry.identity: entry.sitemap_lastmod for entry in frontier.entries}
+    assert lastmods == {SEED: None, ORPHAN: LASTMOD, OTHER: None}
+
+
+def test_entity_fields_ObservedUrl(tmp_path: Path) -> None:
+    """Verify all declared fields on ObservedUrl are present with correct types."""
+    run, frontier = started(tmp_path)
+    seen = record_observation(run, frontier, OUT_OF_SCOPE, DiscoverySource.sitemap)
+    assert isinstance(seen, ObservedUrl)
+    assert seen.frontier is frontier
+    assert seen.url == OUT_OF_SCOPE
+    assert seen.sources == frozenset({DiscoverySource.sitemap})
+    assert all(isinstance(source, DiscoverySource) for source in seen.sources)
+    assert seen.last_seen_run == run.id
+    assert frontier.observed_urls == [seen]
+
+
+def test_entity_fields_SitemapSnapshot(tmp_path: Path) -> None:
+    """Verify all declared fields on SitemapSnapshot are present with correct types."""
+    run, frontier, _ = host_open(tmp_path, site())
+    response = dataclasses.replace(
+        xml_response(MAPS_INDEX, sitemapindex(MAPS)), etag='"v1"', last_modified="Sat, 31 Oct"
+    )
+    snapshot = accept_fresh_sitemap(run, frontier, MAPS_INDEX, response)
+    assert isinstance(snapshot, SitemapSnapshot)
+    assert frontier.sitemap_snapshots == [snapshot]
+    assert snapshot.frontier is frontier
+    assert snapshot.url == MAPS_INDEX
+    assert snapshot.etag == '"v1"'
+    assert snapshot.last_modified == "Sat, 31 Oct"
+    assert snapshot.is_index is True
+    assert snapshot.entries == (SitemapEntry(loc=MAPS, lastmod=None),)
+
+
+def test_entity_optional_SitemapSnapshot_etag(tmp_path: Path) -> None:
+    """Verify optional field SitemapSnapshot.etag accepts null and non-null values."""
+    run, frontier, _ = host_open(tmp_path, site())
+    tagged = dataclasses.replace(xml_response(MAPS, urlset((ORPHAN, None))), etag='"v1"')
+    untagged = xml_response(MAPS_INDEX, sitemapindex(MAPS))
+    first = accept_fresh_sitemap(run, frontier, MAPS, tagged)
+    second = accept_fresh_sitemap(run, frontier, MAPS_INDEX, untagged)
+    assert first is not None
+    assert second is not None
+    assert (first.etag, second.etag) == ('"v1"', None)
+
+
+def test_entity_optional_SitemapSnapshot_last_modified(tmp_path: Path) -> None:
+    """Verify optional field SitemapSnapshot.last_modified accepts null and non-null values."""
+    run, frontier, _ = host_open(tmp_path, site())
+    dated = dataclasses.replace(
+        xml_response(MAPS, urlset((ORPHAN, None))), last_modified="Sat, 31 Oct 2026"
+    )
+    undated = xml_response(MAPS_INDEX, sitemapindex(MAPS))
+    first = accept_fresh_sitemap(run, frontier, MAPS, dated)
+    second = accept_fresh_sitemap(run, frontier, MAPS_INDEX, undated)
+    assert first is not None
+    assert second is not None
+    assert (first.last_modified, second.last_modified) == ("Sat, 31 Oct 2026", None)
+
+
+def test_transition_edge_FrontierEntry_skipped_limit_pending(tmp_path: Path) -> None:
+    """Verify transition skipped_limit -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    PrepareRun re-pends every retry row the scope admits: a row a budget stopped is
+    pending again on the next run (unit inputs: a second sync over written pages would
+    refetch them conditionally, the incremental slice's).
+    """  # noqa: E501  The obligation's description, quoted.
+    first, frontier = started(tmp_path)
+    row = enqueue(first, frontier, ORPHAN, depth=1, via=DiscoverySource.sitemap, priority=50)
+    row.status = FrontierStatus.skipped_limit
+    save_frontier(frontier)
+    mirror = new_mirror(tmp_path)
+    second = start_run(request(mirror, run_id=SECOND_RUN), FixedClock())
+    assert second is not None
+    persisted = load_frontier(mirror)
+    assert persisted is not None
+    assert prepare_run(second, persisted)
+    reloaded = persisted.entry(ORPHAN)
+    assert reloaded is not None
+    assert reloaded.status is FrontierStatus.pending
+
+
+def test_config_default_sitemap_max_children() -> None:
+    """Verify config parameter sitemap_max_children has its declared default."""
+    assert model.CONFIG.sitemap_max_children == spec_int("crawl", "sitemap_max_children")
+
+
+def test_config_default_sitemap_cap_multiplier() -> None:
+    """Verify config parameter sitemap_cap_multiplier has its declared default."""
+    assert model.CONFIG.sitemap_cap_multiplier == spec_int("crawl", "sitemap_cap_multiplier")
+
+
+def test_config_default_sitemap_depth() -> None:
+    """Verify config parameter sitemap_depth has its declared default."""
+    assert model.CONFIG.sitemap_depth == spec_int("crawl", "sitemap_depth")
+
+
+def test_config_default_llms_txt_depth() -> None:
+    """Verify config parameter llms_txt_depth has its declared default."""
+    assert model.CONFIG.llms_txt_depth == spec_int("crawl", "llms_txt_depth")
+
+
+def test_config_default_sitemap_priority() -> None:
+    """Verify config parameter sitemap_priority has its declared default."""
+    assert model.CONFIG.sitemap_priority == spec_int("crawl", "sitemap_priority")
+
+
+def test_config_default_llms_txt_priority() -> None:
+    """Verify config parameter llms_txt_priority has its declared default."""
+    assert model.CONFIG.llms_txt_priority == spec_int("crawl", "llms_txt_priority")
+
+
+def test_rule_success_QueueSitemaps(tmp_path: Path) -> None:
+    """Verify rule QueueSitemaps succeeds when all preconditions are met.
+
+    The declared sitemaps of the host's origin, in robots.txt order, then each
+    well-known sitemap not declared; with no robots.txt, the two well-known ones.
+    """
+    fetcher = site(robots=declaring(MAPS, SITEMAP))
+    run, _, _ = host_open(tmp_path / "declared", fetcher)
+    assert queue_sitemaps(run, HOST) == [(MAPS, True), (SITEMAP, True), (SITEMAP_INDEX, False)]
+    assert fetcher.requests == [ROBOTS]
+    absent, _, _ = host_open(tmp_path / "absent", site())
+    assert queue_sitemaps(absent, HOST) == [(SITEMAP, False), (SITEMAP_INDEX, False)]
+
+
+def test_rule_failure_QueueSitemaps_1(tmp_path: Path) -> None:
+    """Verify rule QueueSitemaps is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    run, _, _ = host_open(tmp_path, site(robots=declaring(MAPS)))
+    run.status = RunStatus.finished
+    assert queue_sitemaps(run, HOST) is None
+
+
+def test_rule_failure_QueueSitemaps_2(tmp_path: Path) -> None:
+    """Verify rule QueueSitemaps is rejected when requires clause fails.
+
+    requires: exists host.
+    """
+    run, _ = started(tmp_path)
+    assert queue_sitemaps(run, HOST) is None
+
+
+def test_rule_success_ReadRobotsBeforeSitemap(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap succeeds when all preconditions are met.
+
+    A sitemap at another origin of its host reads that origin's robots.txt first; the
+    sitemap is then fetched.
+    """
+    fetcher = site(robots=declaring(PORTED_MAP))
+    fetcher.responses[PORTED_ROBOTS] = text_response(PORTED_ROBOTS, "User-agent: *\nAllow: /\n")
+    fetcher.responses[PORTED_MAP] = xml_response(PORTED_MAP, urlset((PORTED_PAGE, None)))
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS]
+    assert run.robots_policy(PORTED) is not None
+    assert not read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
+    assert fetch_sitemap(run, HOST, PORTED_MAP, fetcher) is not None
+    assert fetcher.requests == [ROBOTS, PORTED_ROBOTS, PORTED_MAP]
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_1(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    run.status = RunStatus.finished
+    assert not read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert run.robots_policy(PORTED) is None
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_2(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
+    requires: exists host.
+    """
+    fetcher = site()
+    run, _ = started(tmp_path)
+    assert not read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
+    assert fetcher.requests == []
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_3(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
+    requires: hostname_of(url) = name.
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert not read_robots_before_sitemap(run, HOST, OFF_HOST_MAP, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert run.robots_policy("http://elsewhere.example") is None
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
+    requires: sitemap_admitted(url, run.target.profile, run.target.scope).
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    refuse_every_sitemap(monkeypatch)
+    assert not read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert run.robots_policy(PORTED) is None
+
+
+def test_rule_failure_ReadRobotsBeforeSitemap_5(tmp_path: Path) -> None:
+    """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
+
+    requires: not exists RobotsPolicy{run: run, origin: origin_of(url)}.
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert not read_robots_before_sitemap(run, HOST, MAPS, fetcher)
+    assert fetcher.requests == [ROBOTS]
+    assert [policy.origin for policy in run.robots_policies] == [SITE]
+
+
+def test_rule_success_FetchSitemap(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap succeeds when all preconditions are met.
+
+    The sitemap is read through fetch_resource without validators (no snapshot is ever
+    loaded in this slice) and its bytes count toward the run's, not its attempts.
+    """
+    robots = declaring(MAPS)
+    fetcher = site(robots=robots)
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    run, _, _ = host_open(tmp_path, fetcher)
+    response = fetch_sitemap(run, HOST, MAPS, fetcher)
+    assert response == fetcher.responses[MAPS]
+    assert fetcher.requests == [ROBOTS, MAPS]
+    assert fetcher.validators == [None, None]
+    assert run.bytes_fetched == robots.size + response.size
+    assert run.fetch_attempts == 0
+
+
+def test_rule_failure_FetchSitemap_1(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    run.status = RunStatus.finished
+    assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert run.bytes_fetched == 0
+
+
+def test_rule_failure_FetchSitemap_2(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: exists host.
+    """
+    fetcher = site()
+    run, _ = started(tmp_path)
+    assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
+    assert fetcher.requests == []
+
+
+def test_rule_failure_FetchSitemap_3(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: hostname_of(url) = name. A sitemap on another host produces nothing.
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert fetch_sitemap(run, HOST, OFF_HOST_MAP, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert run.discovery_failures == []
+
+
+def test_rule_failure_FetchSitemap_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: sitemap_admitted(url, run.target.profile, run.target.scope).
+    """
+    fetcher = site()
+    run, _, _ = host_open(tmp_path, fetcher)
+    refuse_every_sitemap(monkeypatch)
+    assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+
+
+def test_rule_failure_FetchSitemap_5(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: robots_allows(run, url). A disallowed sitemap produces nothing.
+    """
+    fetcher = site(robots=declaring(MAPS, disallow="/maps/"))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    run, _, _ = host_open(tmp_path, fetcher)
+    assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert run.discovery_failures == []
+
+
+def test_rule_failure_FetchSitemap_6(tmp_path: Path) -> None:
+    """Verify rule FetchSitemap is rejected when requires clause fails.
+
+    requires: exists RobotsPolicy{run: run, origin: origin_of(url)}.
+    """
+    fetcher = site()
+    fetcher.responses[PORTED_MAP] = xml_response(PORTED_MAP, urlset((PORTED_PAGE, None)))
+    run, _, _ = host_open(tmp_path, fetcher)
+    run.policy = dataclasses.replace(run.policy, robots=RobotsMode.ignore)
+    assert fetch_sitemap(run, HOST, PORTED_MAP, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+
+
+def test_rule_success_AcceptFreshSitemap(tmp_path: Path) -> None:
+    """Verify rule AcceptFreshSitemap succeeds when all preconditions are met.
+
+    An ok sitemap document creates its snapshot; a second answer for the same URL updates
+    it in place (unit inputs: within one run each sitemap is read once).
+    """
+    run, frontier, _ = host_open(tmp_path, site())
+    first = dataclasses.replace(xml_response(MAPS, urlset((ORPHAN, LASTMOD))), etag='"v1"')
+    created = accept_fresh_sitemap(run, frontier, MAPS, first)
+    assert created is not None
+    assert (created.is_index, created.etag) == (False, '"v1"')
+    assert created.entries == (SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),)
+    second = dataclasses.replace(xml_response(MAPS, sitemapindex(MAPS_INDEX)), etag='"v2"')
+    updated = accept_fresh_sitemap(run, frontier, MAPS, second)
+    assert updated is created
+    assert frontier.sitemap_snapshots == [created]
+    assert (created.is_index, created.etag, created.last_modified) == (True, '"v2"', None)
+    assert created.entries == (SitemapEntry(loc=MAPS_INDEX, lastmod=None),)
+
+
+def test_rule_failure_AcceptFreshSitemap_1(tmp_path: Path) -> None:
+    """Verify rule AcceptFreshSitemap is rejected when requires clause fails.
+
+    requires: response.ok and is_sitemap_document(response).
+    """
+    run, frontier, _ = host_open(tmp_path, site())
+    failed = xml_response(MAPS, urlset((ORPHAN, None)), status=SERVER_ERROR)
+    assert accept_fresh_sitemap(run, frontier, MAPS, failed) is None
+    assert accept_fresh_sitemap(run, frontier, MAPS, html_response(MAPS, PAGE)) is None
+    assert frontier.sitemap_snapshots == []
+
+
+def test_rule_success_RejectNonSitemap(tmp_path: Path) -> None:
+    """Verify rule RejectNonSitemap succeeds when all preconditions are met.
+
+    A declared sitemap that answers but is no sitemap is not_a_sitemap; a speculative
+    probe that does so is silent.
+    """
+    run, _, _ = host_open(tmp_path, site())
+    page = html_response(MAPS, PAGE)
+    assert reject_non_sitemap(run, MAPS, page, declared=True) == DiscoveryFailed(
+        run=run, url=MAPS, problem=DiscoveryProblem.not_a_sitemap
+    )
+    assert reject_non_sitemap(run, SITEMAP, html_response(SITEMAP, PAGE), declared=False) is None
+
+
+def test_rule_failure_RejectNonSitemap_1(tmp_path: Path) -> None:
+    """Verify rule RejectNonSitemap is rejected when requires clause fails.
+
+    requires: response.ok and not is_sitemap_document(response).
+    """
+    run, _, _ = host_open(tmp_path, site())
+    sitemap = xml_response(MAPS, urlset((ORPHAN, None)))
+    assert reject_non_sitemap(run, MAPS, sitemap, declared=True) is None
+    failed = html_response(MAPS, PAGE, status=SERVER_ERROR)
+    assert reject_non_sitemap(run, MAPS, failed, declared=True) is None
+
+
+def test_rule_success_SkipUnavailableSitemap(tmp_path: Path) -> None:
+    """Verify rule SkipUnavailableSitemap succeeds when all preconditions are met.
+
+    A declared sitemap that fails is sitemap_unavailable, or sitemap_unreachable when no
+    answer arrived; a declared 404 and every speculative probe are silent.
+    """
+    run, _, _ = host_open(tmp_path, site())
+    broken = xml_response(MAPS, "", status=SERVER_ERROR)
+    assert skip_unavailable_sitemap(run, MAPS, broken, declared=True) == DiscoveryFailed(
+        run=run, url=MAPS, problem=DiscoveryProblem.sitemap_unavailable
+    )
+    assert skip_unavailable_sitemap(
+        run, MAPS, unreachable(MAPS), declared=True
+    ) == DiscoveryFailed(run=run, url=MAPS, problem=DiscoveryProblem.sitemap_unreachable)
+    assert skip_unavailable_sitemap(run, MAPS, not_found(MAPS), declared=True) is None
+    assert skip_unavailable_sitemap(run, SITEMAP, broken, declared=False) is None
+    assert skip_unavailable_sitemap(run, SITEMAP, unreachable(SITEMAP), declared=False) is None
+
+
+def test_rule_failure_SkipUnavailableSitemap_1(tmp_path: Path) -> None:
+    """Verify rule SkipUnavailableSitemap is rejected when requires clause fails.
+
+    requires: not response.ok and not response.not_modified. A 304 with no snapshot meets
+    no rule at all.
+    """
+    run, frontier, _ = host_open(tmp_path, site())
+    sitemap = xml_response(MAPS, urlset((ORPHAN, None)))
+    assert skip_unavailable_sitemap(run, MAPS, sitemap, declared=True) is None
+    unchanged = xml_response(MAPS, "", status=304)
+    assert skip_unavailable_sitemap(run, MAPS, unchanged, declared=True) is None
+    assert reject_non_sitemap(run, MAPS, unchanged, declared=True) is None
+    assert accept_fresh_sitemap(run, frontier, MAPS, unchanged) is None
+
+
+def test_rule_success_ExpandSitemapEntries(tmp_path: Path) -> None:
+    """Verify rule ExpandSitemapEntries succeeds when all preconditions are met.
+
+    A urlset's entries are each observed; the in-scope ones are admitted at sitemap_depth
+    with sitemap_priority, from the sitemap, with their lastmod, resolved against it. An
+    index's children on the host that served it are due; one on another host is not, and
+    is not counted.
+    """
+    run, frontier, host = host_open(tmp_path, site())
+    entries = (
+        SitemapEntry(loc=ORPHAN, lastmod=LASTMOD),
+        SitemapEntry(loc=OUT_OF_SCOPE, lastmod=None),
+        SitemapEntry(loc="relative.html", lastmod=None),
+    )
+    guide = f"{SITE}/guide/map.xml"
+    assert expand_sitemap_entries(run, frontier, host, guide, entries, is_index=False) == []
+    assert host.sitemap_entries_admitted == len([ORPHAN, RELATIVE])
+    rows = {
+        entry.identity: (
+            entry.depth,
+            entry.priority,
+            entry.discovered_via,
+            entry.discovered_from,
+            entry.sitemap_lastmod,
+            entry.status,
+        )
+        for entry in frontier.entries
+    }
+    sitemap_row = (
+        model.CONFIG.sitemap_depth,
+        model.CONFIG.sitemap_priority,
+        DiscoverySource.sitemap,
+    )
+    assert rows == {
+        ORPHAN: (*sitemap_row, guide, LASTMOD, FrontierStatus.pending),
+        RELATIVE: (*sitemap_row, guide, None, FrontierStatus.pending),
+    }
+    observed = {seen.url: (seen.sources, seen.last_seen_run) for seen in frontier.observed_urls}
+    sighting = (frozenset({DiscoverySource.sitemap}), run.id)
+    assert observed == {ORPHAN: sighting, OUT_OF_SCOPE: sighting, RELATIVE: sighting}
+
+    children = (
+        SitemapEntry(loc=MAPS, lastmod=None),
+        SitemapEntry(loc=OFF_HOST_MAP, lastmod=None),
+        SitemapEntry(loc="other.xml", lastmod=None),
+    )
+    due = expand_sitemap_entries(run, frontier, host, MAPS_INDEX, children, is_index=True)
+    assert due == [MAPS, f"{SITE}/maps/other.xml"]
+    assert host.sitemap_children_read == len(due)
+    assert observation(frontier, MAPS) is None
+    assert frontier.entry(MAPS) is None
+
+
+def test_rule_failure_ExpandSitemapEntries_1(tmp_path: Path) -> None:
+    """Verify rule ExpandSitemapEntries is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    run, frontier, host = host_open(tmp_path, site())
+    run.status = RunStatus.finished
+    entries = (SitemapEntry(loc=ORPHAN, lastmod=None),)
+    assert expand_sitemap_entries(run, frontier, host, MAPS, entries, is_index=False) is None
+    assert expand_sitemap_entries(run, frontier, host, MAPS_INDEX, entries, is_index=True) is None
+    assert frontier.entries == []
+    assert frontier.observed_urls == []
+    assert (host.sitemap_entries_admitted, host.sitemap_children_read) == (0, 0)
+
+
+def test_rule_success_ReadLlmsTxt(tmp_path: Path) -> None:
+    """Verify rule ReadLlmsTxt succeeds when all preconditions are met.
+
+    Each target is observed; the in-scope ones are admitted at llms_txt_depth with
+    llms_txt_priority, from llms_txt_url. Its bytes count; its try is not an attempt.
+    """
+    fetcher = site()
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS, OUT_OF_SCOPE)
+    run, frontier, _ = host_open(tmp_path, fetcher)
+    response = read_llms_txt(run, HOST, frontier, fetcher)
+    assert response == fetcher.responses[LLMS_TXT]
+    assert fetcher.requests == [ROBOTS, LLMS_TXT]
+    assert fetcher.validators == [None, None]
+    assert run.bytes_fetched == response.size
+    assert run.fetch_attempts == 0
+    (row,) = frontier.entries
+    assert (row.identity, row.depth, row.priority) == (
+        FROM_LLMS,
+        model.CONFIG.llms_txt_depth,
+        model.CONFIG.llms_txt_priority,
+    )
+    assert (row.discovered_via, row.discovered_from, row.sitemap_lastmod) == (
+        DiscoverySource.llms_txt,
+        LLMS_TXT,
+        None,
+    )
+    observed = {seen.url: seen.sources for seen in frontier.observed_urls}
+    llms_only = frozenset({DiscoverySource.llms_txt})
+    assert observed == {FROM_LLMS: llms_only, OUT_OF_SCOPE: llms_only}
+
+
+def test_rule_failure_ReadLlmsTxt_1(tmp_path: Path) -> None:
+    """Verify rule ReadLlmsTxt is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    fetcher = site()
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    run, frontier, _ = host_open(tmp_path, fetcher)
+    run.status = RunStatus.finished
+    assert read_llms_txt(run, HOST, frontier, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert frontier.entries == []
+
+
+def test_rule_failure_ReadLlmsTxt_2(tmp_path: Path) -> None:
+    """Verify rule ReadLlmsTxt is rejected when requires clause fails.
+
+    requires: exists host.
+    """
+    fetcher = site()
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    run, frontier = started(tmp_path)
+    assert read_llms_txt(run, HOST, frontier, fetcher) is None
+    assert fetcher.requests == []
+
+
+def test_rule_failure_ReadLlmsTxt_3(tmp_path: Path) -> None:
+    """Verify rule ReadLlmsTxt is rejected when requires clause fails.
+
+    requires: robots_allows(run, llms_txt_url(name)).
+    """
+    fetcher = site(robots=declaring(disallow="/llms.txt"))
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    run, frontier, _ = host_open(tmp_path, fetcher)
+    assert read_llms_txt(run, HOST, frontier, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert frontier.observed_urls == []
+
+
+def test_rule_success_RecordObservation(tmp_path: Path) -> None:
+    """Verify rule RecordObservation succeeds when all preconditions are met.
+
+    A new URL is created with its one source; a later sighting adds its source and moves
+    last_seen_run to the run's id.
+    """
+    first, frontier = started(tmp_path)
+    created = record_observation(first, frontier, OUT_OF_SCOPE, DiscoverySource.sitemap)
+    assert (created.sources, created.last_seen_run) == (
+        frozenset({DiscoverySource.sitemap}),
+        first.id,
+    )
+    later = start_run(request(first.target, run_id=SECOND_RUN), FixedClock())
+    assert later is not None
+    updated = record_observation(later, frontier, OUT_OF_SCOPE, DiscoverySource.llms_txt)
+    assert updated is created
+    assert frontier.observed_urls == [created]
+    assert created.sources == {DiscoverySource.sitemap, DiscoverySource.llms_txt}
+    assert created.last_seen_run == SECOND_RUN
+
+
+def test_rule_success_DryRun(tmp_path: Path) -> None:
+    """Verify rule DryRun succeeds when all preconditions are met.
+
+    After discovery a dry run ends: no batch is requested and no page is fetched.
+    """
+    run, _ = dry(tmp_path / "unit")
+    assert dry_run(run)
+    assert not run.crawling
+    mirror = new_mirror(tmp_path / "driven")
+    fetcher = site()
+    result = run_crawl(
+        dataclasses.replace(request(mirror), dry_run=True), None, fetcher, FixedClock()
+    )
+    assert result.run.status is RunStatus.finished
+    assert SEED not in fetcher.requests
+    assert fetcher.requests == DISCOVERY
+    assert result.run.fetch_attempts == 0
+    (entry,) = result.frontier.entries
+    assert entry.status is FrontierStatus.pending
+    assert result.run.unresolved_urls == frozenset()
+
+
+def test_rule_failure_DryRun_1(tmp_path: Path) -> None:
+    """Verify rule DryRun is rejected when requires clause fails.
+
+    requires: run.status = running.
+    """
+    run, _ = dry(tmp_path)
+    run.status = RunStatus.interrupted
+    assert not dry_run(run)
+
+
+def test_rule_failure_DryRun_2(tmp_path: Path) -> None:
+    """Verify rule DryRun is rejected when requires clause fails.
+
+    requires: run.dry_run.
+    """
+    run, _ = started(tmp_path)
+    assert not dry_run(run)
+
+
+def test_rule_failure_BeginCrawl_2(tmp_path: Path) -> None:
+    """Verify rule BeginCrawl is rejected when requires clause fails.
+
+    requires: not run.dry_run.
+    """
+    run, _ = dry(tmp_path)
+    assert not begin_crawl(run)
+    assert not run.crawling
+
+
+# --- Discovery guarantees (T13): the open question's interim, once per run, the caps ------
+
+
+def test_an_index_child_on_another_host_is_never_read(tmp_path: Path) -> None:
+    """crawl.allium open question 1, its interim: children only on the index's own host.
+
+    A child on another host is neither requested nor counted toward sitemap_children_read.
+    """
+    fetcher = site(robots=declaring(MAPS_INDEX))
+    fetcher.responses[MAPS_INDEX] = xml_response(MAPS_INDEX, sitemapindex(OFF_HOST_MAP, MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    run, frontier = discovered(tmp_path, fetcher)
+    assert OFF_HOST_MAP not in fetcher.requests
+    assert "http://elsewhere.example/robots.txt" not in fetcher.requests
+    host = run.host(HOST)
+    assert host is not None
+    assert host.sitemap_children_read == 1
+    assert frontier.entry(ORPHAN) is not None
+    assert run.discovery_failures == []
+
+
+def test_each_sitemap_is_read_at_most_once_per_run(tmp_path: Path) -> None:
+    """An index naming itself, and two indexes naming one child, read each sitemap once."""
+    second_index = f"{SITE}/maps/second.xml"
+    fetcher = site(robots=declaring(MAPS_INDEX, second_index))
+    fetcher.responses[MAPS_INDEX] = xml_response(MAPS_INDEX, sitemapindex(MAPS_INDEX, MAPS))
+    fetcher.responses[second_index] = xml_response(second_index, sitemapindex(MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, None)))
+    run, _ = discovered(tmp_path, fetcher)
+    for url in (MAPS_INDEX, second_index, MAPS):
+        assert fetcher.requests.count(url) == 1, url
+    assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
+    assert fetcher.requests.count(MAPS) == 1
+
+
+def test_discover_reads_the_sitemaps_and_llms_txt_in_order(tmp_path: Path) -> None:
+    """Robots.txt, then the sitemaps, depth first, then llms.txt; all before any page.
+
+    The declared sitemaps, each index's children read as they fall due, then the
+    well-known sitemaps not declared, then llms.txt (Open points, item 8).
+    """
+    fetcher = site(robots=declaring(MAPS_INDEX))
+    fetcher.responses[MAPS_INDEX] = xml_response(MAPS_INDEX, sitemapindex(MAPS))
+    fetcher.responses[MAPS] = xml_response(MAPS, urlset((ORPHAN, LASTMOD)))
+    fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
+    _, frontier = discovered(tmp_path, fetcher)
+    assert fetcher.requests == [ROBOTS, MAPS_INDEX, MAPS, SITEMAP, SITEMAP_INDEX, LLMS_TXT]
+    assert [entry.identity for entry in frontier.entries] == [SEED, ORPHAN, FROM_LLMS]
+
+
+def test_the_index_children_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most sitemap_max_children child sitemaps are queued per host."""
+    replace_config(monkeypatch, sitemap_max_children=2)
+    run, frontier, host = host_open(tmp_path, site())
+    children = tuple(SitemapEntry(loc=f"{SITE}/maps/{n}.xml", lastmod=None) for n in range(3))
+    due = expand_sitemap_entries(run, frontier, host, MAPS_INDEX, children, is_index=True)
+    assert due == [f"{SITE}/maps/0.xml", f"{SITE}/maps/1.xml"]
+    assert host.sitemap_children_read == len(due)
+    more = (SitemapEntry(loc=f"{SITE}/maps/3.xml", lastmod=None),)
+    assert expand_sitemap_entries(run, frontier, host, MAPS, more, is_index=True) == []
+
+
+def test_the_sitemap_entries_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most max_pages * sitemap_cap_multiplier entries admitted per host; all observed."""
+    replace_config(monkeypatch, max_pages=1, sitemap_cap_multiplier=2)
+    run, frontier, host = host_open(tmp_path, site())
+    pages = [f"{SITE}/guide/{n}.html" for n in range(3)]
+    entries = tuple(SitemapEntry(loc=url, lastmod=None) for url in pages)
+    assert expand_sitemap_entries(run, frontier, host, MAPS, entries, is_index=False) == []
+    assert [entry.identity for entry in frontier.entries] == pages[:2]
+    assert host.sitemap_entries_admitted == len(pages[:2])
+    assert sorted(seen.url for seen in frontier.observed_urls) == pages
+
+
+def test_a_declared_sitemap_answering_404_is_silent(tmp_path: Path) -> None:
+    """A declared sitemap that is absent is no discovery problem."""
+    fetcher = site(robots=declaring(MAPS))
+    run, _ = discovered(tmp_path, fetcher)
+    assert MAPS in fetcher.requests
+    assert run.discovery_failures == []
+
+
+def test_the_speculative_probes_are_silent_on_every_failure(tmp_path: Path) -> None:
+    """A failing /sitemap.xml, /sitemap_index.xml or llms.txt never fails the run."""
+    for name, answer in (
+        ("server-error", lambda url: xml_response(url, "", status=SERVER_ERROR)),
+        ("unreachable", unreachable),
+        ("not-a-sitemap", lambda url: html_response(url, PAGE)),
+        ("refused", lambda url: html_response(url, "", status=FORBIDDEN)),
+    ):
+        fetcher = site()
+        for url in PROBES:
+            fetcher.responses[url] = answer(url)
+        run, frontier = discovered(tmp_path / name, fetcher)
+        assert run.discovery_failures == [], name
+        assert [entry.identity for entry in frontier.entries] == [SEED], name
+        assert all(url in fetcher.requests for url in PROBES), name
+
+
+def test_the_dry_run_listing_is_next_pending_order(tmp_path: Path) -> None:
+    """crawl.allium DryRun and rovo.allium ProgressOnRequest: the pending identities.
+
+    Each row SelectBatch would consider, in next_pending order: non-deferred first, then
+    shallowest, then highest priority, then discovery order (Open points, item 5).
+    """
+    run, frontier = dry(tmp_path)
+    deferred = f"{SITE}/guide/removed.html"
+    done = f"{SITE}/guide/done.html"
+    for url, depth, via, priority in (
+        (deferred, 0, DiscoverySource.recheck, model.CONFIG.deferred_priority),
+        (FROM_LLMS, 1, DiscoverySource.llms_txt, model.CONFIG.llms_txt_priority),
+        (ORPHAN, 1, DiscoverySource.sitemap, model.CONFIG.sitemap_priority),
+        (RELATIVE, 1, DiscoverySource.sitemap, model.CONFIG.sitemap_priority),
+        (SEED, 0, DiscoverySource.start, model.CONFIG.start_priority),
+        (done, 0, DiscoverySource.start, model.CONFIG.start_priority),
+        (OUT_OF_SCOPE, 1, DiscoverySource.link, model.CONFIG.link_priority),
+    ):
+        enqueue(run, frontier, url, depth=depth, via=via, priority=priority)
+    finished = frontier.entry(done)
+    assert finished is not None
+    finished.status = FrontierStatus.done
+    assert dry_run_listing(run, frontier) == [SEED, ORPHAN, RELATIVE, FROM_LLMS, deferred]

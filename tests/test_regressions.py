@@ -15,7 +15,9 @@ with no stored page fails; a Retry-After too long for a duration saturates, zero
 is read, and a non-ASCII digit is no Retry-After. T12 (reviews T12-2-r2 and T12-3-r2): a
 Crawl-delay is read exactly, so 1e309, 1e400, the cap plus one sub-ULP step and an
 exponent past Decimal's limit are past the cap, while a value outside float's grammar is
-no Crawl-delay and one too small for Decimal is no delay.
+no Crawl-delay and one too small for Decimal is no delay. T13 (planning): the report's
+discovered counts the frontier's rows after discovery, and a sitemap entry or llms.txt
+target with no identity is skipped (Open points, item 2, the interim).
 """
 
 import json
@@ -27,7 +29,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from fakes import FakeFetcher, FixedClock, html_response
+from fakes import FakeFetcher, FixedClock, fixture_site, html_response, text_response, xml_response
 from rovo import _commands
 from rovo._config import initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
@@ -53,9 +55,9 @@ from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, o
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
 from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
+from test_crawl import declaring, settled, site, urlset
 from test_crawl import new_mirror as crawl_mirror
 from test_crawl import request as crawl_request
-from test_crawl import settled, site
 from test_mirror import FIRST_RUN, ROOT, new_mirror, stored
 from test_report import crawled, opened
 from test_unplaceable_candidate import crowded, victim_candidate
@@ -833,3 +835,45 @@ def test_a_crawl_delay_outside_floats_grammar_is_no_crawl_delay(
     assert policy.crawl_delay == adopted
     (host,) = result.run.hosts
     assert host.crawl_delay == timedelta(0)
+
+
+# --- T13 planning: the discovered count, and a discovered URL with no identity ------------
+
+NO_IDENTITY = f"{SITE}:99999/guide/no-identity.html"
+
+
+def test_discovered_counts_the_rows_after_discovery(tmp_path: Path) -> None:
+    """Planning T13: rovo.allium CloseRun's discovered_count is the rows after discovery.
+
+    close_run counted the frontier's rows when the run closed, every row a link added
+    included; the report's discovered is the count DropStaleObservations left.
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    fetcher = FakeFetcher(fixture_site("links", f"{SITE}/"))
+    _commands.sync(out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed)
+    state = json.loads((out_dir / ".rovo" / "frontier.json").read_text(encoding="utf-8"))
+    report = json.loads((out_dir / "crawl-report.json").read_text(encoding="utf-8"))
+    assert len(state["entries"]) > 1
+    assert report["discovered"] == 1
+
+
+def test_a_sitemap_entry_or_llms_txt_target_with_no_identity_is_skipped(tmp_path: Path) -> None:
+    """Planning T13, Open points item 2, the interim: a URL with no identity is skipped.
+
+    normalise_url cannot normalise a port out of range (identity_of is null in the
+    specification): such a sitemap entry or llms.txt target is neither observed nor
+    discovered, counts toward no cap, raises no problem, and the run finishes.
+    """
+    maps = f"{SITE}/maps/guide.xml"
+    llms_txt = f"{SITE}/llms.txt"
+    fetcher = site(robots=declaring(maps))
+    fetcher.responses[maps] = xml_response(maps, urlset((NO_IDENTITY, None), (SEED, None)))
+    fetcher.responses[llms_txt] = text_response(llms_txt, f"- [Gone]({NO_IDENTITY})\n")
+    result = run_crawl(crawl_request(crawl_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert result.run.status is RunStatus.finished
+    assert result.run.discovery_failures == []
+    assert [seen.url for seen in result.frontier.observed_urls] == [SEED]
+    assert [entry.identity for entry in result.frontier.entries] == [SEED]
+    (host,) = result.run.hosts
+    assert host.sitemap_entries_admitted == 1

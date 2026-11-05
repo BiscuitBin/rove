@@ -117,7 +117,7 @@ def test_python_m_rovo_prints_the_version() -> None:
     ("command", "arguments"),
     [
         ("init", ("SITE_URL", "OUT_DIR", "--profile")),
-        ("sync", ("OUT_DIR",)),
+        ("sync", ("OUT_DIR", "--dry-run")),  # T13: --dry-run
         ("index", ("OUT_DIR",)),
     ],
 )

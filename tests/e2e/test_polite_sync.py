@@ -128,7 +128,10 @@ def test_polite_sync_reads_robots_first_and_honours_its_crawl_delay(
     secret = f"{base}{PRIVATE_PATH.lstrip('/')}"
     assert statuses(out)[secret] == "skipped_robots"
     spaced = gaps(stamping.stamps)
-    assert len(spaced) == len(["start", "a", "flaky"])
+    # T13: the two well-known sitemaps and llms.txt follow robots.txt, each spaced too.
+    assert len(spaced) == len(
+        ["sitemap.xml", "sitemap_index.xml", "llms.txt", "start", "a", "flaky"]
+    )
     for gap in spaced:
         assert gap >= POLITE_DELAY - EPSILON
     report = load(out / "crawl-report.json")
@@ -321,6 +324,13 @@ def test_the_installed_script_waits_out_the_crawl_delay(
     elapsed = time.monotonic() - began
     assert sync.returncode == 0, sync.stderr
     log = serve_site.log(base)
-    assert [path for path, _ in log] == ["/robots.txt", "/guide/start.html", "/guide/page.html"]
-    assert log[2][1] - log[1][1] >= INSTALLED_GAP
+    assert [path for path, _ in log] == [
+        "/robots.txt",
+        "/sitemap.xml",
+        "/sitemap_index.xml",
+        "/llms.txt",
+        "/guide/start.html",
+        "/guide/page.html",
+    ]
+    assert log[-1][1] - log[-2][1] >= INSTALLED_GAP
     assert elapsed >= INSTALLED_DELAY

@@ -36,6 +36,7 @@ snapshot.
 | T10 | Links and scope: rovo sync follows links within the crawl scope and rewrites them between page files | `T10-links-and-scope.md` | T09 | none | open |
 | T11 | Indexes: every finalisation writes index.md, the directory indexes, llms.txt, index.jsonl and links.jsonl, and rovo index rebuilds them | `T11-indexes.md` | T10 | none | open |
 | T12 | Robots and politeness: rovo sync reads robots.txt per origin, paces each host, retries with backoff and Retry-After, and exits partial on a failure | `T12-robots-politeness.md` | T11 | none | open |
+| T13 | Discovery: rovo sync reads sitemaps and llms.txt, records what they name, keeps the sitemap budgets, and --dry-run lists what it would fetch | `T13-discovery.md` | T12 | none | open |
 
 ## Dependency graph
 
@@ -43,7 +44,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -81,6 +82,11 @@ T00 ─┬─ T01 ─┐
   reported), paces each host name by its rate and the longest Crawl-delay its origins
   declare, retries a failed request with backoff and Retry-After, and exits 1 when a
   page fails or robots.txt could not be read.
+- **T13** is slice 5: discovery. `rovo sync` reads each allowed host's declared and
+  conventional sitemaps (an index's children only on the host that served it) and its
+  `llms.txt`, records every URL they name as an observation, admits the in-scope ones
+  within the sitemap caps and the page budget, reports a declared sitemap that fails,
+  and `rovo sync --dry-run` lists the rows it would fetch without fetching a page.
 
 ## How to pick up a ticket
 

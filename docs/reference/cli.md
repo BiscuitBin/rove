@@ -11,7 +11,8 @@ requires: []
 The `rovo` command is the Typer application `rovo.cli:app`. `python -m rovo` runs the
 same application under the same program name. The implementation of the specification
 under `docs/specs/` is under way: `rovo init` creates a mirror, `rovo sync` mirrors
-its seed pages and the pages they link to over HTTP and writes the mirror's indexes, and
+its seed pages, the pages its sitemaps and `llms.txt` name and the pages they link to
+over HTTP and writes the mirror's indexes, and
 `rovo index` rebuilds the indexes offline; the later commands (`verify`, `report`,
 `fetch`) arrive with their slices. Every example on this page was run from a checkout as
 `uv run --frozen rovo ...`; an installed command behaves the same.
@@ -75,6 +76,11 @@ Usage: rovo sync [OPTIONS] OUT_DIR
 Fetch the mirror's pages, publish them as Markdown and write crawl-report.json.
 ```
 
+| Argument or option | Effect |
+| --- | --- |
+| `OUT_DIR` | The mirror's directory, made by `rovo init`. |
+| `--dry-run` | Discover as a sync does, print the pages it would fetch and fetch none of them. |
+
 `rovo sync OUT_DIR` reads `rovo.toml`, reads each allowed host's `/robots.txt`, fetches
 each seed page the robots rules allow once over HTTP with the user agent
 `rovo/<version>`, converts it to Markdown with the generic profile and publishes it as
@@ -92,6 +98,39 @@ report's exit code. A page robots.txt disallows is skipped, not fetched. A page 
 mirror has no free path for is refused: its URL is reported as failed with the error
 `no free path` and the sync exits 1 (the [mirror reference](mirror.md#page-files) says
 when that happens).
+
+Before any page, `rovo sync` discovers pages beyond the seeds, host by host in sorted
+order, once each host's robots.txt is read. It reads the sitemaps that host's robots.txt
+declares (`Sitemap:` lines), in order, then `/sitemap.xml` and `/sitemap_index.xml`
+where robots.txt does not declare them, then `/llms.txt`, each once per run and only
+where robots.txt allows it. A sitemap is an XML `urlset` or `sitemapindex` in any
+namespace; a gzip or plain-text sitemap is not one. A sitemap index's child sitemaps
+are read as they come, only on the host that served the index (a child on another
+host is never requested), at most `sitemap_max_children` (40) per host. Every URL a
+sitemap lists, or an inline Markdown link of `llms.txt` points at, is recorded under
+`observed_urls` in the frontier, in scope or not, and forgotten once it goes
+unseen for more than `observed_url_retention_syncs` (3) syncs. Those the scope
+allows are queued at depth 1 (`sitemap_depth`, `llms_txt_depth`) with the priorities
+`sitemap_priority` (50) and `llms_txt_priority` (40), after the seeds and before links,
+at most `max_pages * sitemap_cap_multiplier` (20000) sitemap entries per host; a
+sitemap's `<lastmod>` is kept on the page as `sitemap_lastmod`. A URL that cannot be
+normalised (a port out of range or an unclosed IPv6 bracket) is skipped, and so is a
+declared or child sitemap whose URL cannot be, with no problem raised. A declared sitemap that answers with an
+error other than 404 or 410, its retries spent, is listed under `discovery_problems` as
+`sitemap_unavailable`, one that never
+answers as `sitemap_unreachable`, and one that answers but is not a sitemap as
+`not_a_sitemap`, and each makes the sync exit 1; a declared sitemap that is missing
+(404 or 410) is silent, and so is every failure of `/sitemap.xml`, `/sitemap_index.xml`
+and `/llms.txt`.
+
+`rovo sync --dry-run OUT_DIR` makes the same discovery requests, robots.txt, the
+sitemaps and `llms.txt`, and then stops: it fetches, converts and writes no page and
+writes or rewrites no index. It prints on standard output, one per line and nothing
+else, the URL of each queued page it would fetch, in the order the sync would take them:
+the seeds first, then shallowest, then highest priority, then in discovery order. It
+saves the manifest, the frontier (so a later sync starts from the rows it queued) and a
+row in the run history with `dry_run: true`, writes `crawl-report.json` with
+`options.dry_run: true` and `fetched: 0`, and exits 1 for a discovery problem, else 0.
 
 `rovo sync` is polite to the site. It reads each origin's `/robots.txt` (scheme, host
 and port, as RFC 9309 scopes it) before anything else there, a second port of a host
@@ -129,12 +168,13 @@ start URL, sets `unblocking.provider`, changes the root URL the last run recorde
 needs a browser or stealth engine that is not installed, or sets `robots = "ignore"`.
 The refusal is printed on standard error; the specification's refused report arrives
 with a later slice. When a run reaches a branch a later slice implements (a redirect,
-robots.txt's included, a 404, a block, a 429 that survives its retries, a `Retry-After`
+robots.txt's, a sitemap's and `llms.txt`'s included, a 404, a block, a 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a page already
 in the mirror, a link to a missing page or to a URL that answers
 with a redirect or a non-HTML file, a profile other
-than `generic`, a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
+than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
+a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.
 
 ## `rovo index`

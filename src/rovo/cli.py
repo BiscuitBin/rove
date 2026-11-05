@@ -66,6 +66,13 @@ def init_command(
 @app.command("sync")
 def sync_command(
     out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+    *,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Discover, list the pages it would fetch and fetch none of them."
+        ),
+    ] = False,
 ) -> None:
     """Fetch the mirror's pages, publish them as Markdown and write crawl-report.json."""
     from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
@@ -74,7 +81,7 @@ def sync_command(
 
     timer = SystemTimer()
     with HttpxFetcher(clock=timer) as fetcher:
-        code = _commands.sync(out_dir, fetcher=fetcher, clock=timer)
+        code = _commands.sync(out_dir, fetcher=fetcher, clock=timer, dry_run=dry_run)
     raise typer.Exit(code.number)
 
 

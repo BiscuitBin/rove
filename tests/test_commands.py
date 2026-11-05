@@ -39,6 +39,8 @@ SEED = f"{SITE}/guide/start.html"
 # The seed page's mirror-relative path (mirror.allium MovePage guidance, at fed9ed8).
 START_PATH = "pages/docs.example/start.md"
 ROBOTS = f"{SITE}/robots.txt"
+# T13: robots.txt, then the sitemaps and llms.txt of a host whose robots.txt allows them.
+DISCOVERY = [ROBOTS, f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml", f"{SITE}/llms.txt"]
 SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 PAGE = (SITES / "one-page" / "guide" / "start.html").read_text(encoding="utf-8")
 DISALLOW_GUIDE = (SITES / "robots-disallow" / "robots.txt").read_text(encoding="utf-8")
@@ -256,7 +258,48 @@ def test_rule_failure_RefuseSyncWithoutDirectory_1(tmp_path: Path) -> None:
     fetcher = site()
     out_dir = initialised(tmp_path / "out")
     assert synced(out_dir, fetcher) is ExitCode.ok
-    assert fetcher.requests == [ROBOTS, SEED]
+    assert fetcher.requests == [*DISCOVERY, SEED]
+
+
+def test_sync_dry_run_lists_the_pending_rows_and_writes_no_page(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T13: sync(dry_run=True) discovers, prints the pending identities and fetches no page.
+
+    The listing is the one thing on standard output, one identity a line in next_pending
+    order; the frontier, the run (dry_run true) and the report are saved; no page file,
+    index or _indexes/ is written (Open points, items 5 and 6, the interims).
+    """
+    llms_txt = f"{SITE}/llms.txt"
+    listed = f"{SITE}/guide/listed.html"
+    fetcher = site()
+    fetcher.responses[llms_txt] = text_response(llms_txt, f"- [Listed]({listed})\n")
+    out_dir = initialised(tmp_path / "out")
+    capsys.readouterr()
+    code = _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        dry_run=True,
+    )
+    assert code is ExitCode.ok
+    assert capsys.readouterr().out == f"{SEED}\n{listed}\n"
+    assert fetcher.requests == DISCOVERY
+    for name in ("pages", "index.md", "index.jsonl", "links.jsonl", "llms.txt", "_indexes"):
+        assert not (out_dir / name).exists(), name
+    assert load_mirror(out_dir).pages == []
+    state = out_dir / ".rovo"
+    frontier = json.loads((state / "frontier.json").read_text(encoding="utf-8"))
+    assert [(row["identity"], row["status"]) for row in frontier["entries"]] == [
+        (SEED, "pending"),
+        (listed, "pending"),
+    ]
+    runs = json.loads((state / "runs.json").read_text(encoding="utf-8"))["runs"]
+    assert [row["dry_run"] for row in runs] == [True]
+    report = json.loads(report_path(out_dir).read_text(encoding="utf-8"))
+    assert report["options"]["dry_run"] is True
+    assert (report["fetched"], report["discovered"], report["exit_code"]) == (0, 2, "ok")
 
 
 # --- sync: StartSync ----------------------------------------------------------------

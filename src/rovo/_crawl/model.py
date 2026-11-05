@@ -389,13 +389,22 @@ class SiteResponse:
         return hashlib.sha256(self.markup.encode()).hexdigest()
 
 
+@dataclass(frozen=True, kw_only=True)
+class SitemapEntry:
+    """One <url> or <sitemap> child of a sitemap document."""
+
+    loc: str
+    lastmod: str | None
+
+
 @dataclass(kw_only=True, eq=False)
 class Frontier:
     """The persisted crawl state of one mirror."""
 
     mirror: Mirror
     entries: list["FrontierEntry"] = field(default_factory=list)
-    observed_urls: list[object] = field(default_factory=list)
+    observed_urls: list["ObservedUrl"] = field(default_factory=list)
+    sitemap_snapshots: list["SitemapSnapshot"] = field(default_factory=list)
 
     @property
     def pending_entries(self) -> list["FrontierEntry"]:
@@ -459,6 +468,28 @@ class FrontierEntry:
 
 
 @dataclass(kw_only=True, eq=False)
+class ObservedUrl:
+    """A URL seen in a sitemap or llms.txt, in scope or not."""
+
+    frontier: Frontier
+    url: str
+    sources: frozenset[DiscoverySource]
+    last_seen_run: int
+
+
+@dataclass(kw_only=True, eq=False)
+class SitemapSnapshot:
+    """The validators and entries of a sitemap read this run (kept one run, T13)."""
+
+    frontier: Frontier
+    url: str
+    etag: str | None
+    last_modified: str | None
+    is_index: bool
+    entries: tuple[SitemapEntry, ...]
+
+
+@dataclass(kw_only=True, eq=False)
 class Run:
     """One sync run."""
 
@@ -495,11 +526,15 @@ class Run:
     robots_policies: list["RobotsPolicy"] = field(default_factory=list)
     # Implementation state, not specification fields: the timer the run paces on, the
     # jitter draw retry_wait scales a backoff by (a factor in [low, high]), and the
-    # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns.
+    # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns;
+    # the sitemaps read this run (FetchSitemap reads each at most once) and the frontier's
+    # row count when discovery ended (rovo.allium CloseRun's discovered_count).
     timer: "Timer" = field(repr=False)
     draw: Callable[[float, float], float] = field(repr=False)
     discovery_failures: list["DiscoveryFailed"] = field(default_factory=list, repr=False)
     backoffs: list["HostBackedOff"] = field(default_factory=list, repr=False)
+    sitemaps_read: set[str] = field(default_factory=set, repr=False)
+    discovered_count: int = field(default=0, repr=False)
 
     @property
     def tripped_hosts(self) -> list["Host"]:

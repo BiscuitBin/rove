@@ -24,12 +24,15 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── __main__.py            python -m rovo
 │   ├── py.typed               Marks the package as typed
 │   ├── _convert/ _mirror/ _crawl/  Private modules, in that import direction
-│   │   └── _crawl/pace.py     The timer seam, the per-host limiter and retry waits
+│   │   ├── _crawl/pace.py     The timer seam, the per-host limiter and retry waits
+│   │   └── _crawl/sitemaps.py The sitemap and llms.txt readers (lxml, entities off)
 │   ├── _config.py  _report.py  Private modules for the command
 │   └── _commands.py  _exit.py  _unfinished.py  init, sync, index; exit codes; the guard
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
 │   ├── fakes.py  spec_values.py  The seams' doubles; config defaults read from the specs
+│   ├── test_sitemaps.py       The sitemap and llms.txt black boxes
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
+│   │   └── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
 │       └── sites/             Static sites the end-to-end tests serve

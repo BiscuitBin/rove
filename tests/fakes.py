@@ -29,6 +29,7 @@ SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 
 HTML = "text/html; charset=utf-8"
 TEXT = "text/plain; charset=utf-8"
+XML = "application/xml"
 NOT_FOUND = 404
 
 
@@ -50,6 +51,13 @@ def text_response(url: str, text: str, *, status: int = 200) -> SiteResponse:
     )
 
 
+def xml_response(url: str, text: str, *, status: int = 200) -> SiteResponse:
+    """An XML answer from `url`, such as a sitemap."""
+    return SiteResponse(
+        status=status, source_url=url, markup=text, size=len(text.encode()), content_type=XML
+    )
+
+
 def not_found(url: str) -> SiteResponse:
     """A 404 with an empty body."""
     return SiteResponse(status=NOT_FOUND, source_url=url, markup="", size=0, content_type=HTML)
@@ -58,8 +66,9 @@ def not_found(url: str) -> SiteResponse:
 def fixture_site(name: str, base: str) -> dict[str, SiteResponse]:
     """Every file of tests/fixtures/sites/<name>/ as an answer from `base` (ending in /).
 
-    An `.html` file is an HTML answer; any other file, such as robots.txt, a plain-text
-    answer. A FakeFetcher over the map serves the site as the end-to-end server would.
+    An `.html` file is an HTML answer, an `.xml` file an XML answer; any other file, such
+    as robots.txt, a plain-text answer. A FakeFetcher over the map serves the site as the
+    end-to-end server would.
     """
     root = SITES / name
     responses: dict[str, SiteResponse] = {}
@@ -68,9 +77,12 @@ def fixture_site(name: str, base: str) -> dict[str, SiteResponse]:
             continue
         url = base + path.relative_to(root).as_posix()
         text = path.read_text(encoding="utf-8")
-        responses[url] = (
-            html_response(url, text) if path.suffix == ".html" else text_response(url, text)
-        )
+        if path.suffix == ".html":
+            responses[url] = html_response(url, text)
+        elif path.suffix == ".xml":
+            responses[url] = xml_response(url, text)
+        else:
+            responses[url] = text_response(url, text)
     return responses
 
 

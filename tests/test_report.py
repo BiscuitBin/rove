@@ -13,7 +13,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
-from fakes import START, FakeFetcher, FixedClock, html_response, text_response
+from fakes import START, FakeFetcher, FixedClock, fixture_site, html_response, text_response
 from rovo import _config
 from rovo._config import Configuration, SyncOptions
 from rovo._convert import profiles
@@ -163,7 +163,9 @@ OPTIONS = SyncOptions(
 )
 
 
-def crawled(out_dir: Path, page: str = PAGE, *, fetcher: FakeFetcher | None = None) -> CrawlResult:
+def crawled(
+    out_dir: Path, page: str = PAGE, *, fetcher: FakeFetcher | None = None, dry_run: bool = False
+) -> CrawlResult:
     """One standard run of the fixture site over a FakeFetcher, `fetcher` when given."""
     out_dir.mkdir(parents=True, exist_ok=True)
     mirror = Mirror(
@@ -193,7 +195,7 @@ def crawled(out_dir: Path, page: str = PAGE, *, fetcher: FakeFetcher | None = No
         scope_hash="scope-1",
         owned_hosts=frozenset(),
         policy=standard_policy(),
-        dry_run=False,
+        dry_run=dry_run,
         interactive=False,
         render_mode=RenderMode.never,
         stealth_mode=StealthMode.off,
@@ -293,8 +295,26 @@ def test_rule_failure_TallyFinalisedPage_2(tmp_path: Path) -> None:
 
 
 def test_rule_success_CloseRun(tmp_path: Path) -> None:
-    """Verify rule CloseRun succeeds when all preconditions are met."""
-    result = crawled(tmp_path)
+    """Verify rule CloseRun succeeds when all preconditions are met.
+
+    T13: discovered_count is the frontier's rows after discovery, not after the links a
+    page added; a dry run's report is closed without requesting the finalise pass.
+    """
+    linked = crawled(tmp_path / "links", fetcher=FakeFetcher(fixture_site("links", f"{SITE}/")))
+    linked_report = opened(linked.run)
+    assert close_run(linked_report, linked.run, linked.frontier)
+    assert len(linked.frontier.entries) > 1
+    assert linked_report.discovered == 1
+    dry = crawled(tmp_path / "dry", dry_run=True)
+    dry_report = opened(dry.run)
+    dry_report.options = dataclasses.replace(OPTIONS, dry_run=True)
+    assert not close_run(dry_report, dry.run, dry.frontier)
+    assert dry_report.report_status is ReportStatus.finished
+    assert (dry_report.discovered, dry_report.fetched) == (1, 0)
+    assert dry_report.unresolved_urls == frozenset()
+    assert dry_report.status is CrawlReportStatus.open
+
+    result = crawled(tmp_path / "one-page")
     report = opened(result.run)
     assert close_run(report, result.run, result.frontier)
     assert report.report_status is ReportStatus.finished

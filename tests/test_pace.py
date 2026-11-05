@@ -63,6 +63,9 @@ SITE = "http://docs.example"
 HOST = "docs.example"
 SEED = f"{SITE}/guide/start.html"
 ROBOTS = f"{SITE}/robots.txt"
+# T13: the sitemaps and llms.txt every host whose robots.txt allows them is asked for,
+# after its robots.txt and before any page (tickets/T13-discovery.md Facts).
+PROBES = [f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml", f"{SITE}/llms.txt"]
 A_PAGE = f"{SITE}/guide/a.html"
 FLAKY = f"{SITE}/guide/flaky.html"
 SECRET = f"{SITE}/guide/private/secret.html"
@@ -309,7 +312,7 @@ def test_Politeness_requests_to_a_host_are_spaced_by_its_rate(tmp_path: Path) ->
     assert result.run.status is RunStatus.finished
     urls = to_host(stamping)
     assert urls[0] == ROBOTS
-    assert urls == [ROBOTS, SEED, A_PAGE, FLAKY]
+    assert urls == [ROBOTS, *PROBES, SEED, A_PAGE, FLAKY]
     for gap in gaps(stamping.stamps):
         assert gap >= spacing() - EPSILON
 
@@ -319,7 +322,7 @@ def test_Politeness_crawl_delay_spaces_requests(tmp_path: Path) -> None:
     result, stamping, _ = paced(tmp_path, FakeFetcher(polite("User-agent: *\nCrawl-delay: 3\n")))
     (host,) = result.run.hosts
     assert host.crawl_delay == POLITE_DELAY
-    assert [url for url, _ in stamping.stamps] == [ROBOTS, SEED, A_PAGE, FLAKY, SECRET]
+    assert [url for url, _ in stamping.stamps] == [ROBOTS, *PROBES, SEED, A_PAGE, FLAKY, SECRET]
     for gap in gaps(stamping.stamps):
         assert gap >= POLITE_DELAY - EPSILON
 
@@ -386,7 +389,7 @@ def test_Politeness_a_crawl_delay_past_the_cap_never_reaches_the_limiter(
     (host,) = result.run.hosts
     assert host.crawl_delay == timedelta(0)
     assert host.rate == standard_policy().rate_per_host
-    assert [url for url, _ in stamping.stamps] == [ROBOTS, SEED, A_PAGE, FLAKY, SECRET]
+    assert [url for url, _ in stamping.stamps] == [ROBOTS, *PROBES, SEED, A_PAGE, FLAKY, SECRET]
     for gap in gaps(stamping.stamps):
         assert spacing() - EPSILON <= gap <= spacing() + EPSILON
 
@@ -413,7 +416,7 @@ def test_Politeness_a_crawl_delay_that_is_no_delay_leaves_the_rate_alone(
     (host,) = result.run.hosts
     assert host.crawl_delay == timedelta(0)
     assert host.rate == standard_policy().rate_per_host
-    assert [url for url, _ in stamping.stamps] == [ROBOTS, SEED, A_PAGE, FLAKY, SECRET]
+    assert [url for url, _ in stamping.stamps] == [ROBOTS, *PROBES, SEED, A_PAGE, FLAKY, SECRET]
     for gap in gaps(stamping.stamps):
         assert spacing() - EPSILON <= gap <= spacing() + EPSILON
 
@@ -426,7 +429,7 @@ def test_Politeness_the_longest_crawl_delay_of_a_hosts_origins_wins(tmp_path: Pa
     """
     result, stamping, _ = paced(tmp_path, two_origin_site())
     urls = [url for url, _ in stamping.stamps]
-    assert urls[:2] == [ROBOTS, SEED]
+    assert urls[: len(PROBES) + 2] == [ROBOTS, *PROBES, SEED]
     assert urls.count(PORTED_ROBOTS) == 1
     second_robots = urls.index(PORTED_ROBOTS)
     assert all(urls.index(page) > second_robots for page in PORTED_PAGES)
@@ -569,7 +572,9 @@ def test_a_robots_txt_retry_backs_off_and_counts_its_retry_after(tmp_path: Path)
     assert policy.stance is RobotsStance.rules
     robots_times = [when for url, when in stamping.stamps if url == ROBOTS]
     assert robots_times[1] - robots_times[0] >= timedelta(seconds=2)
-    pages = [url for url in fetcher.requests if not url.endswith("/robots.txt")]
+    pages = [
+        url for url in fetcher.requests if not url.endswith("/robots.txt") and url not in PROBES
+    ]
     assert result.run.fetch_attempts == len(pages)
     page_bytes = sum(responses[url].size for url in pages)
     assert result.run.bytes_fetched == busy.size + responses[ROBOTS].size + page_bytes

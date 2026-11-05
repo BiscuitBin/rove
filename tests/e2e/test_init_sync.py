@@ -14,8 +14,10 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import pytest
 from typer.testing import CliRunner
 
+from rovo._crawl import pace
 from rovo.cli import app
 
 USAGE = 2
@@ -131,14 +133,22 @@ def test_init_then_sync_mirrors_the_seed_page(
     ]
 
 
-def test_robots_disallow_skips_the_seed(serve_site: Callable[[str], str], tmp_path: Path) -> None:
-    """A robots.txt disallowing /guide/: the sync exits 0, writes no page, skips the row."""
+def test_robots_disallow_skips_the_seed(
+    serve_site: Callable[[str], str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A robots.txt disallowing /guide/: the sync exits 0, writes no page, skips the row.
+
+    T13: the sitemaps and llms.txt it still allows are requested 1 / rate_per_host apart,
+    so the sleep the crawl's pacing calls is replaced and nothing waits for real.
+    """
     base = serve_site("robots-disallow")
     seed = f"{base}guide/start.html"
     out = tmp_path / "out"
     runner = CliRunner()
 
     assert runner.invoke(app, ["init", seed, str(out)]).exit_code == 0
+    slept: list[float] = []
+    monkeypatch.setattr(pace.time, "sleep", slept.append)
     result = runner.invoke(app, ["sync", str(out)])
     assert result.exit_code == 0, result.output
     assert list(out.glob("pages/**/*.md")) == []

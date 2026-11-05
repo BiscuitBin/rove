@@ -2,13 +2,15 @@
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
-opens hosts, OpenHost reads robots.txt, FetchEntry makes its first attempt. `run_crawl`
+opens hosts and reads their sitemaps and llms.txt, OpenHost reads robots.txt, FetchEntry
+makes its first attempt. `run_crawl`
 drives the rest in the specification's order, one frontier row after another, and
 stops with NotInThisSlice where a later slice's branch would be taken. Every request
 waits its turn at its host name's limiter (rovo._crawl.pace) on the run's timer.
 """
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import MAX_EMAX, Decimal, InvalidOperation
@@ -30,6 +32,7 @@ from rovo._convert.fidelity import (
 )
 from rovo._convert.model import QualityFlag
 from rovo._convert.profiles import GENERIC
+from rovo._crawl import sitemaps
 from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import (
     CONFIG,
@@ -48,6 +51,7 @@ from rovo._crawl.model import (
     Host,
     HostBackedOff,
     LadderWalk,
+    ObservedUrl,
     RenderMode,
     RenderReason,
     RobotsMode,
@@ -58,6 +62,8 @@ from rovo._crawl.model import (
     RunMode,
     RunRequest,
     RunStatus,
+    SitemapEntry,
+    SitemapSnapshot,
     SiteResponse,
     UrlFailed,
     WalkStatus,
@@ -230,9 +236,11 @@ def prepare_run(run: Run, frontier: Frontier | None) -> bool:
 
 
 def discover(run: Run, frontier: Frontier, fetcher: Fetcher) -> bool:
-    """Realises crawl.allium Discover: the seeds are enqueued and every allowed host opened.
+    """Realises crawl.allium Discover: the seeds enqueued, then each allowed host's discovery.
 
-    Hosts are opened in sorted order. Sitemaps and llms.txt are the discovery slice's.
+    Hosts are visited in sorted order: each is opened (its robots.txt read), then its
+    sitemaps are queued and read (QueueSitemaps), then its llms.txt (ReadLlmsTxt), so
+    every host is opened before any sitemap, llms.txt or page request to it.
     """
     if run.status is not RunStatus.running:
         return False
@@ -250,6 +258,8 @@ def discover(run: Run, frontier: Frontier, fetcher: Fetcher) -> bool:
         )
     for name in sorted(scope.allowed_hosts):
         open_host(run, name, _host_origin(scope, name), fetcher)
+        _read_sitemaps(run, frontier, name, queue_sitemaps(run, name) or [], fetcher)
+        read_llms_txt(run, name, frontier, fetcher)
     return True
 
 
@@ -630,12 +640,320 @@ def enqueue_page_links(
     return discovered
 
 
+# --- Sitemaps and llms.txt ----------------------------------------------------------
+
+
+def queue_sitemaps(run: Run, name: str) -> list[tuple[str, bool]] | None:
+    """Realises crawl.allium QueueSitemaps: each SitemapDue as (url, declared), in order.
+
+    The declared sitemaps of RobotsPolicy{origin: host.origin}, then each of
+    well_known_sitemaps(host.origin) not declared; None when the rule does not fire.
+    """
+    host = run.host(name)
+    if run.status is not RunStatus.running or host is None:
+        return None
+    policy = run.robots_policy(host.origin)
+    declared = policy.declared_sitemaps if policy is not None else ()
+    due = [(url, True) for url in declared]
+    well_known = sitemaps.well_known_sitemaps(host.origin)
+    due.extend((url, False) for url in well_known if url not in declared)
+    return due
+
+
+def read_robots_before_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) -> bool:
+    """Realises crawl.allium ReadRobotsBeforeSitemap: True when it read the origin's robots.txt.
+
+    The sitemap is then due again (the caller hands it to fetch_sitemap).
+    """
+    if not _sitemap_wanted(run, name, url) or run.robots_policy(origin_of(url)) is not None:
+        return False
+    fetch_robots(run, name, origin_of(url), fetcher)
+    return True
+
+
+def fetch_sitemap(run: Run, name: str, url: str, fetcher: Fetcher) -> SiteResponse | None:
+    """Realises crawl.allium FetchSitemap: the SitemapAnswered response, else None.
+
+    Each sitemap is read at most once per run, through fetch_resource, its bytes counted.
+    No snapshot outlives its run in this slice, so no validators are sent. A 3xx answer
+    (redirect following) is a later slice's branch.
+    """
+    host = run.host(name)
+    if host is None or not _sitemap_wanted(run, name, url):
+        return None
+    if not robots_allows(run, url) or run.robots_policy(origin_of(url)) is None:
+        return None
+    if url in run.sitemaps_read:
+        return None
+    run.sitemaps_read.add(url)
+    response = fetch_resource(url, run, host, fetcher)
+    run.bytes_fetched += response.size
+    if response.status in _REDIRECTS:
+        raise NotInThisSlice(rule="FetchSitemap")
+    return response
+
+
+def accept_fresh_sitemap(
+    run: Run, frontier: Frontier, url: str, response: SiteResponse
+) -> SitemapSnapshot | None:
+    """Realises crawl.allium AcceptFreshSitemap: the snapshot created or updated, else None.
+
+    The snapshot's is_index and entries are SitemapEntriesFound's.
+    """
+    del run  # SitemapEntriesFound names the run; the snapshot is the frontier's.
+    if not response.ok or not sitemaps.is_sitemap_document(response):
+        return None
+    is_index = sitemaps.sitemap_is_index(response)
+    entries = sitemaps.sitemap_entries(response)
+    snapshot = next((kept for kept in frontier.sitemap_snapshots if kept.url == url), None)
+    if snapshot is None:
+        snapshot = SitemapSnapshot(
+            frontier=frontier,
+            url=url,
+            etag=response.etag,
+            last_modified=response.last_modified,
+            is_index=is_index,
+            entries=entries,
+        )
+        frontier.sitemap_snapshots.append(snapshot)
+        return snapshot
+    snapshot.etag = response.etag
+    snapshot.last_modified = response.last_modified
+    snapshot.is_index = is_index
+    snapshot.entries = entries
+    return snapshot
+
+
+def reject_non_sitemap(
+    run: Run, url: str, response: SiteResponse, *, declared: bool
+) -> DiscoveryFailed | None:
+    """Realises crawl.allium RejectNonSitemap: not_a_sitemap for a declared sitemap."""
+    if not declared or not response.ok or sitemaps.is_sitemap_document(response):
+        return None
+    return DiscoveryFailed(run=run, url=url, problem=DiscoveryProblem.not_a_sitemap)
+
+
+def skip_unavailable_sitemap(
+    run: Run, url: str, response: SiteResponse, *, declared: bool
+) -> DiscoveryFailed | None:
+    """Realises crawl.allium SkipUnavailableSitemap: a declared, not absent failure's problem."""
+    if response.ok or response.not_modified or not declared or response.absent:
+        return None
+    problem = (
+        DiscoveryProblem.sitemap_unavailable
+        if response.error is None
+        else DiscoveryProblem.sitemap_unreachable
+    )
+    return DiscoveryFailed(run=run, url=url, problem=problem)
+
+
+def expand_sitemap_entries(  # noqa: PLR0913  The SitemapEntriesFound trigger's parameters.
+    run: Run,
+    frontier: Frontier,
+    host: Host,
+    url: str,
+    entries: Sequence[SitemapEntry],
+    *,
+    is_index: bool,
+) -> list[str] | None:
+    """Realises crawl.allium ExpandSitemapEntries: the child sitemaps now due, else None.
+
+    An index's children on the host that served it, at most sitemap_max_children per
+    host (the open question's interim: no child on another host); a urlset's entries
+    observed, and admitted at sitemap_depth when in scope, at most
+    max_pages * sitemap_cap_multiplier per host. An entry with no identity is skipped
+    (T13 Open points, item 2), and so is a child with none, uncounted (item 10).
+    """
+    if run.status is not RunStatus.running:
+        return None
+    scope = run.target.scope
+    due: list[str] = []
+    for entry in entries:
+        target = _resolved_or_none(url, entry.loc)
+        if target is None:
+            continue
+        if is_index:
+            if (
+                host.sitemap_children_read < CONFIG.sitemap_max_children
+                and _normalisable(target)
+                and hostname_of(target) == host.name
+            ):
+                host.sitemap_children_read += 1
+                due.append(target)
+            continue
+        identity = _identity_or_none(scope, target)
+        if identity is None:
+            continue
+        record_observation(run, frontier, identity, DiscoverySource.sitemap)
+        if (
+            scope.allows(target, CONFIG.sitemap_depth)
+            and host.sitemap_entries_admitted < CONFIG.max_pages * CONFIG.sitemap_cap_multiplier
+        ):
+            host.sitemap_entries_admitted += 1
+            enqueue(
+                run,
+                frontier,
+                identity,
+                depth=CONFIG.sitemap_depth,
+                via=DiscoverySource.sitemap,
+                priority=CONFIG.sitemap_priority,
+                from_url=url,
+                lastmod=entry.lastmod,
+            )
+    return due
+
+
+def read_llms_txt(
+    run: Run, name: str, frontier: Frontier, fetcher: Fetcher
+) -> SiteResponse | None:
+    """Realises crawl.allium ReadLlmsTxt: the answer, else None when the rule does not fire.
+
+    Never conditional, and silent when absent or unreachable; a target with no identity
+    is skipped (T13 Open points, item 2). A 3xx answer is a later slice's branch.
+    """
+    host = run.host(name)
+    if run.status is not RunStatus.running or host is None:
+        return None
+    url = sitemaps.llms_txt_url(host.origin)
+    if not robots_allows(run, url):
+        return None
+    response = fetch_resource(url, run, host, fetcher)
+    run.bytes_fetched += response.size
+    if response.status in _REDIRECTS:
+        raise NotInThisSlice(rule="ReadLlmsTxt")
+    if not response.ok:
+        return response
+    scope = run.target.scope
+    for target in sitemaps.llms_txt_targets(response, url):
+        identity = _identity_or_none(scope, target)
+        if identity is None:
+            continue
+        record_observation(run, frontier, identity, DiscoverySource.llms_txt)
+        if scope.allows(target, CONFIG.llms_txt_depth):
+            enqueue(
+                run,
+                frontier,
+                identity,
+                depth=CONFIG.llms_txt_depth,
+                via=DiscoverySource.llms_txt,
+                priority=CONFIG.llms_txt_priority,
+                from_url=url,
+            )
+    return response
+
+
+def record_observation(
+    run: Run, frontier: Frontier, url: str, via: DiscoverySource
+) -> ObservedUrl:
+    """Realises crawl.allium RecordObservation: the observation created or updated."""
+    seen = next((observed for observed in frontier.observed_urls if observed.url == url), None)
+    if seen is None:
+        seen = ObservedUrl(
+            frontier=frontier, url=url, sources=frozenset({via}), last_seen_run=run.id
+        )
+        frontier.observed_urls.append(seen)
+        return seen
+    seen.sources = seen.sources | {via}
+    seen.last_seen_run = run.id
+    return seen
+
+
 def drop_stale_observations(run: Run, frontier: Frontier) -> bool:
-    """Realises crawl.allium DropStaleObservations; nothing is observed in this slice."""
+    """Realises crawl.allium DropStaleObservations, then records the discovered count.
+
+    A row unseen for more than observed_url_retention_syncs runs is dropped. The
+    frontier's row count now is rovo.allium CloseRun's discovered_count.
+    """
     if run.status is not RunStatus.running:
         return False
-    del frontier  # Sitemaps and llms.txt, which observe URLs, are the discovery slice's.
+    frontier.observed_urls = [
+        observed
+        for observed in frontier.observed_urls
+        if observed.last_seen_run + CONFIG.observed_url_retention_syncs >= run.id
+    ]
+    run.discovered_count = len(frontier.entries)
     return True
+
+
+def dry_run(run: Run) -> bool:
+    """Realises crawl.allium DryRun: True when it raised RunEnding."""
+    return run.status is RunStatus.running and run.dry_run
+
+
+def dry_run_listing(run: Run, frontier: Frontier) -> list[str]:
+    """The identities of the rows SelectBatch would consider, in next_pending order.
+
+    What a dry run lists (DryRun guidance; T13 Open points, item 5, the interim).
+    """
+    pending = [entry for entry in frontier.pending_entries if _selectable(run, entry)]
+    return [entry.identity for entry in _next_pending(pending, len(pending))]
+
+
+def _read_sitemaps(
+    run: Run, frontier: Frontier, name: str, due: list[tuple[str, bool]], fetcher: Fetcher
+) -> None:
+    """Each SitemapDue in turn, an index's children read depth first as they fall due.
+
+    ReadRobotsBeforeSitemap, then FetchSitemap; the answer meets exactly one of
+    AcceptFreshSitemap (then ExpandSitemapEntries), RejectNonSitemap or
+    SkipUnavailableSitemap, and a 304 with no snapshot meets none.
+    """
+    stack = list(reversed(due))
+    while stack:
+        url, declared = stack.pop()
+        read_robots_before_sitemap(run, name, url, fetcher)
+        response = fetch_sitemap(run, name, url, fetcher)
+        host = run.host(name)
+        if response is None or host is None:
+            continue
+        snapshot = accept_fresh_sitemap(run, frontier, url, response)
+        if snapshot is not None:
+            children = expand_sitemap_entries(
+                run, frontier, host, url, snapshot.entries, is_index=snapshot.is_index
+            )
+            stack.extend((child, True) for child in reversed(children or []))
+            continue
+        failed = reject_non_sitemap(
+            run, url, response, declared=declared
+        ) or skip_unavailable_sitemap(run, url, response, declared=declared)
+        if failed is not None:
+            run.discovery_failures.append(failed)
+
+
+def _sitemap_wanted(run: Run, name: str, url: str) -> bool:
+    """The guards ReadRobotsBeforeSitemap and FetchSitemap share."""
+    return (
+        run.status is RunStatus.running
+        and run.host(name) is not None
+        and _normalisable(url)
+        and hostname_of(url) == name
+        and sitemaps.sitemap_admitted(url, run.target.profile, run.target.scope)
+    )
+
+
+def _normalisable(url: str) -> bool:
+    """normalise_url can normalise the URL; a sitemap's that cannot is skipped (item 10)."""
+    try:
+        origin_of(url)
+    except ValueError:  # A port out of range or an unclosed IPv6 bracket.
+        return False
+    return True
+
+
+def _resolved_or_none(base: str, loc: str) -> str | None:
+    """resolve_url(base, loc), or None where urljoin cannot parse it (no identity, item 2)."""
+    try:
+        return sitemaps.resolve_url(base, loc)
+    except ValueError:  # An unclosed IPv6 bracket.
+        return None
+
+
+def _identity_or_none(scope: CrawlScope, url: str) -> str | None:
+    """scope.identity_of(url), or None where normalise_url cannot normalise it."""
+    try:
+        return scope.identity_of(url)
+    except ValueError:  # A port out of range: identity_of is null (mirror.allium 113).
+        return None
 
 
 def begin_crawl(run: Run) -> bool:
@@ -1129,15 +1447,15 @@ def drive_run(
     failed: list[UrlFailed] = []
     discover(run, frontier, fetcher)
     drop_stale_observations(run, frontier)
-    if not begin_crawl(run):
-        raise NotInThisSlice(rule="DryRun")
-    while next_batch(run, frontier):
-        batch = select_batch(run, frontier)
-        if not batch:
-            break
-        handled = [_handle_entry(run, frontier, entry, fetcher, clock) for entry in batch]
-        failed.extend(url_failed for url_failed in handled if url_failed is not None)
-    finish_run(run, frontier)
+    if not dry_run(run):  # DryRun raises RunEnding at once: no batch, no FinishRun.
+        begin_crawl(run)
+        while next_batch(run, frontier):
+            batch = select_batch(run, frontier)
+            if not batch:
+                break
+            handled = [_handle_entry(run, frontier, entry, fetcher, clock) for entry in batch]
+            failed.extend(url_failed for url_failed in handled if url_failed is not None)
+        finish_run(run, frontier)
     end_run(run, clock)
     return CrawlResult(
         run=run,
@@ -1224,20 +1542,25 @@ def load_frontier(mirror: Mirror) -> Frontier | None:
     data = read_json(path)
     frontier = Frontier(mirror=mirror)
     frontier.entries = [_decode_entry(frontier, row) for row in data["entries"]]
+    frontier.observed_urls = [_decode_observed(frontier, row) for row in data["observed_urls"]]
     return frontier
 
 
 def save_frontier(frontier: Frontier) -> None:
     """Write <out>/.rovo/frontier.json atomically.
 
-    Observed URLs and learned tiers are empty in this slice; sitemap snapshots get their
-    own file with the discovery slice (decision 0013).
+    Observed URLs are kept sorted by URL; learned tiers are empty in this slice. Sitemap
+    snapshots last one run until the incremental slice saves them in their own file
+    (decision 0013).
     """
     write_json(
         state_path(frontier.mirror.out_dir, _FRONTIER),
         {
             "entries": [_encode_entry(entry) for entry in frontier.entries],
-            "observed_urls": [],
+            "observed_urls": [
+                _encode_observed(observed)
+                for observed in sorted(frontier.observed_urls, key=lambda observed: observed.url)
+            ],
             "tier_hints": [],
         },
     )
@@ -1305,6 +1628,23 @@ def _decode_entry(frontier: Frontier, row: dict[str, Any]) -> FrontierEntry:
         priority=int(row["priority"]),
         attempts=int(row["attempts"]),
         status=FrontierStatus(row["status"]),
+    )
+
+
+def _encode_observed(observed: ObservedUrl) -> dict[str, object]:
+    return {
+        "url": observed.url,
+        "sources": sorted(source.value for source in observed.sources),
+        "last_seen_run": observed.last_seen_run,
+    }
+
+
+def _decode_observed(frontier: Frontier, row: dict[str, Any]) -> ObservedUrl:
+    return ObservedUrl(
+        frontier=frontier,
+        url=str(row["url"]),
+        sources=frozenset(DiscoverySource(source) for source in row["sources"]),
+        last_seen_run=int(row["last_seen_run"]),
     )
 
 

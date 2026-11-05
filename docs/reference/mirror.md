@@ -93,12 +93,20 @@ one that does not parse; `rovo sync` refuses one that is missing or does not par
 
 `frontier.json` holds `entries`, one row per identity ever discovered (`identity`,
 `depth`, `discovered_via`, `discovered_from`, `sitemap_lastmod`, `priority`,
-`attempts`, `status`), and the lists `observed_urls` and `tier_hints`, empty until the
-discovery and browser slices fill them. `runs.json` holds `runs`, one row per run, oldest
+`attempts`, `status`), `observed_urls` and `tier_hints`. `observed_urls` holds one row
+per URL a sitemap or `llms.txt` named, in scope or not, sorted by `url`: `url`,
+`sources` (the sorted list of `sitemap` and `llms_txt`) and `last_seen_run`, the id of
+the last run that saw it; a row unseen for more than `observed_url_retention_syncs` (3)
+runs is dropped when the next run's discovery ends. `tier_hints` stays empty until the
+browser slice fills it. A sitemap's validators and entries last one run and are not yet
+saved. `runs.json` holds `runs`, one row per run, oldest
 first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
 `finished_at` and `unresolved_urls`. A run's id is one more than the highest id there.
 Both files are written only after the manifest, so a frontier row marked `done` always
-has its page in the manifest; a sync that stops before then saves neither.
+has its page in the manifest; a sync that stops before then saves neither. A dry run
+(`rovo sync --dry-run`) saves the manifest, the frontier with the rows its discovery
+queued, all still `pending`, and its row in `runs.json`, and writes `crawl-report.json`;
+it writes no page file and no index.
 
 ## Page files
 
@@ -307,7 +315,7 @@ sorted paths of the pages that link to it.
 The report of the last sync: every `CrawlReport` field of `rovo.allium` but the mirror,
 the operator and the open or written status. It names the run (`run_id`, `kind`,
 `mode`), how it ended (`report_status`, `exit_code`, `error`), the configuration and
-options it used, the tallies (`discovered`, `fetched`, `converted`, `bytes_fetched`
+options it used, the tallies (`discovered`, the frontier's rows when discovery ended, `fetched`, `converted`, `bytes_fetched`
 and the rest), one row per host, the quality summary and scores, the low-confidence
 pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` then
 `href`) and one row per change (`kind`, `url`, `path`, `moved_from`). Every list is

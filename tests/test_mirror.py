@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 from pathlib import Path
 
-from fakes import START, FixedClock
+from fakes import START, FixedClock, xml_response
 from rovo._convert import profiles
 from rovo._convert.model import (
     ConvertedContent,
@@ -93,6 +93,9 @@ from rovo._mirror.model import (
 from rovo._mirror.state import load_mirror, save_mirror, write_json
 from rovo._mirror.urls import assign_path
 from spec_values import spec_enum, spec_int
+from test_crawl import LASTMOD, MAPS, declaring, stored_seed, urlset
+from test_crawl import SEED as CRAWL_SEED
+from test_crawl import site as crawl_site
 
 SITE = "http://docs.example"
 # page_root of the fixture host: every page path lies under pages/<host>/ (mirror.allium,
@@ -901,6 +904,40 @@ def test_entity_fields_Mirror(tmp_path: Path) -> None:
     assert mirror.page_paths == [f"{ROOT}start.md"]
     assert mirror.is_populated
     assert not mirror.has_declared_owner
+
+
+def sitemap_named_seed(out_dir: Path, lastmod: str | None) -> LinksFound:
+    """The crawl's seed stored after a sitemap named it with `lastmod` (T13), or none named it."""
+    fetcher = crawl_site(robots=declaring(MAPS))
+    if lastmod is not None:
+        fetcher.responses[MAPS] = xml_response(MAPS, urlset((CRAWL_SEED, lastmod)))
+    _, _, found = stored_seed(out_dir, fetcher)
+    return found
+
+
+def test_entity_optional_PageCandidate_sitemap_lastmod(tmp_path: Path) -> None:
+    """Verify optional field PageCandidate.sitemap_lastmod accepts null and non-null values.
+
+    A sitemap entry's lastmod reaches the candidate from its frontier row (crawl.allium
+    ConvertFetched); a page no sitemap names has none.
+    """
+    named = sitemap_named_seed(tmp_path / "named", LASTMOD)
+    unnamed = sitemap_named_seed(tmp_path / "unnamed", None)
+    assert named.candidate.sitemap_lastmod == LASTMOD
+    assert unnamed.candidate.sitemap_lastmod is None
+
+
+def test_entity_optional_Page_sitemap_lastmod(tmp_path: Path) -> None:
+    """Verify optional field Page.sitemap_lastmod accepts null and non-null values.
+
+    The stored page keeps the candidate's lastmod and its frontmatter carries it.
+    """
+    named = sitemap_named_seed(tmp_path / "named", LASTMOD)
+    unnamed = sitemap_named_seed(tmp_path / "unnamed", None)
+    assert named.page.sitemap_lastmod == LASTMOD
+    assert frontmatter_of(named.page).sitemap_lastmod == LASTMOD
+    assert unnamed.page.sitemap_lastmod is None
+    assert frontmatter_of(unnamed.page).sitemap_lastmod is None
 
 
 def test_entity_optional_Mirror_recorded_root_url(tmp_path: Path) -> None:

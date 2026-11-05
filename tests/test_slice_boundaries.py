@@ -27,6 +27,7 @@ from rovo._convert.model import (
     ExtractionMethod,
     HeadingAnchorStyle,
     Island,
+    Profile,
     QualityFlag,
 )
 from rovo._crawl.fetch import HttpxFetcher, Validators
@@ -75,11 +76,7 @@ from rovo._mirror.model import (
 from rovo._mirror.state import ManifestError, load_mirror, manifest_path, save_mirror
 from rovo._mirror.urls import assign_path, normalise_url, pattern_matches, version_label
 from rovo._report import (
-    CrawlReport,
-    CrawlReportStatus,
     ExitCode,
-    ReportStatus,
-    close_run,
     report_path,
 )
 from rovo._unfinished import NotInThisSlice
@@ -284,11 +281,40 @@ def test_a_non_generic_profile_stops_conversion(tmp_path: Path) -> None:
 
 
 def test_owner_testing_and_dry_runs_stop(tmp_path: Path) -> None:
-    """An owner-testing request is refused by StartRun; a dry run is a later slice's."""
+    """An owner-testing request is refused by StartRun; T13 realises the dry run."""
     with pytest.raises(NotInThisSlice):
         crawl(tmp_path / "owner", {}, mode=RunMode.owner_testing)
-    with pytest.raises(NotInThisSlice):
-        crawl(tmp_path / "dry", {}, dry_run=True)
+
+
+@pytest.mark.parametrize(
+    ("responses", "profile", "rule"),
+    [
+        pytest.param(
+            {f"{SITE}/sitemap.xml": text_response(f"{SITE}/sitemap.xml", "", status=MOVED)},
+            profiles.GENERIC,
+            "FetchSitemap",
+            id="sitemap-redirect",
+        ),
+        pytest.param(
+            {f"{SITE}/llms.txt": text_response(f"{SITE}/llms.txt", "", status=MOVED)},
+            profiles.GENERIC,
+            "ReadLlmsTxt",
+            id="llms-txt-redirect",
+        ),
+        pytest.param({}, profiles.MSLEARN, "sitemap_admitted", id="sitemap-filter-placeholder"),
+    ],
+)
+def test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_placeholder_stop(
+    tmp_path: Path, responses: dict[str, SiteResponse], profile: Profile, rule: str
+) -> None:
+    """T13: a 3xx sitemap or llms.txt is the redirects slice's; {section} and {locale} unstated."""
+    mirror = new_mirror(tmp_path)
+    mirror.profile = profile
+    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE), **responses})
+    with pytest.raises(NotInThisSlice) as stopped:
+        run_crawl(request(mirror), None, fetcher, FixedClock())
+    assert stopped.value.rule == rule
+    assert SEED not in fetcher.requests
 
 
 def test_targeted_runs_stop(tmp_path: Path) -> None:
@@ -435,8 +461,7 @@ def test_convert_branches_of_later_slices_stop() -> None:
 
 
 def test_a_dry_run_report_and_a_versioned_path_stop(tmp_path: Path) -> None:
-    """CloseRun's dry-run branch, and a version label in a path, are later slices'."""
-    mirror = new_mirror(tmp_path)
+    """A version label in a path is a later slice's; T13 realises CloseRun's dry-run branch."""
     versioned = Mirror(
         out_dir=tmp_path,
         scope=scope(),
@@ -446,27 +471,6 @@ def test_a_dry_run_report_and_a_versioned_path_stop(tmp_path: Path) -> None:
     with pytest.raises(NotInThisSlice):
         assign_path(versioned, f"{SITE}/guide/page?view=graph-rest-beta")
     assert version_label(profiles.MSLEARN, f"{SITE}/guide/page?view=graph-rest-beta") == "beta"
-    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
-    result = run_crawl(request(mirror), None, fetcher, FixedClock())
-    settings = resolve_config(tmp_path)
-    report = CrawlReport(
-        mirror=mirror,
-        operator=result.run.operator,
-        run_id=1,
-        kind=RunKind.initial,
-        mode=RunMode.standard,
-        report_status=ReportStatus.finished,
-        exit_code=ExitCode.ok,
-        configuration=settings,
-        options=SyncOptions(
-            dry_run=True, confirmed=False, interactive=False, json_events=False, urls=(), paths=()
-        ),
-        tool_version="0",
-        started_at=FixedClock().now(),
-        status=CrawlReportStatus.open,
-    )
-    with pytest.raises(NotInThisSlice):
-        close_run(report, result.run, result.frontier)
 
 
 # --- The black boxes' corners --------------------------------------------------------

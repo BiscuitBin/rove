@@ -30,6 +30,7 @@ from test_crawl import (
     B_PAGE,
     C_PAGE,
     D_PAGE,
+    DISCOVERY,
     OUTSIDE_PAGE,
     ROBOTS,
     SECRET_PAGE,
@@ -270,14 +271,15 @@ def test_manifest_keeps_the_links(tmp_path: Path) -> None:
 def test_sync_follows_links_in_batches(tmp_path: Path) -> None:
     """A whole sync over the links site through FakeFetcher.
 
-    robots.txt, the seed, then its in-scope links in next_pending order, then the next
-    depth; no URL twice; the robots-disallowed and out-of-scope URLs never requested.
+    robots.txt, the sitemaps and llms.txt (T13), the seed, then its in-scope links in
+    next_pending order, then the next depth; no URL twice; the robots-disallowed and
+    out-of-scope URLs never requested.
     """
     out = tmp_path / "out"
     assert _commands.init(CRAWL_SEED, out) is ExitCode.ok
     fetcher = links_site()
     assert _commands.sync(out, fetcher=fetcher, clock=FixedClock()) is ExitCode.ok
-    assert fetcher.requests == [ROBOTS, CRAWL_SEED, B_PAGE, C_PAGE, D_PAGE]
+    assert fetcher.requests == [*DISCOVERY, CRAWL_SEED, B_PAGE, C_PAGE, D_PAGE]
     assert len(set(fetcher.requests)) == len(fetcher.requests)
     assert SECRET_PAGE not in fetcher.requests
     assert OUTSIDE_PAGE not in fetcher.requests

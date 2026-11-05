@@ -40,7 +40,6 @@ from rovo._mirror.model import (
     Tier,
 )
 from rovo._mirror.state import Clock, timestamp, write_json
-from rovo._unfinished import NotInThisSlice
 
 _SCORE_PLACES = 4
 _REPORT_FILE = "crawl-report.json"
@@ -299,8 +298,11 @@ def take_broken_links(report: CrawlReport, rewritten: LinksRewritten) -> bool:
 def close_run(report: CrawlReport, run: Run, frontier: Frontier) -> bool:
     """Realises rovo.allium CloseRun: True when it requested the finalise pass.
 
-    discovered_count is the number of the frontier's rows after discovery.
+    discovered_count is the number of the frontier's rows after discovery, which
+    DropStaleObservations recorded. A dry run's report is ready at once: False, with no
+    finalise pass requested, and RankAndWriteReport follows.
     """
+    del frontier  # Its rows after discovery are counted in run.discovered_count.
     if not report.is_open_for(run.target, run.id):
         return False
     report.report_status = (
@@ -309,13 +311,11 @@ def close_run(report: CrawlReport, run: Run, frontier: Frontier) -> bool:
     report.error = run.error
     report.unresolved_urls = run.unresolved_urls
     report.per_host = host_reports(run.hosts, run.policy)
-    report.discovered = len(frontier.entries)
+    report.discovered = run.discovered_count
     report.fetched = run.fetch_attempts
     report.bytes_fetched = run.bytes_fetched
     report.budget_stopped = run.budget_stopped
-    if report.options.dry_run:
-        raise NotInThisSlice(rule="CloseRun")
-    return True
+    return not report.options.dry_run
 
 
 def finalise_run_report(pass_: MirrorPass, run: Run | None) -> bool:
