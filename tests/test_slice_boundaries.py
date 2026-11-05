@@ -27,7 +27,6 @@ from rovo._convert.model import (
     ExtractionMethod,
     HeadingAnchorStyle,
     Island,
-    Profile,
     QualityFlag,
 )
 from rovo._crawl.fetch import HttpxFetcher, Validators
@@ -65,11 +64,13 @@ from rovo._mirror.intake import admit_candidate, take_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
     CandidateOutcome,
+    CandidateStatus,
     CrawlScope,
     LinksFound,
     Mirror,
     Operator,
     PageStatus,
+    RemovalReason,
     StoreOutcome,
     Tier,
 )
@@ -89,11 +90,9 @@ ROBOTS = f"{SITE}/robots.txt"
 SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 PAGE = (SITES / "one-page" / "guide" / "start.html").read_text(encoding="utf-8")
 FORBIDDEN = 403
-MOVED = 301
 SERVER_ERROR = 500
 TOO_MANY = 429
 SERVICE_UNAVAILABLE = 503
-NOT_FOUND = 404
 
 
 def scope(**changes: object) -> CrawlScope:
@@ -158,11 +157,8 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
 @pytest.mark.parametrize(
     "responses",
     [
-        pytest.param({ROBOTS: text_response(ROBOTS, "", status=MOVED)}, id="robots-redirect"),
-        pytest.param({SEED: html_response(SEED, "", status=NOT_FOUND)}, id="absent-page"),
         pytest.param({SEED: html_response(SEED, "", status=FORBIDDEN)}, id="blocked-page"),
         pytest.param({SEED: text_response(SEED, "plain")}, id="not-html"),
-        pytest.param({SEED: html_response(SEED, "", status=MOVED)}, id="page-redirect"),
         pytest.param(
             {SEED: html_response(SEED, PAGE.replace("</main>", '<input type="password"></main>'))},
             id="login-wall",
@@ -184,10 +180,12 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
 def test_a_later_slices_answer_stops_the_run(
     tmp_path: Path, responses: dict[str, SiteResponse]
 ) -> None:
-    """Robots, disposal, block and retry branches a later slice implements stop the run.
+    """Disposal, block and retry branches a later slice implements stop the run.
 
     A refused robots.txt and a retryable answer are no longer here: T12 realises them.
-    A page's raw redirect stays the redirects slice's (T12 implement 2, propagate tick 4).
+    T15 realises redirects and absent pages, so its re-propagation drops the
+    robots-redirect, absent-page and page-redirect cases; a non-HTML answer and a soft
+    verdict (the login wall) still stop.
     """
     with pytest.raises(NotInThisSlice):
         crawl(tmp_path, responses)
@@ -283,34 +281,19 @@ def test_owner_testing_and_dry_runs_stop(tmp_path: Path) -> None:
         crawl(tmp_path / "owner", {}, mode=RunMode.owner_testing)
 
 
-@pytest.mark.parametrize(
-    ("responses", "profile", "rule"),
-    [
-        pytest.param(
-            {f"{SITE}/sitemap.xml": text_response(f"{SITE}/sitemap.xml", "", status=MOVED)},
-            profiles.GENERIC,
-            "FetchSitemap",
-            id="sitemap-redirect",
-        ),
-        pytest.param(
-            {f"{SITE}/llms.txt": text_response(f"{SITE}/llms.txt", "", status=MOVED)},
-            profiles.GENERIC,
-            "ReadLlmsTxt",
-            id="llms-txt-redirect",
-        ),
-        pytest.param({}, profiles.MSLEARN, "sitemap_admitted", id="sitemap-filter-placeholder"),
-    ],
-)
-def test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_placeholder_stop(
-    tmp_path: Path, responses: dict[str, SiteResponse], profile: Profile, rule: str
-) -> None:
-    """T13: a 3xx sitemap or llms.txt is the redirects slice's; {section} and {locale} unstated."""
+def test_a_sitemap_filter_placeholder_stops(tmp_path: Path) -> None:
+    """T13: a profile's sitemap filter with {section} or {locale} placeholders is unstated.
+
+    Re-propagated by T15 from test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_
+    placeholder_stop: T15 follows a sitemap's and llms.txt's redirects, so only the
+    placeholder case is left, unchanged.
+    """
     mirror = new_mirror(tmp_path)
-    mirror.profile = profile
-    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE), **responses})
+    mirror.profile = profiles.MSLEARN
+    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
     with pytest.raises(NotInThisSlice) as stopped:
         run_crawl(request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == rule
+    assert stopped.value.rule == "sitemap_admitted"
     assert SEED not in fetcher.requests
 
 
@@ -396,8 +379,14 @@ def test_a_second_sync_of_a_known_page_keeps_it(tmp_path: Path) -> None:
     assert stat.S_IMODE((out_dir / START_PATH).stat().st_mode) == 0o666 & ~mask
 
 
-def test_mirror_branches_of_later_slices_stop(tmp_path: Path) -> None:
-    """A page to retire and a candidate StoreNewPage does not take (links are T10's)."""
+def test_a_duplicate_candidate_and_a_page_outside_the_scope_now_settle(tmp_path: Path) -> None:
+    """A second candidate for a page stored this run, and a page to retire (T15).
+
+    Re-propagated by T15 from test_mirror_branches_of_later_slices_stop, which expected
+    both to stop: the same candidate delivered twice in one run is now a duplicate
+    (RejectDuplicateCandidate), answering no page, and a written page whose source URL
+    left the scope is retired out_of_scope by the next finalisation.
+    """
     mirror = new_mirror(tmp_path)
     linked = extract(
         PAGE.replace("</main>", '<p><a href="/guide/b.html">B</a></p></main>'),
@@ -422,18 +411,24 @@ def test_mirror_branches_of_later_slices_stop(tmp_path: Path) -> None:
     page = take_candidate(admit_candidate(delivered), FixedClock())
     assert page is not None
     # T10 realises ResolveMirrorLinks: a page with links no longer stops the pass.
-    with pytest.raises(NotInThisSlice):
-        take_candidate(admit_candidate(delivered), FixedClock())
+    again = admit_candidate(delivered)
+    assert take_candidate(again, FixedClock()) is None
+    assert again.status is CandidateStatus.duplicate
+    assert mirror.pages == [page]
     page.source_url = f"{SITE}/elsewhere/page.html"
-    with pytest.raises(NotInThisSlice):
-        finalise(Operator(), mirror, 2, FixedClock())
+    finalisation = finalise(Operator(), mirror, 2, FixedClock())
+    assert [(removal.page, removal.reason) for removal in finalisation.removed] == [
+        (page, RemovalReason.out_of_scope)
+    ]
+    assert page.status is PageStatus.removed
 
 
-def test_a_canonical_merging_a_known_page_into_another_stops(tmp_path: Path) -> None:
-    """RewriteKnownPage's merge branch (previous != target) is the lifecycle slice's (T15).
+def test_a_canonical_merging_a_known_page_into_another_settles(tmp_path: Path) -> None:
+    """RewriteKnownPage's merge branch (previous != target), realised by T15.
 
-    The seed's new canonical names another written page: the candidate stops at
-    NotInThisSlice("RewriteKnownPage") before anything changes.
+    Re-propagated by T15 from test_a_canonical_merging_a_known_page_into_another_stops,
+    which expected NotInThisSlice("RewriteKnownPage"): the seed's new canonical names
+    another written page, so that page is rewritten and the seed is removed, merged.
     """
     mirror = new_mirror(tmp_path)
     other = f"{SITE}/guide/other.html"
@@ -473,12 +468,11 @@ def test_a_canonical_merging_a_known_page_into_another_stops(tmp_path: Path) -> 
             content=page_content(canonical),
         )
     )
-    with pytest.raises(NotInThisSlice) as stopped:
-        take_candidate(merging, FixedClock())
-    assert stopped.value.rule == "RewriteKnownPage"
-    assert [page.previous_digest for page in stored] == [None, None]
-    assert [page.status for page in stored] == [PageStatus.written, PageStatus.written]
-    assert [page.last_stored_run for page in stored] == [1, 1]
+    assert take_candidate(merging, FixedClock()) is stored[1]
+    assert [page.status for page in stored] == [PageStatus.removed, PageStatus.written]
+    assert stored[0].removal_reason is RemovalReason.merged
+    assert [page.last_stored_run for page in stored] == [1, 2]
+    assert mirror.known_page(SEED) is stored[1]
 
 
 def test_a_known_pages_non_html_answer_stops(tmp_path: Path) -> None:

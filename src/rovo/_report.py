@@ -35,6 +35,7 @@ from rovo._mirror.model import (
     MirrorPass,
     Operator,
     PageFinalised,
+    PageRemoved,
     PassKind,
     StoreOutcome,
     Tier,
@@ -263,6 +264,21 @@ def tally_finalised_page(report: CrawlReport, finalised: PageFinalised) -> bool:
                 moved_from=finalised.previous_path,
             )
         )
+    return True
+
+
+def tally_removal(report: CrawlReport, removed: PageRemoved) -> bool:
+    """Realises rovo.allium TallyRemoval: a removed change; False when its guards fail.
+
+    The open report of the removal's mirror gains one removed change: the page's identity
+    and the path a removed page keeps.
+    """
+    if report.mirror is not removed.mirror or report.status is not CrawlReportStatus.open:
+        return False
+    page = removed.page
+    report.changes.append(
+        Change(kind=ChangeKind.removed, url=page.identity, path=page.path, moved_from=None)
+    )
     return True
 
 

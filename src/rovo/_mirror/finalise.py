@@ -7,6 +7,7 @@ No wall-clock time reaches a page file: fetch times live in the manifest.
 """
 
 import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, fields
@@ -16,9 +17,11 @@ from rovo._convert.fidelity import prose_lines
 from rovo._convert.model import CONFIG as CONVERT
 from rovo._convert.model import QualityFlag
 from rovo._mirror.indexes import build_indexes
+from rovo._mirror.intake import retire_page
 from rovo._mirror.links import finish_link_pass, resolve_mirror_links, rewrite_destinations
 from rovo._mirror.model import (
     CONFIG,
+    FileEffectKind,
     Frontmatter,
     IndexBuildDue,
     IndexesWritten,
@@ -28,14 +31,17 @@ from rovo._mirror.model import (
     Operator,
     Page,
     PageFinalised,
+    PageRemoved,
     PassKind,
     PassStatus,
+    RemovalReason,
     StoreOutcome,
 )
 from rovo._mirror.state import Clock, write_text
 from rovo._mirror.urls import digest
-from rovo._unfinished import NotInThisSlice
 
+PAGES_DIRECTORY = "pages"
+REMOVED_DIRECTORY = "_removed"
 _SCORE_PLACES = 4
 _MIN_KEYWORD_LETTERS = 3
 _KEYWORD = re.compile(r"[^\W\d_]+")
@@ -159,6 +165,8 @@ class Finalisation:
     rewritten: LinksRewritten | None
     # BuildIndexes' IndexesWritten; FinishLinkPass's IndexBuildDue always reaches it.
     indexes: IndexesWritten | None = None
+    # RetireOutOfScopePages' PageRemoved events, in the order the pages were retired.
+    removed: tuple[PageRemoved, ...] = ()
 
 
 def request_pass(
@@ -174,6 +182,80 @@ def request_pass(
         broken_links=[],
         status=PassStatus.pending,
     )
+
+
+def retire_out_of_scope_pages(pass_: MirrorPass, clock: Clock) -> list[PageRemoved] | None:
+    """Realises mirror.allium RetireOutOfScopePages: the pages retired; None when it fails.
+
+    A written page whose source URL the scope no longer admits is retired out_of_scope,
+    unless the run the pass follows stored it; a pass with no run retires every such page.
+    """
+    if pass_.status is not PassStatus.pending or pass_.kind is not PassKind.finalise:
+        return None
+    mirror = pass_.mirror
+    retired = [
+        retire_page(page, RemovalReason.out_of_scope, clock)
+        for page in mirror.written_pages
+        if not mirror.scope.within_bounds(page.source_url)
+        and (pass_.run_id is None or page.last_stored_run != pass_.run_id)
+    ]
+    return [removed for removed in retired if removed is not None]
+
+
+def apply_file_effects(mirror: Mirror) -> None:
+    """Apply the file events recorded since the last pass, in order, then forget them.
+
+    Each is idempotent: a missing source is a no-op and an existing destination is
+    replaced. An archive takes pages/<host>/<p> to _removed/<host>/<p>; a deletion and an
+    archived copy's deletion remove one file. An archive or a deletion of a page moved
+    this run takes the file from the path it was last published at (`source`). A move's
+    old file is deleted by `delete_moved_files` once PublishPage has written the new one.
+    """
+    root = mirror.out_dir
+    for effect in mirror.file_effects:
+        source = root / (effect.source or effect.path)
+        if effect.kind is FileEffectKind.archived and source.is_file():
+            target = root / archived_path(effect.path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(target)
+        elif effect.kind is FileEffectKind.deleted:
+            source.unlink(missing_ok=True)
+        elif effect.kind is FileEffectKind.archived_copy_deleted:
+            (root / archived_path(effect.path)).unlink(missing_ok=True)
+
+
+def delete_moved_files(mirror: Mirror) -> None:
+    """Delete each moved page's old file, unless a written page's file is that file now.
+
+    Held paths compare ignoring case, as assign_path does; a held path that differs only
+    in case is the same file on a case-insensitive file system, which keeps the old
+    spelling when written over, so that file is renamed to the held spelling rather than
+    deleted. Then every directory left empty under pages/ and _removed/ goes, the roots
+    included.
+    """
+    held = {path.casefold(): path for path in mirror.page_paths}
+    for effect in mirror.file_effects:
+        held_path = held.get(effect.path.casefold())
+        if effect.kind is not FileEffectKind.moved or held_path == effect.path:
+            continue
+        old = mirror.out_dir / effect.path
+        if held_path is not None and _same_file(old, mirror.out_dir / held_path):
+            old.rename(mirror.out_dir / held_path)
+        else:
+            old.unlink(missing_ok=True)
+    mirror.file_effects.clear()
+    for namespace in (PAGES_DIRECTORY, REMOVED_DIRECTORY):
+        _remove_empty_directories(mirror.out_dir / namespace)
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    """Both paths exist and name one file."""
+    return first.exists() and second.exists() and first.samefile(second)
+
+
+def archived_path(path: str) -> str:
+    """The archived copy of a page path: pages/<host>/<p> is kept at _removed/<host>/<p>."""
+    return f"{REMOVED_DIRECTORY}/{path.removeprefix(PAGES_DIRECTORY + '/')}"
 
 
 def finalise_page_body(pass_: MirrorPass, page: Page) -> None:
@@ -232,25 +314,26 @@ def publish_page(pass_: MirrorPass, page: Page, clock: Clock) -> PageFinalised:
 def finalise(operator: Operator, mirror: Mirror, run_id: int, clock: Clock) -> Finalisation:
     """Run one finalise pass, RequestPass to IndexesWritten.
 
-    RetireOutOfScopePages retires nothing in this slice: a page it would retire stops the
-    pass. ResolveMirrorLinks resolves every written page's links; then every body is
-    finalised and published in path order, FinishLinkPass reads the files back, and
-    BuildIndexes writes the index files and completes the pass.
+    RetireOutOfScopePages retires the pages the scope no longer admits; the file events
+    recorded since the last pass are applied; ResolveMirrorLinks resolves every written
+    page's links; then every body is finalised and published in path order, the moved
+    pages' old files are deleted, FinishLinkPass reads the files back, and BuildIndexes
+    writes the index files and completes the pass.
     """
     pass_ = request_pass(operator, mirror, PassKind.finalise, run_id)
+    removed = tuple(retire_out_of_scope_pages(pass_, clock) or ())
+    apply_file_effects(mirror)
     pages = sorted(mirror.written_pages, key=lambda page: page.path)
-    if any(
-        not mirror.scope.within_bounds(page.source_url) and page.last_stored_run != run_id
-        for page in pages
-    ):
-        raise NotInThisSlice(rule="RetireOutOfScopePages")
     resolve_mirror_links(pass_)
     for page in pages:
         finalise_page_body(pass_, page)
     finalised = tuple(publish_page(pass_, page, clock) for page in pages)
+    delete_moved_files(mirror)
     rewritten = finish_link_pass(pass_)
     indexes = None if rewritten is None else build_indexes(IndexBuildDue(pass_=pass_))
-    return Finalisation(pass_=pass_, finalised=finalised, rewritten=rewritten, indexes=indexes)
+    return Finalisation(
+        pass_=pass_, finalised=finalised, rewritten=rewritten, indexes=indexes, removed=removed
+    )
 
 
 def frontmatter_of(page: Page) -> Frontmatter:
@@ -323,6 +406,19 @@ def page_file_current(page: Page) -> bool:
     """The page file exists and its text equals page_file_text(page)."""
     path = page_file(page)
     return path.is_file() and path.read_text(encoding="utf-8") == page_file_text(page)
+
+
+def _remove_empty_directories(directory: Path) -> None:
+    """Remove every empty directory under `directory`, then `directory` itself when empty."""
+    if directory.is_symlink() or not directory.is_dir():
+        return
+    for current, directories, _ in os.walk(directory, topdown=False):
+        for name in directories:
+            below = Path(current) / name
+            if not below.is_symlink() and not any(below.iterdir()):
+                below.rmdir()
+    if not any(directory.iterdir()):
+        directory.rmdir()
 
 
 def _yaml_value(value: object) -> str:

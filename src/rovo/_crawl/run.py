@@ -5,12 +5,13 @@ the rule's guards do not hold. Rules chain only where their docstrings say: Disc
 opens hosts and reads their sitemaps and llms.txt, OpenHost reads robots.txt, FetchEntry
 makes its first attempt. `run_crawl`
 drives the rest in the specification's order, one frontier row after another, and
-stops with NotInThisSlice where a later slice's branch would be taken. Every request
-waits its turn at its host name's limiter (rovo._crawl.pace) on the run's timer.
+stops with NotInThisSlice where a later slice's branch would be taken. Every request,
+each redirect hop included, waits its turn at its host name's limiter (rovo._crawl.pace)
+on the run's timer.
 """
 
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import MAX_EMAX, Decimal, InvalidOperation
@@ -52,6 +53,7 @@ from rovo._crawl.model import (
     HostBackedOff,
     LadderWalk,
     ObservedUrl,
+    RedirectStop,
     RenderMode,
     RenderReason,
     RobotsMode,
@@ -68,17 +70,27 @@ from rovo._crawl.model import (
     UrlFailed,
     WalkStatus,
 )
-from rovo._crawl.pace import Timer, back_off, fetch_resource, past_cap, pause_for_cap, wait_turn
+from rovo._crawl.pace import (
+    STOP_ERRORS,
+    Timer,
+    back_off,
+    fetch_resource,
+    follow,
+    past_cap,
+    pause_for_cap,
+)
 from rovo._mirror.intake import admit_candidate, links_found, settle_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
     CandidateDiscarded,
+    CandidateDuplicate,
     CandidateOutcome,
     CrawlScope,
     LinksFound,
     Mirror,
     Page,
     PageCandidate,
+    PageRemoved,
     Tier,
 )
 from rovo._mirror.state import Clock, read_json, state_path, timestamp, write_json
@@ -90,7 +102,6 @@ _FRONTIER = "frontier.json"
 _SITEMAPS = "sitemaps.json"
 _RUNS = "runs.json"
 _ACCESS_DENIED = frozenset({401, 403})
-_REDIRECTS = range(300, 400)
 _CRAWL_DELAY = "crawl-delay"
 _SECONDS_PER_DAY = 86400
 _MICROSECONDS = 6
@@ -136,6 +147,8 @@ class CrawlResult:
     failed: tuple[UrlFailed, ...] = ()
     discovery_failed: tuple[DiscoveryFailed, ...] = ()
     backed_off: tuple[HostBackedOff, ...] = ()
+    # The intake's PageRemoved events (RemoveAbsentPage, RemoveRedirectedOutPage, a merge).
+    removed: tuple[PageRemoved, ...] = ()
 
 
 # --- Starting a run -------------------------------------------------------------------
@@ -266,7 +279,11 @@ def discover(run: Run, frontier: Frontier, fetcher: Fetcher) -> bool:
 
 
 def open_host(run: Run, name: str, origin: str, fetcher: Fetcher) -> Host | None:
-    """Realises crawl.allium OpenHost, then its RobotsRequested."""
+    """Realises crawl.allium OpenHost, then its RobotsRequested.
+
+    A robots.txt hop that reached the name before it opened leaves its last start, from
+    which the host's first request is spaced.
+    """
     if run.status is not RunStatus.running or run.host(name) is not None:
         return None
     host = Host(
@@ -285,6 +302,8 @@ def open_host(run: Run, name: str, origin: str, fetcher: Fetcher) -> Host | None
         sitemap_children_read=0,
         sitemap_entries_admitted=0,
     )
+    pending = run.pending_limiters.pop(name, None)
+    host.last_started = None if pending is None else pending.last_started
     host.breaker = Breaker(
         host=host,
         tier=run.usable_tiers[0],
@@ -304,10 +323,12 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
 
     The request goes through `fetch_resource`, under the host's limiter, with a page's
     retries; the answer ends in exactly one of AdoptRobotsRules, DenyAllWhenRobotsRefused,
-    DenyAllWhenRobotsUnreachable or AllowAllWhenRobotsAbsent. A 3xx answer (redirect
-    following) is a later slice's branch, and so is retiring the host (retires_host: a
+    DenyAllWhenRobotsUnreachable or AllowAllWhenRobotsAbsent. Redirects within the
+    allowed hosts are followed with no robots.txt read for a hop; one not followed comes
+    back as an error, which disallows the origin. Retiring the host (retires_host: a
     Retry-After past the cap, which ends fetch_resource's tries) or on an honoured
-    Crawl-delay past it (RetireHostOnLongCrawlDelay), which stops once the rules are adopted.
+    Crawl-delay past it (RetireHostOnLongCrawlDelay), which stops once the rules are
+    adopted, is a later slice's branch.
     """
     host = run.host(name)
     if run.status is not RunStatus.running or host is None:
@@ -318,8 +339,6 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
     run.bytes_fetched += response.size
     if past_cap(response, run.policy):
         raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
-    if response.status in _REDIRECTS:
-        raise NotInThisSlice(rule="FetchRobots")
     adopted = adopt_robots_rules(run, host, response, origin=origin)
     if adopted is not None:
         if retires_host_on_long_crawl_delay(run, adopted):
@@ -727,8 +746,9 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
     A snapshot the frontier holds for the URL sends its validators and is stamped with
     the run (last_requested_run), whatever the answer. A Retry-After
     past the cap retires the host of a declared sitemap (the breaker slice's trip) and
-    pauses it for retry_after_cap after a speculative probe, whose answer then stands. A
-    3xx answer other than a 304 (redirect following) is a later slice's branch.
+    pauses it for retry_after_cap after a speculative probe, whose answer then stands.
+    Redirects within the allowed hosts are followed, each hop's origin's robots.txt read
+    first; one not followed comes back as an error.
     """
     host = run.host(name)
     if host is None or not _sitemap_wanted(run, name, url):
@@ -744,7 +764,7 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
         if snapshot is None
         else Validators(etag=snapshot.etag, last_modified=snapshot.last_modified)
     )
-    response = fetch_resource(url, run, host, fetcher, validators)
+    response = fetch_resource(url, run, host, fetcher, validators, ready=_hop_host(run, fetcher))
     run.bytes_fetched += response.size
     if snapshot is not None:
         snapshot.last_requested_run = run.id
@@ -752,8 +772,6 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
         if declared:
             raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
         pause_for_cap(host)
-    if response.status in _REDIRECTS and not response.not_modified:
-        raise NotInThisSlice(rule="FetchSitemap")
     return response
 
 
@@ -925,7 +943,8 @@ def read_llms_txt(
 
     Never conditional, and silent when absent or unreachable; a Retry-After past the cap
     pauses the host for retry_after_cap and the probe ends unavailable. A target with no
-    identity is skipped. A 3xx answer is a later slice's branch.
+    identity is skipped, and a target is resolved against llms_txt_url, the URL requested.
+    Redirects are followed as a sitemap's are.
     """
     host = run.host(name)
     if run.status is not RunStatus.running or host is None:
@@ -933,12 +952,10 @@ def read_llms_txt(
     url = sitemaps.llms_txt_url(host.origin)
     if not robots_allows(run, url):
         return None
-    response = fetch_resource(url, run, host, fetcher)
+    response = fetch_resource(url, run, host, fetcher, ready=_hop_host(run, fetcher))
     run.bytes_fetched += response.size
     if past_cap(response, run.policy):
         pause_for_cap(host)
-    if response.status in _REDIRECTS:
-        raise NotInThisSlice(rule="ReadLlmsTxt")
     if not response.ok:
         return response
     scope = run.target.scope
@@ -1217,15 +1234,25 @@ def fetch_entry(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> LadderWalk 
 
 
 def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> FetchAttempt | None:
-    """Realises crawl.allium AttemptTier (the http tier, one try)."""
+    """Realises crawl.allium AttemptTier (the http tier, one try).
+
+    fetch_or_render follows in-scope redirects (`pace.follow`): a hop's origin's
+    robots.txt is read first when the run has not, and a hop it disallows is not made.
+    """
     run = walk.host.run
     if walk.status is not WalkStatus.walking or run.status is not RunStatus.running:
         return None
     if tier is not Tier.http:
         raise NotInThisSlice(rule="AttemptTier")
     host = walk.host
-    wait_turn(host)
-    response = fetcher.fetch(walk.entry.identity, validators=_validators(walk))
+    response = follow(
+        walk.entry.identity,
+        host,
+        fetcher,
+        _validators(walk),
+        admits=run.target.scope.within_bounds,
+        ready=_hop_host(run, fetcher),
+    )
     if try_ > 1 or tier is not walk.tiers[0]:
         run.fetch_attempts += 1
     run.bytes_fetched += response.size
@@ -1340,12 +1367,13 @@ def feed_breaker(walk: LadderWalk) -> bool:
 def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     """Realises crawl.allium DisposeFetch, in its branch order: what the settled fetch is.
 
-    The EntryFailed for a walk that failed outright (its error) or for an answer that is
-    not ok (its status text); the unchanged CandidateDelivered for a 304 on a known page
-    (the known raw digest) or for an ok answer whose raw document is unchanged (counted
-    as fetched), the row settled unchanged; True when any other ok, unblocked HTML
-    answer with no redirect counts as fetched and raises PageFetched; False when the
-    guards do not hold. Every other branch is a later slice's.
+    The EntryFailed for a walk that failed outright (its error), for an unfollowed
+    redirect (its stop's text) or for an answer that is not ok (its status text); a
+    CandidateDelivered, its row settled, for a 304 on a known page or an unchanged raw
+    document (unchanged), a 404 or 410 (absent, no validators) or a known page redirected
+    out of scope (redirected_out, done, the target carried); True when any other ok,
+    unblocked HTML answer counts as fetched and raises PageFetched; False when the guards
+    do not hold. A block verdict, a soft verdict and a non-HTML answer are later slices'.
     """
     attempt = walk.standing
     entry = walk.entry
@@ -1361,23 +1389,16 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     if attempt.failed_outright:
         error = response.error or "no response"
         return EntryFailed(run=run, entry=entry, error=error, attempts=attempt.try_)
-    if response.not_modified and known is not None:
-        return _unchanged(walk, attempt, known.raw_digest)
-    # The branches between not_modified and not response.ok, in their order.
-    earlier_branch = (
-        response.absent
-        or attempt.verdict.counts_against_host
-        or (response.redirected_out and known is not None)
-        or response.unfollowed_redirect
-    )
-    # fetch_or_render follows a redirect or returns it as redirect_location, so no raw
-    # 3xx but a 304 reaches the not-ok branch; following redirects is a later slice's.
-    if not earlier_branch and response.status in _REDIRECTS and not response.not_modified:
-        raise NotInThisSlice(rule="DisposeFetch")
-    if not earlier_branch and not response.ok:
-        return EntryFailed(
-            run=run, entry=entry, error=status_text(response), attempts=attempt.try_
+    settled = _settled_answer(walk, attempt, known)
+    if settled is not None:
+        return settled
+    if response.unfollowed_redirect or not response.ok:
+        error = (
+            STOP_ERRORS[response.redirect_stop or RedirectStop.out_of_scope]
+            if response.unfollowed_redirect
+            else status_text(response)
         )
+        return EntryFailed(run=run, entry=entry, error=error, attempts=attempt.try_)
     raw_unchanged = (
         known is not None
         and known.raw_digest == response.raw_digest
@@ -1387,18 +1408,56 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     unchanged = (
         raw_unchanged and entry.identity not in run.forced_refetch and run.mode is RunMode.standard
     )
-    # A soft verdict, a followed redirect and a non-HTML answer are later slices' too.
-    if (
-        earlier_branch
-        or attempt.verdict.kind is not BlockKind.none
-        or response.redirect_hops
-        or not (unchanged or response.is_html)
-    ):
+    # A soft verdict and a non-HTML answer (skipped_not_html) are later slices'.
+    if attempt.verdict.kind is not BlockKind.none or not (unchanged or response.is_html):
         raise NotInThisSlice(rule="DisposeFetch")
     walk.host.fetched += 1
     if unchanged:
         return _unchanged(walk, attempt, response.raw_digest)
     return True
+
+
+def _settled_answer(
+    walk: LadderWalk, attempt: FetchAttempt, known: Page | None
+) -> CandidateDelivered | None:
+    """DisposeFetch's branches that settle the row: not modified, absent, redirected out.
+
+    A hard or challenge verdict, whose branch sits between absent and redirected out, is
+    never given in this slice: classify_block stops the run instead (T18).
+    """
+    response = attempt.response
+    if response.not_modified and known is not None:
+        return _unchanged(walk, attempt, known.raw_digest)
+    if response.absent:
+        walk.entry.status = FrontierStatus.absent
+        return _delivered(walk, attempt, CandidateOutcome.absent)
+    if response.redirected_out and known is not None:
+        walk.entry.status = FrontierStatus.done
+        return _delivered(walk, attempt, CandidateOutcome.redirected_out)
+    return None
+
+
+def _delivered(
+    walk: LadderWalk, attempt: FetchAttempt, outcome: CandidateOutcome
+) -> CandidateDelivered:
+    """DisposeFetch's absent and redirected_out candidates: no content, no validators."""
+    response = attempt.response
+    run = walk.host.run
+    return CandidateDelivered(
+        run_id=run.id,
+        mirror=run.target,
+        requested_identity=walk.entry.identity,
+        source_url=response.source_url,
+        redirect_hops=response.redirect_hops,
+        redirect_target=(
+            response.redirect_location if outcome is CandidateOutcome.redirected_out else None
+        ),
+        depth=walk.entry.depth,
+        outcome=outcome,
+        tier=attempt.tier,
+        sitemap_lastmod=walk.entry.sitemap_lastmod,
+        raw_digest=response.raw_digest,
+    )
 
 
 def _unchanged(walk: LadderWalk, attempt: FetchAttempt, raw_digest: str) -> CandidateDelivered:
@@ -1472,6 +1531,15 @@ def settle_stored_entry(frontier: Frontier, candidate: PageCandidate) -> bool:
     if entry is None or entry.status is not FrontierStatus.in_progress:
         return False
     entry.status = FrontierStatus.done
+    return True
+
+
+def settle_duplicate_entry(frontier: Frontier, duplicate: CandidateDuplicate) -> bool:
+    """Realises crawl.allium SettleDuplicateEntry; False when its guard does not hold."""
+    entry = frontier.entry(duplicate.candidate.requested_identity)
+    if entry is None or entry.status is not FrontierStatus.in_progress:
+        return False
+    entry.status = FrontierStatus.duplicate
     return True
 
 
@@ -1608,6 +1676,7 @@ def drive_run(
         create_frontier(run, persisted) if persisted is None else attach_frontier(run, persisted)
     )
     prepare_run(run, frontier)
+    removals = len(run.target.removals)
     failed: list[UrlFailed] = []
     discover(run, frontier, fetcher)
     drop_stale_observations(run, frontier)
@@ -1627,6 +1696,7 @@ def drive_run(
         failed=tuple(failed),
         discovery_failed=tuple(run.discovery_failures),
         backed_off=tuple(run.backoffs),
+        removed=tuple(run.target.removals[removals:]),
     )
 
 
@@ -1656,8 +1726,9 @@ def _handle_entry(
     if isinstance(disposed, EntryFailed):
         return entry_fails(disposed)
     if isinstance(disposed, CandidateDelivered):
-        # An unchanged row is settled already: the mirror records it (RecordUnchanged),
-        # which raises no LinksFound; its stored links are queued again instead.
+        # An unchanged, absent or redirected-out row is settled already. An unchanged
+        # page raises no LinksFound (RecordUnchanged); its stored links are queued again.
+        # A removal reaches CrawlResult.removed through the mirror's removals.
         candidate = admit_candidate(disposed)
         settled = settle_candidate(candidate, clock)
         if isinstance(settled, Page):
@@ -1694,6 +1765,9 @@ def _store(run: Run, frontier: Frontier, walk: LadderWalk, clock: Clock) -> UrlF
         return None
     candidate = admit_candidate(delivered)
     settled = settle_candidate(candidate, clock)
+    if isinstance(settled, CandidateDuplicate):
+        settle_duplicate_entry(frontier, settled)
+        return None
     if isinstance(settled, Page):
         enqueue_page_links(run, frontier, links_found(candidate, settled))
     if not isinstance(settled, CandidateDiscarded):
@@ -1889,6 +1963,25 @@ def _pend(frontier: Frontier, identity: str, priority: int, lastmod: str | None)
     )
     frontier.entries.append(row)
     return row
+
+
+def _hop_host(run: Run, fetcher: Fetcher) -> Callable[[str], Host | None]:
+    """A redirect hop's readiness: its host name, opened and its origin's robots.txt read.
+
+    The hop's host is opened (OpenHost reads its robots.txt) or, on a known host, its
+    origin's robots.txt is read when the run has not; None when robots.txt disallows it.
+    """
+
+    def ready(target: str) -> Host | None:
+        name, origin = hostname_of(target), origin_of(target)
+        host = run.host(name)
+        if host is None:
+            host = open_host(run, name, origin, fetcher)
+        elif run.robots_policy(origin) is None:
+            fetch_robots(run, name, origin, fetcher)
+        return host if host is not None and robots_allows(run, target) else None
+
+    return ready
 
 
 def _host_origin(scope: CrawlScope, name: str) -> str:

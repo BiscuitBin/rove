@@ -1,7 +1,8 @@
 """The Fetcher seam: one method, one request per call (crawl.allium fetch_or_render, http).
 
-`HttpxFetcher` follows no redirect: a 3xx answer comes back as it is, and the crawl
-decides what it means. A transport error is an answer with status 0 and the error set.
+`HttpxFetcher` follows no redirect: a 3xx answer comes back as it is, its raw Location
+header in `location`, and the crawl's follower (rovo._crawl.pace.follow) decides what it
+means. A transport error is an answer with status 0 and the error set.
 """
 
 import importlib.metadata
@@ -77,6 +78,7 @@ class HttpxFetcher:
             retry_after=self._retry_after(response.headers),
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
+            location=response.headers.get("location"),
         )
 
     def _retry_after(self, headers: httpx.Headers) -> timedelta | None:

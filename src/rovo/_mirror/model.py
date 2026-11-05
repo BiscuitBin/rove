@@ -112,6 +112,15 @@ class PassStatus(enum.Enum):
     completed = "completed"
 
 
+class FileEffectKind(enum.Enum):
+    """The file events of the lifecycle rules (mirror.allium RetirePage, MovePage, revival)."""
+
+    archived = "archived"  # PageFileArchived: pages/<p> to _removed/<p>
+    deleted = "deleted"  # PageFileDeleted: pages/<p> deleted (prune)
+    moved = "moved"  # PageFileMoved: pages/<p> deleted once the new path is published
+    archived_copy_deleted = "archived_copy_deleted"  # ArchivedCopyDeleted: _removed/<p>
+
+
 @dataclass(frozen=True)
 class Operator:
     """The person or script running a command; it has no state."""
@@ -141,6 +150,21 @@ CONFIG = MirrorConfig(
     prune=False,
 )
 _WEB_SCHEMES = frozenset({"http", "https"})
+
+
+@dataclass(frozen=True, kw_only=True)
+class FileEffect:
+    """One file event a lifecycle rule raised at intake; the finalise pass applies it.
+
+    `path` is the page path the event names (for a move, the old one). `source` is, for
+    a move, the new path; for an archive or a deletion, the file that holds the page now
+    when that is not `path`: a page moved this run and not yet published is still at the
+    path it was last published at.
+    """
+
+    kind: FileEffectKind
+    path: str
+    source: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -298,6 +322,10 @@ class Mirror:
     aliases: list["Alias"] = field(default_factory=list)
     links: list["Link"] = field(default_factory=list)
     index: "Index | None" = None
+    # In memory only, never in the manifest: the file events recorded since the last
+    # finalise pass applied them, and every PageRemoved RetirePage raised on this object.
+    file_effects: list[FileEffect] = field(default_factory=list)
+    removals: list["PageRemoved"] = field(default_factory=list)
 
     @property
     def written_pages(self) -> list["Page"]:
@@ -331,6 +359,18 @@ class Mirror:
     def alias(self, url: str) -> "Alias | None":
         """Alias{mirror: this, url: url}."""
         return next((alias for alias in self.aliases if alias.url == url), None)
+
+    def record_file_effect(self, effect: FileEffect) -> None:
+        """Record a file event for the next finalise pass, composed per page path.
+
+        An archive of a path whose archived copy is pending deletion cancels that deletion
+        and is not recorded: the archive still holds the last published bytes.
+        """
+        cancelled = FileEffect(kind=FileEffectKind.archived_copy_deleted, path=effect.path)
+        if effect.kind is FileEffectKind.archived and cancelled in self.file_effects:
+            self.file_effects.remove(cancelled)
+            return
+        self.file_effects.append(effect)
 
     def known_page(self, url: str) -> "Page | None":
         """The written page whose identity is the URL, else an alias's written target."""
@@ -517,6 +557,24 @@ class CandidateDiscarded:
 
     candidate: PageCandidate
     reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class CandidateDuplicate:
+    """The trigger RejectDuplicateCandidate raises (mirror.allium CandidateDuplicate)."""
+
+    candidate: PageCandidate
+    page: Page
+
+
+@dataclass(frozen=True, kw_only=True)
+class PageRemoved:
+    """The trigger RetirePage raises (mirror.allium PageRemoved); candidate when one asked."""
+
+    mirror: Mirror
+    page: Page
+    reason: RemovalReason
+    candidate: PageCandidate | None = None
 
 
 @dataclass(kw_only=True, eq=False)

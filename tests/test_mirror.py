@@ -10,9 +10,12 @@ import dataclasses
 import hashlib
 import json
 import re
-from collections.abc import Iterable
+import sys
+from collections.abc import Callable, Iterable
 from datetime import timedelta
 from pathlib import Path
+
+import pytest
 
 from fakes import START, FixedClock, xml_response
 from rovo._convert import profiles
@@ -27,6 +30,7 @@ from rovo._convert.model import (
 )
 from rovo._mirror import model
 from rovo._mirror.finalise import (
+    Finalisation,
     finalise,
     finalise_page_body,
     frontmatter_of,
@@ -35,6 +39,7 @@ from rovo._mirror.finalise import (
     page_file_text,
     publish_page,
     request_pass,
+    retire_out_of_scope_pages,
 )
 from rovo._mirror.indexes import (
     build_indexes,
@@ -45,13 +50,23 @@ from rovo._mirror.indexes import (
     rebuild_indexes,
 )
 from rovo._mirror.intake import (
+    accept_absent_without_page,
+    accept_redirected_out_without_page,
     admit_candidate,
     discard_unchanged_without_page,
     drop_alias_of_own_identity,
+    move_page,
     record_alias,
     record_unchanged,
     refresh_page,
+    refuse_unplaceable_candidate,
+    reject_duplicate_candidate,
+    remove_absent_page,
+    remove_redirected_out_page,
+    retire_page,
+    revive_removed_page,
     rewrite_known_page,
+    settle_candidate,
     store_new_page,
     take_candidate,
 )
@@ -69,6 +84,8 @@ from rovo._mirror.model import (
     BrokenLink,
     BrokenLinkReason,
     CandidateDelivered,
+    CandidateDiscarded,
+    CandidateDuplicate,
     CandidateOutcome,
     CandidateStatus,
     CrawlScope,
@@ -86,6 +103,7 @@ from rovo._mirror.model import (
     Operator,
     Page,
     PageCandidate,
+    PageRemoved,
     PageStatus,
     PassKind,
     PassStatus,
@@ -94,8 +112,8 @@ from rovo._mirror.model import (
     Tier,
 )
 from rovo._mirror.state import load_mirror, save_mirror, write_json
-from rovo._mirror.urls import assign_path
-from spec_values import spec_enum, spec_int
+from rovo._mirror.urls import assign_path, digest
+from spec_values import spec_bool, spec_enum, spec_int
 from test_crawl import LASTMOD, MAPS, declaring, stored_seed, urlset
 from test_crawl import SEED as CRAWL_SEED
 from test_crawl import site as crawl_site
@@ -2663,3 +2681,1371 @@ def test_entity_optional_PageCandidate_last_modified(tmp_path: Path) -> None:
     assert dated.last_modified == NEW_LAST_MODIFIED
     assert record_unchanged(dated, FixedClock(LATER)) is page
     assert page.last_modified == NEW_LAST_MODIFIED
+
+
+# --- The page lifecycle (T15) ---------------------------------------------------------
+#
+# Removal, archive, moves, revival and duplicates (mirror.allium RejectDuplicateCandidate
+# to RetireOutOfScopePages at a0814ab). A removed page's file is archived at
+# _removed/<host>/<relative path>, mirroring pages/ (RetirePage), and no file moves at
+# intake: the finalise pass applies every file effect before it publishes
+# (tickets/T15-lifecycle.md Facts, Open points items 1 and 2).
+
+THIRD_RUN = 3
+LATEST = START + timedelta(days=1)
+AWAY = "http://elsewhere.example/away.html"
+B_URL = f"{SITE}/guide/b.html"
+KEEP = f"{SITE}/guide/keep/a.html"
+DROP = f"{SITE}/guide/drop/b.html"
+FRESH = f"{SITE}/guide/drop/c.html"
+LIFECYCLE_HOLDERS = (
+    f"{SITE}/guide/holder-one.html",
+    f"{SITE}/guide/holder-two.html",
+    f"{SITE}/guide/holder-three.html",
+)
+
+
+def archived(path: str) -> str:
+    """The archived copy of a page path: pages/<host>/<p> is kept at _removed/<host>/<p>."""
+    return "_removed/" + path.removeprefix("pages/")
+
+
+def candidate_for(  # noqa: PLR0913  One keyword per candidate field a test varies.
+    mirror: Mirror,
+    *,
+    requested: str = SEED,
+    source: str | None = None,
+    outcome: CandidateOutcome = CandidateOutcome.converted,
+    converted: ConvertedContent | None = None,
+    run_id: int = SECOND_RUN,
+    hops: tuple[str, ...] = (),
+    redirect_target: str | None = None,
+) -> PageCandidate:
+    """A pending candidate for `requested`, admitted.
+
+    An absent or redirected-out candidate carries no validators and no content, as
+    DisposeFetch delivers it; an unchanged one carries no content.
+    """
+    trigger = delivered(
+        mirror,
+        requested=requested,
+        source=source,
+        run_id=run_id,
+        outcome=outcome,
+        converted=converted,
+        without_content=outcome is not CandidateOutcome.converted,
+    )
+    if outcome in {CandidateOutcome.absent, CandidateOutcome.redirected_out}:
+        trigger = dataclasses.replace(trigger, etag=None, last_modified=None)
+    return admit_candidate(
+        dataclasses.replace(trigger, redirect_hops=hops, redirect_target=redirect_target)
+    )
+
+
+def absent_candidate(mirror: Mirror, url: str = SEED, run_id: int = SECOND_RUN) -> PageCandidate:
+    """A 404 or 410 for `url`, delivered and admitted."""
+    return candidate_for(mirror, requested=url, outcome=CandidateOutcome.absent, run_id=run_id)
+
+
+def redirected_out_candidate(
+    mirror: Mirror, url: str = SEED, run_id: int = SECOND_RUN
+) -> PageCandidate:
+    """`url` redirecting out of scope to AWAY, delivered and admitted."""
+    return candidate_for(
+        mirror,
+        requested=url,
+        outcome=CandidateOutcome.redirected_out,
+        run_id=run_id,
+        redirect_target=AWAY,
+    )
+
+
+def moved_candidate(mirror: Mirror, run_id: int = SECOND_RUN) -> PageCandidate:
+    """OTHER now redirecting to NEW, which answers: the hop OTHER, the source NEW."""
+    return candidate_for(
+        mirror,
+        requested=OTHER,
+        source=NEW,
+        hops=(OTHER,),
+        run_id=run_id,
+        converted=content(body=OTHER_BODY),
+    )
+
+
+def written_mirror(out_dir: Path, *urls: str) -> tuple[Mirror, list[Page]]:
+    """A mirror whose first run stored and published one page per URL, in order."""
+    mirror = new_mirror(out_dir)
+    pages = [stored(mirror, requested=url, converted=content(body=OTHER_BODY)) for url in urls]
+    finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    return mirror, pages
+
+
+def written_pair(out_dir: Path) -> tuple[Mirror, Page, Page]:
+    """The seed and OTHER, stored and published by the first run."""
+    mirror, (seed, other) = written_mirror(out_dir, SEED, OTHER)
+    return mirror, seed, other
+
+
+def finalised_run(
+    mirror: Mirror, run_id: int = SECOND_RUN, clock: FixedClock | None = None
+) -> Finalisation:
+    """The finalise pass that follows run `run_id`."""
+    return finalise(Operator(), mirror, run_id, clock or FixedClock(LATER))
+
+
+def crowd(mirror: Mirror, identity: str, stem: str) -> None:
+    """Hold the plain, short-suffixed and full-digest paths of `identity`: no free path."""
+    full = digest(identity)
+    paths = (
+        f"{stem}.md",
+        f"{stem}-{full[: model.CONFIG.collision_hash_chars]}.md",
+        f"{stem}-{full}.md",
+    )
+    for holder, path in zip(LIFECYCLE_HOLDERS, paths, strict=True):
+        stored(mirror, requested=holder).path = path
+    assert assign_path(mirror, identity) is None
+
+
+def replace_mirror_config(monkeypatch: pytest.MonkeyPatch, **changes: object) -> None:
+    """Replace the mirror's CONFIG in every loaded module that binds it."""
+    original = model.CONFIG
+    replaced = dataclasses.replace(original, **changes)  # type: ignore[arg-type]  # Test overrides by name.
+    for module in list(sys.modules.values()):
+        if getattr(module, "CONFIG", None) is original:
+            monkeypatch.setattr(module, "CONFIG", replaced)
+
+
+def fires(answer: object) -> bool:
+    """A rule fired: it answered something other than None or False."""
+    return answer is not None and answer is not False
+
+
+def reread[T](value: T) -> T:
+    """`value` itself: a field read through it is not narrowed by an earlier assertion."""
+    return value
+
+
+def alias_rows(mirror: Mirror) -> list[tuple[str, str]]:
+    """Every alias as (url, target identity), sorted."""
+    return sorted((alias.url, alias.target.identity) for alias in mirror.aliases)
+
+
+# Obligations: enumerations, relationships, projections and optional fields.
+
+
+def test_enum_comparable_RemovalReason(tmp_path: Path) -> None:
+    """Verify fields typed with enum RemovalReason are comparable."""
+    mirror, pages = written_mirror(tmp_path, SEED, OTHER, TOPIC, NEW)
+    for page, reason in zip(pages, RemovalReason, strict=True):
+        assert retire_page(page, reason, FixedClock(LATER)) is not None
+    assert [page.removal_reason for page in pages] == list(RemovalReason)
+    assert pages[0].removal_reason == RemovalReason.absent
+    assert pages[0].removal_reason != pages[1].removal_reason
+    assert mirror.removed_pages == pages
+    assert {reason.value for reason in RemovalReason} == set(spec_enum("mirror", "RemovalReason"))
+
+
+def test_enum_comparable_CandidateOutcome(tmp_path: Path) -> None:
+    """Verify fields typed with enum CandidateOutcome are comparable.
+
+    Each outcome meets its own rules: converted and unchanged answer a stored page,
+    absent and redirected_out a removal.
+    """
+    mirror, _, _ = written_pair(tmp_path)
+    candidates = [
+        candidate_for(mirror, requested=B_URL),
+        candidate_for(mirror, outcome=CandidateOutcome.unchanged),
+        absent_candidate(mirror, OTHER),
+        redirected_out_candidate(mirror),
+    ]
+    answers = {
+        candidate.outcome: type(settle_candidate(candidate, FixedClock(LATER)))
+        for candidate in candidates
+    }
+    assert answers == {
+        CandidateOutcome.converted: Page,
+        CandidateOutcome.unchanged: Page,
+        CandidateOutcome.absent: PageRemoved,
+        CandidateOutcome.redirected_out: PageRemoved,
+    }
+    assert candidates[2].outcome == CandidateOutcome.absent
+    assert candidates[2].outcome != candidates[3].outcome
+    assert {outcome.value for outcome in CandidateOutcome} == set(
+        spec_enum("mirror", "CandidateOutcome")
+    )
+
+
+def test_enum_comparable_StoreOutcome(tmp_path: Path) -> None:
+    """Verify fields typed with enum StoreOutcome are comparable.
+
+    The second run keeps the seed, rewrites TOPIC, moves OTHER to NEW and stores B_URL:
+    its finalisation finds them unchanged, changed, moved and added.
+    """
+    mirror, _ = written_mirror(tmp_path, SEED, OTHER, TOPIC)
+    clock = FixedClock(LATER)
+    for candidate in (
+        candidate_for(mirror, outcome=CandidateOutcome.unchanged),
+        candidate_for(mirror, requested=TOPIC, converted=content(body=NEW_BODY)),
+        moved_candidate(mirror),
+        candidate_for(mirror, requested=B_URL),
+    ):
+        assert isinstance(settle_candidate(candidate, clock), Page)
+    finalisation = finalised_run(mirror)
+    outcomes = {event.page.identity: event.outcome for event in finalisation.finalised}
+    assert outcomes == {
+        SEED: StoreOutcome.unchanged,
+        TOPIC: StoreOutcome.changed,
+        NEW: StoreOutcome.moved,
+        B_URL: StoreOutcome.added,
+    }
+    assert outcomes[NEW] == StoreOutcome.moved
+    assert outcomes[NEW] != outcomes[B_URL]
+    assert {outcome.value for outcome in StoreOutcome} == set(spec_enum("mirror", "StoreOutcome"))
+
+
+def test_entity_relationship_Mirror_aliases(tmp_path: Path) -> None:
+    """Verify relationship Mirror.aliases navigates to the correct related entities.
+
+    A move leaves the old URL an alias of the moved page; retiring the page drops it.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    assert mirror.aliases == []
+    assert move_page(moved_candidate(mirror), FixedClock(LATER)) is other
+    (alias,) = mirror.aliases
+    assert (alias.mirror, alias.url, alias.target) == (mirror, OTHER, other)
+    assert seed.aliases == []
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    assert mirror.aliases == []
+
+
+def test_projection_Mirror_removed_pages(tmp_path: Path) -> None:
+    """Verify projection Mirror.removed_pages filters correctly."""
+    mirror, seed, other = written_pair(tmp_path)
+    assert mirror.removed_pages == []
+    assert remove_absent_page(absent_candidate(mirror, OTHER), FixedClock(LATER)) is not None
+    assert mirror.removed_pages == [other]
+    assert mirror.written_pages == [seed]
+    revived = candidate_for(mirror, requested=OTHER, run_id=THIRD_RUN)
+    assert revive_removed_page(revived, FixedClock(LATEST)) is other
+    assert mirror.removed_pages == []
+    assert mirror.written_pages == [seed, other]
+
+
+def test_when_presence_Page_removed_at(tmp_path: Path) -> None:
+    """Verify Page.removed_at is present when status in {removed} and absent otherwise."""
+    mirror, _, other = written_pair(tmp_path)
+    assert other.removed_at is None
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    assert other.status is PageStatus.removed
+    assert other.removed_at == LATER
+    revived = candidate_for(mirror, requested=OTHER, run_id=THIRD_RUN)
+    assert revive_removed_page(revived, FixedClock(LATEST)) is other
+    assert reread(other).status is PageStatus.written
+    assert reread(other).removed_at is None
+
+
+def test_when_presence_Page_removal_reason(tmp_path: Path) -> None:
+    """Verify Page.removal_reason is present when status in {removed} and absent otherwise."""
+    mirror, _, other = written_pair(tmp_path)
+    assert other.removal_reason is None
+    assert retire_page(other, RemovalReason.out_of_scope, FixedClock(LATER)) is not None
+    assert reread(other).removal_reason is RemovalReason.out_of_scope
+    revived = candidate_for(mirror, requested=OTHER, run_id=THIRD_RUN)
+    assert revive_removed_page(revived, FixedClock(LATEST)) is other
+    assert reread(other).removal_reason is None
+
+
+def test_transition_edge_Page_written_removed(tmp_path: Path) -> None:
+    """Verify transition written -> removed on Page.status is reachable via a witnessing rule.
+
+    RetirePage, raised by RemoveAbsentPage for a 404 on a written page.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    candidate = absent_candidate(mirror, OTHER)
+    answer = settle_candidate(candidate, FixedClock(LATER))
+    assert answer == PageRemoved(
+        mirror=mirror, page=other, reason=RemovalReason.absent, candidate=candidate
+    )
+    assert other.status is PageStatus.removed
+
+
+def test_transition_edge_Page_removed_written(tmp_path: Path) -> None:
+    """Verify transition removed -> written on Page.status is reachable via a witnessing rule.
+
+    ReviveRemovedPage: the removed page answers again.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    candidate = candidate_for(mirror, requested=OTHER, run_id=THIRD_RUN)
+    assert settle_candidate(candidate, FixedClock(LATEST)) is other
+    assert other.status is PageStatus.written
+
+
+def test_transition_rejected_Page_status(tmp_path: Path) -> None:
+    """Verify undeclared transitions on Page.status are rejected.
+
+    removed -> removed: RetirePage does not fire on a removed page, which keeps its first
+    removal. written -> written: ReviveRemovedPage does not fire on a written target.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    assert retire_page(other, RemovalReason.out_of_scope, FixedClock(LATEST)) is None
+    assert (other.status, other.removed_at) == (PageStatus.removed, LATER)
+    assert other.removal_reason is RemovalReason.absent
+    again = candidate_for(mirror, run_id=THIRD_RUN, converted=content(body=NEW_BODY))
+    assert revive_removed_page(again, FixedClock(LATEST)) is None
+    assert seed.status is PageStatus.written
+    assert again.status is CandidateStatus.pending
+
+
+def test_entity_optional_Page_moved_from(tmp_path: Path) -> None:
+    """Verify optional field Page.moved_from accepts null and non-null values.
+
+    Null on a stored page; the old path while a move awaits finalisation; null again once
+    PublishPage has published the move.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    old_path = other.path
+    assert other.moved_from is None
+    assert move_page(moved_candidate(mirror), FixedClock(LATER)) is other
+    assert reread(other).moved_from == old_path
+    finalised_run(mirror)
+    assert reread(other).moved_from is None
+
+
+def test_entity_optional_Page_redirect_target(tmp_path: Path) -> None:
+    """Verify optional field Page.redirect_target accepts null and non-null values.
+
+    Null on a stored page; the out-of-scope target once it redirected out; null again
+    once revived.
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    assert seed.redirect_target is None
+    removal = remove_redirected_out_page(redirected_out_candidate(mirror), FixedClock(LATER))
+    assert removal is not None
+    assert reread(seed).redirect_target == AWAY
+    revived = candidate_for(mirror, run_id=THIRD_RUN)
+    assert revive_removed_page(revived, FixedClock(LATEST)) is seed
+    assert reread(seed).redirect_target is None
+
+
+def test_entity_relationship_Page_aliases(tmp_path: Path) -> None:
+    """Verify relationship Page.aliases navigates to the correct related entities.
+
+    Two URLs that resolve to TOPIC in the run that stored it, by a redirect and by a
+    canonical, become its aliases; the seed has none.
+    """
+    mirror = new_mirror(tmp_path)
+    seed = stored(mirror)
+    topic = stored(mirror, requested=TOPIC)
+    for candidate in (
+        candidate_for(mirror, requested=OTHER, source=TOPIC, hops=(OTHER,), run_id=FIRST_RUN),
+        candidate_for(
+            mirror, requested=B_URL, converted=content(canonical_url=TOPIC), run_id=FIRST_RUN
+        ),
+    ):
+        assert isinstance(settle_candidate(candidate, FixedClock()), CandidateDuplicate)
+    assert sorted(alias.url for alias in topic.aliases) == [B_URL, OTHER]
+    assert all(alias.target is topic for alias in topic.aliases)
+    assert seed.aliases == []
+
+
+def test_derived_Page_was_moved(tmp_path: Path) -> None:
+    """Verify derived value Page.was_moved computes correctly."""
+    mirror, seed, other = written_pair(tmp_path)
+    assert not other.was_moved
+    assert move_page(moved_candidate(mirror), FixedClock(LATER)) is other
+    assert reread(other).was_moved
+    assert not seed.was_moved
+    finalised_run(mirror)
+    assert not reread(other).was_moved
+
+
+def test_transition_edge_PageCandidate_pending_duplicate(tmp_path: Path) -> None:
+    """Verify transition pending -> duplicate on PageCandidate.status is reachable via a witnessing rule.
+
+    RejectDuplicateCandidate: a second URL resolving to the page this run stored.
+    """  # noqa: E501  The obligation's description, quoted.
+    mirror = new_mirror(tmp_path)
+    topic = stored(mirror, requested=TOPIC, run_id=SECOND_RUN)
+    candidate = candidate_for(mirror, requested=OTHER, source=TOPIC, hops=(OTHER,))
+    assert candidate.status is CandidateStatus.pending
+    answer = settle_candidate(candidate, FixedClock(LATER))
+    assert answer == CandidateDuplicate(candidate=candidate, page=topic)
+    assert reread(candidate).status is CandidateStatus.duplicate
+
+
+def test_entity_optional_PageCandidate_redirect_target(tmp_path: Path) -> None:
+    """Verify optional field PageCandidate.redirect_target accepts null and non-null values.
+
+    Null on a converted candidate, whose page records none; the out-of-scope target on a
+    redirected-out one, which the removed page records.
+    """
+    mirror = new_mirror(tmp_path)
+    plain = candidate_for(mirror, run_id=FIRST_RUN)
+    assert plain.redirect_target is None
+    page = settle_candidate(plain, FixedClock())
+    assert isinstance(page, Page)
+    assert page.redirect_target is None
+    out = redirected_out_candidate(mirror)
+    assert out.redirect_target == AWAY
+    removal = settle_candidate(out, FixedClock(LATER))
+    assert isinstance(removal, PageRemoved)
+    assert removal.page is page
+    assert page.redirect_target == AWAY
+
+
+def test_entity_optional_PageCandidate_content(tmp_path: Path) -> None:
+    """Verify optional field PageCandidate.content accepts null and non-null values.
+
+    Present on a converted candidate, which stores a page; null on an absent one, which
+    removes it.
+    """
+    mirror = new_mirror(tmp_path)
+    converted = candidate_for(mirror, run_id=FIRST_RUN)
+    assert converted.content is not None
+    page = settle_candidate(converted, FixedClock())
+    assert isinstance(page, Page)
+    gone = absent_candidate(mirror)
+    assert gone.content is None
+    removal = settle_candidate(gone, FixedClock(LATER))
+    assert isinstance(removal, PageRemoved)
+    assert removal.page is page
+
+
+def test_config_default_prune(tmp_path: Path) -> None:
+    """Verify config parameter prune has its declared default.
+
+    The default, false, archives a retired page's file rather than deleting it.
+    """
+    assert model.CONFIG.prune == spec_bool("mirror", "prune")
+    assert model.CONFIG.prune is False
+    mirror, _, other = written_pair(tmp_path)
+    published_bytes = (tmp_path / other.path).read_bytes()
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    assert not (tmp_path / other.path).exists()
+    assert (tmp_path / archived(other.path)).read_bytes() == published_bytes
+
+
+# Obligations: the intake rules.
+
+
+def test_rule_success_RejectDuplicateCandidate(tmp_path: Path) -> None:
+    """Verify rule RejectDuplicateCandidate succeeds when all preconditions are met.
+
+    OTHER, written by the first run, now redirects to TOPIC, which this run stored: the
+    first store's content stands, OTHER is merged into TOPIC and becomes its alias, and
+    the candidate is marked a duplicate.
+    """
+    mirror = new_mirror(tmp_path)
+    older = stored(mirror, requested=OTHER)
+    topic = stored(mirror, requested=TOPIC, run_id=SECOND_RUN)
+    candidate = candidate_for(
+        mirror, requested=OTHER, source=TOPIC, hops=(OTHER,), converted=content(body=NEW_BODY)
+    )
+    answer = reject_duplicate_candidate(candidate)
+    assert answer == CandidateDuplicate(candidate=candidate, page=topic)
+    assert candidate.status is CandidateStatus.duplicate
+    assert topic.converted_body == BODY
+    assert topic.last_stored_run == SECOND_RUN
+    assert older.status is PageStatus.removed
+    assert older.removal_reason is RemovalReason.merged
+    assert alias_rows(mirror) == [(OTHER, TOPIC)]
+
+
+def test_rule_failure_RejectDuplicateCandidate_1(tmp_path: Path) -> None:
+    """Verify rule RejectDuplicateCandidate is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = converted.
+    """
+    mirror = new_mirror(tmp_path)
+    topic = stored(mirror, requested=TOPIC, run_id=SECOND_RUN)
+    unchanged = candidate_for(mirror, requested=TOPIC, outcome=CandidateOutcome.unchanged)
+    assert reject_duplicate_candidate(unchanged) is None
+    accepted = candidate_for(mirror, requested=OTHER, source=TOPIC, hops=(OTHER,))
+    accepted.status = CandidateStatus.accepted
+    assert reject_duplicate_candidate(accepted) is None
+    assert unchanged.status is CandidateStatus.pending
+    assert accepted.status is CandidateStatus.accepted
+    assert topic.aliases == []
+
+
+def test_rule_failure_RejectDuplicateCandidate_2(tmp_path: Path) -> None:
+    """Verify rule RejectDuplicateCandidate is rejected when requires clause fails.
+
+    requires: exists target and target.status = written and target.last_stored_run =
+    candidate.run_id: no page at the identity, a removed one, or one an earlier run
+    stored.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    candidate = candidate_for(empty, requested=OTHER, source=TOPIC, hops=(OTHER,))
+    assert reject_duplicate_candidate(candidate) is None
+    assert candidate.status is CandidateStatus.pending
+
+    gone = new_mirror(tmp_path / "removed")
+    removed(gone, TOPIC).last_stored_run = SECOND_RUN
+    candidate = candidate_for(gone, requested=OTHER, source=TOPIC, hops=(OTHER,))
+    assert reject_duplicate_candidate(candidate) is None
+    assert candidate.status is CandidateStatus.pending
+
+    earlier = new_mirror(tmp_path / "earlier")
+    topic = stored(earlier, requested=TOPIC)
+    candidate = candidate_for(earlier, requested=OTHER, source=TOPIC, hops=(OTHER,))
+    assert reject_duplicate_candidate(candidate) is None
+    assert candidate.status is CandidateStatus.pending
+    assert topic.aliases == []
+
+
+def test_rule_success_MovePage(tmp_path: Path) -> None:
+    """Verify rule MovePage succeeds when all preconditions are met.
+
+    OTHER now redirects to NEW, which no page holds: the page keeps its record and
+    history, takes NEW's identity and path, keeps its old path as moved_from and its
+    digest as previous_digest, and OTHER becomes its alias. No file moves at intake; the
+    finalisation moves it and reports moved with the old path.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    old_path, old_digest = other.path, other.content_digest
+    candidate = moved_candidate(mirror)
+    assert move_page(candidate, FixedClock(LATER)) is other
+    assert mirror.pages == [seed, other]
+    assert (other.identity, other.path) == (NEW, f"{ROOT}new.md")
+    assert other.moved_from == old_path
+    assert other.previous_digest == old_digest
+    assert other.first_seen == START
+    assert (other.last_stored_run, other.fetched_at) == (SECOND_RUN, LATER)
+    assert candidate.status is CandidateStatus.accepted
+    assert alias_rows(mirror) == [(OTHER, NEW)]
+    assert (tmp_path / old_path).is_file()
+    assert not (tmp_path / other.path).exists()
+    finalisation = finalised_run(mirror)
+    (event,) = [event for event in finalisation.finalised if event.page is other]
+    assert (event.outcome, event.previous_path) == (StoreOutcome.moved, old_path)
+    assert not (tmp_path / old_path).exists()
+    assert (tmp_path / other.path).is_file()
+
+
+def test_rule_failure_MovePage_1(tmp_path: Path) -> None:
+    """Verify rule MovePage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = converted.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    unchanged = candidate_for(
+        mirror, requested=OTHER, source=NEW, hops=(OTHER,), outcome=CandidateOutcome.unchanged
+    )
+    assert move_page(unchanged, FixedClock(LATER)) is None
+    accepted = moved_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert move_page(accepted, FixedClock(LATER)) is None
+    assert (other.identity, other.moved_from) == (OTHER, None)
+    assert unchanged.status is CandidateStatus.pending
+
+
+def test_rule_failure_MovePage_2(tmp_path: Path) -> None:
+    """Verify rule MovePage is rejected when requires clause fails.
+
+    requires: exists previous: no known page for the requested identity, none stored or
+    only a removed one.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    candidate = moved_candidate(empty)
+    assert move_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert empty.pages == []
+
+    gone = new_mirror(tmp_path / "removed")
+    page = removed(gone, OTHER)
+    candidate = moved_candidate(gone)
+    assert move_page(candidate, FixedClock(LATER)) is None
+    assert (page.identity, page.status) == (OTHER, PageStatus.removed)
+
+
+def test_rule_failure_MovePage_3(tmp_path: Path) -> None:
+    """Verify rule MovePage is rejected when requires clause fails.
+
+    requires: not exists target or target.status = removed: OTHER's new canonical names
+    the seed, a written page.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    candidate = candidate_for(mirror, requested=OTHER, converted=content(canonical_url=SEED))
+    assert move_page(candidate, FixedClock(LATER)) is None
+    assert (other.identity, other.path, other.moved_from) == (OTHER, f"{ROOT}other.md", None)
+    assert seed.previous_digest == seed.content_digest  # untouched since its publication
+    assert candidate.status is CandidateStatus.pending
+
+
+def test_rule_failure_MovePage_4(tmp_path: Path) -> None:
+    """Verify rule MovePage is rejected when requires clause fails.
+
+    requires: new_path != null: every path assign_path could give NEW is held.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    crowd(mirror, NEW, f"{ROOT}new")
+    candidate = moved_candidate(mirror)
+    assert move_page(candidate, FixedClock(LATER)) is None
+    assert (other.identity, other.path, other.moved_from) == (OTHER, f"{ROOT}other.md", None)
+    assert candidate.status is CandidateStatus.pending
+    assert mirror.aliases == []
+
+
+def test_rule_success_ReviveRemovedPage(tmp_path: Path) -> None:
+    """Verify rule ReviveRemovedPage succeeds when all preconditions are met.
+
+    A page removed and archived by the second run answers again in the third: it is
+    written at its old path, its removal fields cleared, new again (previous_digest
+    null, first_seen now), and its archived copy leaves the removed area.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    assert (tmp_path / archived(other.path)).is_file()
+    candidate = candidate_for(
+        mirror, requested=OTHER, run_id=THIRD_RUN, converted=content(body=OTHER_BODY)
+    )
+    assert revive_removed_page(candidate, FixedClock(LATEST)) is other
+    assert other.status is PageStatus.written
+    assert (other.removed_at, other.removal_reason, other.redirect_target) == (None, None, None)
+    assert other.path == f"{ROOT}other.md"
+    assert other.previous_digest is None
+    assert other.first_seen == LATEST
+    assert candidate.status is CandidateStatus.accepted
+    finalisation = finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    (event,) = [event for event in finalisation.finalised if event.page is other]
+    assert event.outcome is StoreOutcome.added
+    assert (tmp_path / other.path).is_file()
+    assert not (tmp_path / archived(other.path)).exists()
+
+
+def test_rule_failure_ReviveRemovedPage_1(tmp_path: Path) -> None:
+    """Verify rule ReviveRemovedPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = converted.
+    """
+    mirror = new_mirror(tmp_path)
+    page = removed(mirror, OTHER)
+    unchanged = candidate_for(mirror, requested=OTHER, outcome=CandidateOutcome.unchanged)
+    assert revive_removed_page(unchanged, FixedClock(LATER)) is None
+    accepted = candidate_for(mirror, requested=OTHER)
+    accepted.status = CandidateStatus.accepted
+    assert revive_removed_page(accepted, FixedClock(LATER)) is None
+    assert page.status is PageStatus.removed
+    assert unchanged.status is CandidateStatus.pending
+
+
+def test_rule_failure_ReviveRemovedPage_2(tmp_path: Path) -> None:
+    """Verify rule ReviveRemovedPage is rejected when requires clause fails.
+
+    requires: not exists previous: OTHER's record is removed, but OTHER is an alias of
+    the written seed, so the requested identity has a known page.
+    """
+    mirror = new_mirror(tmp_path)
+    seed = stored(mirror)
+    page = removed(mirror, OTHER)
+    assert record_alias(mirror, OTHER, seed) is not None
+    candidate = candidate_for(mirror, requested=OTHER)
+    assert revive_removed_page(candidate, FixedClock(LATER)) is None
+    assert page.status is PageStatus.removed
+    assert candidate.status is CandidateStatus.pending
+
+
+def test_rule_failure_ReviveRemovedPage_3(tmp_path: Path) -> None:
+    """Verify rule ReviveRemovedPage is rejected when requires clause fails.
+
+    requires: exists target and target.status = removed: no record at the identity.
+    """
+    mirror = new_mirror(tmp_path)
+    candidate = candidate_for(mirror, requested=OTHER)
+    assert revive_removed_page(candidate, FixedClock(LATER)) is None
+    assert mirror.pages == []
+    assert candidate.status is CandidateStatus.pending
+
+
+def test_rule_failure_ReviveRemovedPage_4(tmp_path: Path) -> None:
+    """Verify rule ReviveRemovedPage is rejected when requires clause fails.
+
+    requires: new_path != null: the removed record's old path and both fallbacks are
+    held by other pages, so the record stays removed.
+    """
+    mirror = new_mirror(tmp_path)
+    page = removed(mirror, NEW)
+    page.path = f"{ROOT}archived/new.md"
+    crowd(mirror, NEW, f"{ROOT}new")
+    candidate = candidate_for(mirror, requested=NEW)
+    assert revive_removed_page(candidate, FixedClock(LATER)) is None
+    assert (page.status, page.path) == (PageStatus.removed, f"{ROOT}archived/new.md")
+    assert candidate.status is CandidateStatus.pending
+
+
+def test_rule_success_RemoveAbsentPage(tmp_path: Path) -> None:
+    """Verify rule RemoveAbsentPage succeeds when all preconditions are met.
+
+    A 404 on a written page retires it with reason absent; a 404 on a URL that is only
+    an alias retires the page the alias names.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    candidate = absent_candidate(mirror, OTHER)
+    answer = remove_absent_page(candidate, FixedClock(LATER))
+    assert answer == PageRemoved(
+        mirror=mirror, page=other, reason=RemovalReason.absent, candidate=candidate
+    )
+    assert candidate.status is CandidateStatus.accepted
+    assert (other.status, other.removal_reason) == (PageStatus.removed, RemovalReason.absent)
+    assert (other.removed_at, other.path) == (LATER, f"{ROOT}other.md")
+    assert record_alias(mirror, OLD, seed) is not None
+    via_alias = absent_candidate(mirror, OLD)
+    removal = remove_absent_page(via_alias, FixedClock(LATER))
+    assert removal is not None
+    assert removal.page is seed
+    assert seed.status is PageStatus.removed
+
+
+def test_rule_failure_RemoveAbsentPage_1(tmp_path: Path) -> None:
+    """Verify rule RemoveAbsentPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = absent.
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    out = redirected_out_candidate(mirror)
+    assert remove_absent_page(out, FixedClock(LATER)) is None
+    accepted = absent_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert remove_absent_page(accepted, FixedClock(LATER)) is None
+    assert seed.status is PageStatus.written
+    assert out.status is CandidateStatus.pending
+
+
+def test_rule_failure_RemoveAbsentPage_2(tmp_path: Path) -> None:
+    """Verify rule RemoveAbsentPage is rejected when requires clause fails.
+
+    requires: exists previous: no page was stored, or the one stored is removed already.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    candidate = absent_candidate(empty)
+    assert remove_absent_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+
+    gone = new_mirror(tmp_path / "removed")
+    page = removed(gone, SEED)
+    candidate = absent_candidate(gone)
+    assert remove_absent_page(candidate, FixedClock(LATER)) is None
+    assert (page.removed_at, page.removal_reason) == (START, RemovalReason.absent)
+
+
+def test_rule_success_AcceptAbsentWithoutPage(tmp_path: Path) -> None:
+    """Verify rule AcceptAbsentWithoutPage succeeds when all preconditions are met.
+
+    A 404 on a URL with no written page, never stored or removed already, is accepted
+    and changes nothing.
+    """
+    empty = new_mirror(tmp_path / "empty")
+    candidate = absent_candidate(empty)
+    assert accept_absent_without_page(candidate) is True
+    assert candidate.status is CandidateStatus.accepted
+    assert empty.pages == []
+
+    gone = new_mirror(tmp_path / "removed")
+    page = removed(gone, SEED)
+    candidate = absent_candidate(gone)
+    assert accept_absent_without_page(candidate) is True
+    assert candidate.status is CandidateStatus.accepted
+    assert (page.removed_at, page.removal_reason) == (START, RemovalReason.absent)
+
+
+def test_rule_failure_AcceptAbsentWithoutPage_1(tmp_path: Path) -> None:
+    """Verify rule AcceptAbsentWithoutPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = absent.
+    """
+    mirror = new_mirror(tmp_path)
+    out = redirected_out_candidate(mirror)
+    assert accept_absent_without_page(out) is False
+    accepted = absent_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert accept_absent_without_page(accepted) is False
+    assert out.status is CandidateStatus.pending
+
+
+def test_rule_failure_AcceptAbsentWithoutPage_2(tmp_path: Path) -> None:
+    """Verify rule AcceptAbsentWithoutPage is rejected when requires clause fails.
+
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity).
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    candidate = absent_candidate(mirror)
+    assert accept_absent_without_page(candidate) is False
+    assert candidate.status is CandidateStatus.pending
+    assert seed.status is PageStatus.written
+
+
+def test_rule_success_RemoveRedirectedOutPage(tmp_path: Path) -> None:
+    """Verify rule RemoveRedirectedOutPage succeeds when all preconditions are met.
+
+    A written page that now redirects out of scope is retired with reason
+    redirected_out, and the target is recorded on its record.
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    candidate = redirected_out_candidate(mirror)
+    answer = remove_redirected_out_page(candidate, FixedClock(LATER))
+    assert answer == PageRemoved(
+        mirror=mirror, page=seed, reason=RemovalReason.redirected_out, candidate=candidate
+    )
+    assert candidate.status is CandidateStatus.accepted
+    assert seed.status is PageStatus.removed
+    assert (seed.removal_reason, seed.redirect_target) == (RemovalReason.redirected_out, AWAY)
+
+
+def test_rule_failure_RemoveRedirectedOutPage_1(tmp_path: Path) -> None:
+    """Verify rule RemoveRedirectedOutPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = redirected_out.
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    gone = absent_candidate(mirror)
+    assert remove_redirected_out_page(gone, FixedClock(LATER)) is None
+    accepted = redirected_out_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert remove_redirected_out_page(accepted, FixedClock(LATER)) is None
+    assert (seed.status, seed.redirect_target) == (PageStatus.written, None)
+    assert gone.status is CandidateStatus.pending
+
+
+def test_rule_failure_RemoveRedirectedOutPage_2(tmp_path: Path) -> None:
+    """Verify rule RemoveRedirectedOutPage is rejected when requires clause fails.
+
+    requires: exists previous: no known page for the requested identity.
+    """
+    mirror = new_mirror(tmp_path)
+    candidate = redirected_out_candidate(mirror)
+    assert remove_redirected_out_page(candidate, FixedClock(LATER)) is None
+    assert candidate.status is CandidateStatus.pending
+    assert mirror.pages == []
+
+
+def test_rule_success_AcceptRedirectedOutWithoutPage(tmp_path: Path) -> None:
+    """Verify rule AcceptRedirectedOutWithoutPage succeeds when all preconditions are met.
+
+    Unit inputs: DisposeFetch delivers redirected_out only for a known page.
+    """
+    mirror = new_mirror(tmp_path)
+    candidate = redirected_out_candidate(mirror)
+    assert accept_redirected_out_without_page(candidate) is True
+    assert candidate.status is CandidateStatus.accepted
+    assert mirror.pages == []
+
+
+def test_rule_failure_AcceptRedirectedOutWithoutPage_1(tmp_path: Path) -> None:
+    """Verify rule AcceptRedirectedOutWithoutPage is rejected when requires clause fails.
+
+    requires: candidate.status = pending and candidate.outcome = redirected_out.
+    """
+    mirror = new_mirror(tmp_path)
+    gone = absent_candidate(mirror)
+    assert accept_redirected_out_without_page(gone) is False
+    accepted = redirected_out_candidate(mirror)
+    accepted.status = CandidateStatus.accepted
+    assert accept_redirected_out_without_page(accepted) is False
+    assert gone.status is CandidateStatus.pending
+
+
+def test_rule_failure_AcceptRedirectedOutWithoutPage_2(tmp_path: Path) -> None:
+    """Verify rule AcceptRedirectedOutWithoutPage is rejected when requires clause fails.
+
+    requires: not exists known_page(candidate.mirror, candidate.requested_identity).
+    """
+    mirror, seed, _ = written_pair(tmp_path)
+    candidate = redirected_out_candidate(mirror)
+    assert accept_redirected_out_without_page(candidate) is False
+    assert candidate.status is CandidateStatus.pending
+    assert seed.status is PageStatus.written
+
+
+def test_rule_success_RetirePage(tmp_path: Path) -> None:
+    """Verify rule RetirePage succeeds when all preconditions are met.
+
+    The page keeps its record and path; its aliases and outbound links go; its file
+    stays where it is until the finalise pass archives it at _removed/<host>/.
+    """
+    mirror, start, _ = linked_mirror(tmp_path)
+    finalised_pass(mirror)
+    assert start.outbound_links
+    assert record_alias(mirror, OLD, start) is not None
+    published_bytes = (tmp_path / start.path).read_bytes()
+    answer = retire_page(start, RemovalReason.absent, FixedClock(LATER))
+    assert answer == PageRemoved(mirror=mirror, page=start, reason=RemovalReason.absent)
+    assert start.status is PageStatus.removed
+    assert (start.removed_at, start.removal_reason) == (LATER, RemovalReason.absent)
+    assert (start.redirect_target, start.moved_from) == (None, None)
+    assert (start.identity, start.path) == (SEED, f"{ROOT}start.md")
+    assert start in mirror.pages
+    assert start.aliases == []
+    assert start.outbound_links == ()
+    assert (tmp_path / start.path).read_bytes() == published_bytes
+    finalised_run(mirror)
+    assert not (tmp_path / start.path).exists()
+    assert (tmp_path / archived(start.path)).read_bytes() == published_bytes
+
+
+def test_rule_failure_RetirePage_1(tmp_path: Path) -> None:
+    """Verify rule RetirePage is rejected when requires clause fails.
+
+    requires: page.status = written.
+    """
+    mirror = new_mirror(tmp_path)
+    page = removed(mirror, SEED)
+    assert retire_page(page, RemovalReason.out_of_scope, FixedClock(LATER)) is None
+    assert (page.removed_at, page.removal_reason) == (START, RemovalReason.absent)
+    assert page.status is PageStatus.removed
+
+
+def test_when_set_RetirePage_Page_removed_at(tmp_path: Path) -> None:
+    """Verify rule RetirePage sets Page.removed_at when transitioning status from written to removed (entering when set {removed})."""  # noqa: E501  The obligation's description, quoted.
+    _, seed, _ = written_pair(tmp_path)
+    assert seed.removed_at is None
+    assert retire_page(seed, RemovalReason.merged, FixedClock(LATEST)) is not None
+    assert seed.removed_at == LATEST
+
+
+def test_when_set_RetirePage_Page_removal_reason(tmp_path: Path) -> None:
+    """Verify rule RetirePage sets Page.removal_reason when transitioning status from written to removed (entering when set {removed})."""  # noqa: E501  The obligation's description, quoted.
+    _, seed, other = written_pair(tmp_path)
+    assert (seed.removal_reason, other.removal_reason) == (None, None)
+    redirected = retire_page(
+        seed, RemovalReason.redirected_out, FixedClock(LATER), redirect_target=AWAY
+    )
+    assert redirected is not None
+    assert (seed.removal_reason, seed.redirect_target) == (RemovalReason.redirected_out, AWAY)
+    assert retire_page(other, RemovalReason.merged, FixedClock(LATER)) is not None
+    assert other.removal_reason is RemovalReason.merged
+
+
+def narrowed(out_dir: Path) -> tuple[Mirror, Page, Page, Page, Page]:
+    """The seed, KEEP, DROP and FRESH published; then the prefix narrows to /guide/keep/.
+
+    FRESH was stored by the second run, so a finalisation following that run keeps it.
+    """
+    mirror = new_mirror(out_dir)
+    seed = stored(mirror)
+    keep = stored(mirror, requested=KEEP)
+    drop = stored(mirror, requested=DROP)
+    fresh = stored(mirror, requested=FRESH, run_id=SECOND_RUN)
+    finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    mirror.scope = scope(path_prefixes=("/guide/keep/",))
+    return mirror, seed, keep, drop, fresh
+
+
+def test_rule_success_RetireOutOfScopePages(tmp_path: Path) -> None:
+    """Verify rule RetireOutOfScopePages succeeds when all preconditions are met.
+
+    A finalisation following the second run retires DROP, whose source URL the narrowed
+    scope no longer admits; the seed stays (a seed is always in bounds), KEEP is in
+    bounds, and FRESH was stored by that run. A command's pass (run_id null) retires
+    FRESH too.
+    """
+    mirror, seed, keep, drop, fresh = narrowed(tmp_path)
+    pass_ = request_pass(Operator(), mirror, PassKind.finalise, SECOND_RUN)
+    retired = retire_out_of_scope_pages(pass_, FixedClock(LATER))
+    assert retired == [PageRemoved(mirror=mirror, page=drop, reason=RemovalReason.out_of_scope)]
+    assert (drop.status, drop.removal_reason) == (PageStatus.removed, RemovalReason.out_of_scope)
+    assert mirror.written_pages == [seed, keep, fresh]
+    command = request_pass(Operator(), mirror, PassKind.finalise, None)
+    retired = retire_out_of_scope_pages(command, FixedClock(LATER))
+    assert retired == [PageRemoved(mirror=mirror, page=fresh, reason=RemovalReason.out_of_scope)]
+    assert mirror.written_pages == [seed, keep]
+
+
+def test_rule_failure_RetireOutOfScopePages_1(tmp_path: Path) -> None:
+    """Verify rule RetireOutOfScopePages is rejected when requires clause fails.
+
+    requires: pass.status = pending.
+    """
+    mirror, _, _, drop, _ = narrowed(tmp_path)
+    pass_ = request_pass(Operator(), mirror, PassKind.finalise, SECOND_RUN)
+    pass_.status = PassStatus.completed
+    assert retire_out_of_scope_pages(pass_, FixedClock(LATER)) is None
+    assert drop.status is PageStatus.written
+
+
+def test_rule_failure_RetireOutOfScopePages_2(tmp_path: Path) -> None:
+    """Verify rule RetireOutOfScopePages is rejected when requires clause fails.
+
+    requires: pass.kind = finalise.
+    """
+    mirror, _, _, drop, _ = narrowed(tmp_path)
+    pass_ = request_pass(Operator(), mirror, PassKind.index, SECOND_RUN)
+    assert retire_out_of_scope_pages(pass_, FixedClock(LATER)) is None
+    assert drop.status is PageStatus.written
+
+
+# Guarantees and black boxes (no obligation id; tickets/T15-lifecycle.md step 3).
+
+
+def case_store(out_dir: Path) -> PageCandidate:
+    """StoreNewPage's case: a converted URL with no record."""
+    return candidate_for(new_mirror(out_dir))
+
+
+def case_refuse(out_dir: Path) -> PageCandidate:
+    """RefuseUnplaceableCandidate's case: no free path for a new identity."""
+    mirror = new_mirror(out_dir)
+    crowd(mirror, NEW, f"{ROOT}new")
+    return candidate_for(mirror, requested=NEW)
+
+
+def case_duplicate(out_dir: Path) -> PageCandidate:
+    """RejectDuplicateCandidate's case: a redirect to the page this run stored."""
+    mirror = new_mirror(out_dir)
+    stored(mirror, requested=TOPIC, run_id=SECOND_RUN)
+    return candidate_for(mirror, requested=OTHER, source=TOPIC, hops=(OTHER,))
+
+
+def case_rewrite(out_dir: Path) -> PageCandidate:
+    """RewriteKnownPage's case: a known page reconverted by a later run."""
+    mirror = new_mirror(out_dir)
+    stored(mirror)
+    return candidate_for(mirror, converted=content(body=NEW_BODY))
+
+
+def case_move(out_dir: Path) -> PageCandidate:
+    """MovePage's case: a known page whose identity moves to a URL no page holds."""
+    mirror = new_mirror(out_dir)
+    stored(mirror, requested=OTHER)
+    return moved_candidate(mirror)
+
+
+def case_revive(out_dir: Path) -> PageCandidate:
+    """ReviveRemovedPage's case: a removed page answers again."""
+    mirror = new_mirror(out_dir)
+    removed(mirror, SEED)
+    return candidate_for(mirror)
+
+
+def case_unchanged(out_dir: Path) -> PageCandidate:
+    """RecordUnchanged's case: a known page confirmed unchanged."""
+    mirror = new_mirror(out_dir)
+    stored(mirror)
+    return candidate_for(mirror, outcome=CandidateOutcome.unchanged)
+
+
+def case_discard(out_dir: Path) -> PageCandidate:
+    """DiscardUnchangedWithoutPage's case: unchanged with no page."""
+    return candidate_for(new_mirror(out_dir), outcome=CandidateOutcome.unchanged)
+
+
+def case_remove_absent(out_dir: Path) -> PageCandidate:
+    """RemoveAbsentPage's case: a 404 on a written page."""
+    mirror = new_mirror(out_dir)
+    stored(mirror)
+    return absent_candidate(mirror)
+
+
+def case_accept_absent(out_dir: Path) -> PageCandidate:
+    """AcceptAbsentWithoutPage's case: a 404 with no page."""
+    return absent_candidate(new_mirror(out_dir))
+
+
+def case_remove_redirected_out(out_dir: Path) -> PageCandidate:
+    """RemoveRedirectedOutPage's case: a written page redirecting out of scope."""
+    mirror = new_mirror(out_dir)
+    stored(mirror)
+    return redirected_out_candidate(mirror)
+
+
+def case_accept_redirected_out(out_dir: Path) -> PageCandidate:
+    """AcceptRedirectedOutWithoutPage's case: redirected out with no page."""
+    return redirected_out_candidate(new_mirror(out_dir))
+
+
+INTAKE_RULES: tuple[tuple[str, Callable[[PageCandidate], object]], ...] = (
+    ("StoreNewPage", lambda candidate: store_new_page(candidate, FixedClock(LATER))),
+    ("RefuseUnplaceableCandidate", refuse_unplaceable_candidate),
+    ("RejectDuplicateCandidate", reject_duplicate_candidate),
+    ("RewriteKnownPage", lambda candidate: rewrite_known_page(candidate, FixedClock(LATER))),
+    ("MovePage", lambda candidate: move_page(candidate, FixedClock(LATER))),
+    ("ReviveRemovedPage", lambda candidate: revive_removed_page(candidate, FixedClock(LATER))),
+    ("RecordUnchanged", lambda candidate: record_unchanged(candidate, FixedClock(LATER))),
+    ("DiscardUnchangedWithoutPage", discard_unchanged_without_page),
+    ("RemoveAbsentPage", lambda candidate: remove_absent_page(candidate, FixedClock(LATER))),
+    ("AcceptAbsentWithoutPage", accept_absent_without_page),
+    (
+        "RemoveRedirectedOutPage",
+        lambda candidate: remove_redirected_out_page(candidate, FixedClock(LATER)),
+    ),
+    ("AcceptRedirectedOutWithoutPage", accept_redirected_out_without_page),
+)
+
+
+@pytest.mark.parametrize(
+    ("build", "rule", "answer"),
+    [
+        pytest.param(case_store, "StoreNewPage", Page, id="store"),
+        pytest.param(case_refuse, "RefuseUnplaceableCandidate", CandidateDiscarded, id="refuse"),
+        pytest.param(
+            case_duplicate, "RejectDuplicateCandidate", CandidateDuplicate, id="duplicate"
+        ),
+        pytest.param(case_rewrite, "RewriteKnownPage", Page, id="rewrite"),
+        pytest.param(case_move, "MovePage", Page, id="move"),
+        pytest.param(case_revive, "ReviveRemovedPage", Page, id="revive"),
+        pytest.param(case_unchanged, "RecordUnchanged", Page, id="unchanged"),
+        pytest.param(
+            case_discard, "DiscardUnchangedWithoutPage", CandidateDiscarded, id="discard"
+        ),
+        pytest.param(case_remove_absent, "RemoveAbsentPage", PageRemoved, id="remove-absent"),
+        pytest.param(case_accept_absent, "AcceptAbsentWithoutPage", None, id="accept-absent"),
+        pytest.param(
+            case_remove_redirected_out,
+            "RemoveRedirectedOutPage",
+            PageRemoved,
+            id="remove-redirected-out",
+        ),
+        pytest.param(
+            case_accept_redirected_out,
+            "AcceptRedirectedOutWithoutPage",
+            None,
+            id="accept-redirected-out",
+        ),
+    ],
+)
+def test_EveryCandidateIsSettled_exactly_one_intake_rule_fires(
+    tmp_path: Path,
+    build: Callable[[Path], PageCandidate],
+    rule: str,
+    answer: type | None,
+) -> None:
+    """mirror.allium EveryCandidateIsSettled: the intake partition is total and exclusive.
+
+    Each of the twelve cases, built afresh for every rule, is taken by exactly one rule.
+    settle_candidate answers that rule's event: PageStored's page, CandidateDiscarded,
+    CandidateDuplicate or PageRemoved; the two Accept...WithoutPage rules accept the
+    candidate and answer none (Open points item 8). No candidate is left pending.
+    """
+    fired = [
+        name
+        for index, (name, rule_of) in enumerate(INTAKE_RULES)
+        if fires(rule_of(build(tmp_path / f"rule-{index}")))
+    ]
+    assert fired == [rule]
+    candidate = build(tmp_path / "settled")
+    settled = settle_candidate(candidate, FixedClock(LATER))
+    if answer is None:
+        assert settled is None
+    else:
+        assert isinstance(settled, answer)
+    assert candidate.status is not CandidateStatus.pending
+
+
+def test_RetirePage_a_removed_page_is_never_reported_removed_twice(tmp_path: Path) -> None:
+    """RetirePage guidance: the first removal is kept and is the only one reported.
+
+    A second 404 on the removed page meets AcceptAbsentWithoutPage, since known_page
+    skips removed pages: no PageRemoved, and the first removal's fields stay.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    first = settle_candidate(absent_candidate(mirror, OTHER), FixedClock(LATER))
+    assert isinstance(first, PageRemoved)
+    again = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
+    assert remove_absent_page(again, FixedClock(LATEST)) is None
+    assert settle_candidate(again, FixedClock(LATEST)) is None
+    assert again.status is CandidateStatus.accepted
+    assert (other.removed_at, other.removal_reason) == (LATER, RemovalReason.absent)
+
+
+def test_RemovedAreaKeepsPath_the_archive_mirrors_pages_and_revival_is_in_place(
+    tmp_path: Path,
+) -> None:
+    """mirror.allium RemovedAreaKeepsPath: removed at its path, archived, revived in place.
+
+    The removed page keeps its record and path; its file is archived at
+    _removed/<host>/<relative path>; revived, it is written at that same path and the
+    removed area, emptied, is gone.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    path = other.path
+    published_bytes = (tmp_path / path).read_bytes()
+    assert settle_candidate(absent_candidate(mirror, OTHER), FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    assert other in mirror.removed_pages
+    assert other.path == path
+    assert (tmp_path / "_removed" / "docs.example" / "other.md").read_bytes() == published_bytes
+    assert not (tmp_path / path).exists()
+    revived = candidate_for(mirror, requested=OTHER, run_id=THIRD_RUN)
+    assert settle_candidate(revived, FixedClock(LATEST)) is other
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert other.path == path
+    assert (tmp_path / path).is_file()
+    assert not (tmp_path / "_removed").exists()
+
+
+def test_file_effects_are_applied_by_finalise_idempotently_and_empty_directories_go(
+    tmp_path: Path,
+) -> None:
+    """The finalise pass applies the file effects; a second pass changes nothing more.
+
+    Retiring DROP moves no file at intake. The next finalisation archives it at
+    _removed/docs.example/drop/b.md and removes the emptied pages/docs.example/drop/
+    (Open points item 2); a further finalisation leaves every file as it was.
+    """
+    mirror, (seed, drop) = written_mirror(tmp_path, SEED, DROP)
+    published_bytes = (tmp_path / drop.path).read_bytes()
+    assert retire_page(drop, RemovalReason.absent, FixedClock(LATER)) is not None
+    assert (tmp_path / drop.path).read_bytes() == published_bytes
+    assert not (tmp_path / "_removed").exists()
+    finalised_run(mirror)
+    assert not (tmp_path / ROOT / "drop").exists()
+    assert (tmp_path / archived(drop.path)).read_bytes() == published_bytes
+    files = sorted(path for path in tmp_path.rglob("*") if path.is_file())
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert sorted(path for path in tmp_path.rglob("*") if path.is_file()) == files
+    assert (tmp_path / archived(drop.path)).read_bytes() == published_bytes
+    assert (tmp_path / seed.path).is_file()
+
+
+def test_prune_deletes_a_retired_pages_file_instead_of_archiving_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RetirePage's prune branch, on unit inputs only (Open points item 3): no archive."""
+    replace_mirror_config(monkeypatch, prune=True)
+    mirror, _, other = written_pair(tmp_path)
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    assert not (tmp_path / other.path).exists()
+    assert not (tmp_path / "_removed").exists()
+    assert other.status is PageStatus.removed
+
+
+def test_an_interrupted_retirement_leaves_the_disk_as_the_last_finalisation_left_it(
+    tmp_path: Path,
+) -> None:
+    """No file moves at intake, and the next finalisation republishes a missing file.
+
+    The page is retired in memory and the manifest is never saved: the disk keeps the
+    last finalisation's files, and the saved manifest still holds the page written. A
+    crash inside the pass that archived the file before the manifest was saved is then
+    repaired by the next finalisation's PublishPage, which writes the missing file.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    save_mirror(mirror)
+    published_bytes = (tmp_path / other.path).read_bytes()
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    assert (tmp_path / other.path).read_bytes() == published_bytes
+    assert not (tmp_path / "_removed").exists()
+    loaded = load_mirror(tmp_path)
+    (kept,) = [page for page in loaded.pages if page.identity == OTHER]
+    assert kept.status is PageStatus.written
+    target = tmp_path / archived(other.path)
+    target.parent.mkdir(parents=True)
+    (tmp_path / other.path).rename(target)
+    finalise(Operator(), loaded, SECOND_RUN, FixedClock(LATER))
+    assert (tmp_path / other.path).read_bytes() == published_bytes
+
+
+def test_a_page_revived_and_absent_in_one_run_keeps_its_archived_copy(tmp_path: Path) -> None:
+    """RemovedAreaKeepsPath and the effect composition of tickets/T15-lifecycle.md Facts.
+
+    OTHER, removed and archived by the second run, is revived in the third through
+    B_URL's canonical, then answers 404 in that same run: the archive still holds the
+    bytes OTHER had, and pages/ has no file for it.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    published_bytes = (tmp_path / other.path).read_bytes()
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    through = candidate_for(
+        mirror, requested=B_URL, run_id=THIRD_RUN, converted=content(canonical_url=OTHER)
+    )
+    assert settle_candidate(through, FixedClock(LATEST)) is other
+    gone = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
+    assert isinstance(settle_candidate(gone, FixedClock(LATEST)), PageRemoved)
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert (tmp_path / archived(other.path)).read_bytes() == published_bytes
+    assert not (tmp_path / other.path).exists()
+
+
+def settled_in_order(out_dir: Path, *urls: str) -> tuple[Mirror, list[PageCandidate]]:
+    """Two URLs whose identical content names TOPIC canonical, settled in `urls` order."""
+    mirror = new_mirror(out_dir)
+    candidates = [
+        candidate_for(
+            mirror, requested=url, run_id=FIRST_RUN, converted=content(canonical_url=TOPIC)
+        )
+        for url in urls
+    ]
+    for candidate in candidates:
+        assert settle_candidate(candidate, FixedClock()) is not None
+    finalise(Operator(), mirror, FIRST_RUN, FixedClock())
+    return mirror, candidates
+
+
+def test_RejectDuplicateCandidate_the_fetch_order_never_changes_the_mirror(
+    tmp_path: Path,
+) -> None:
+    """RejectDuplicateCandidate guidance, with identical content (Open points item 9).
+
+    OTHER and B_URL both name TOPIC canonical. Settled in either order, the mirror holds
+    one page TOPIC at one path with the same body, both URLs its aliases, and one
+    candidate accepted, the other a duplicate. The page's source_url is the first
+    store's, so the page file is not compared (the T15 batched question, item 9).
+    """
+    forward, forward_candidates = settled_in_order(tmp_path / "forward", OTHER, B_URL)
+    backward, backward_candidates = settled_in_order(tmp_path / "backward", B_URL, OTHER)
+    for mirror, candidates in (
+        (forward, forward_candidates),
+        (backward, backward_candidates),
+    ):
+        (page,) = mirror.pages
+        assert (page.identity, page.path) == (TOPIC, f"{ROOT}topic.md")
+        assert alias_rows(mirror) == [(B_URL, TOPIC), (OTHER, TOPIC)]
+        assert [candidate.status for candidate in candidates] == [
+            CandidateStatus.accepted,
+            CandidateStatus.duplicate,
+        ]
+        assert page.converted_body == forward.pages[0].converted_body
+
+
+def test_a_merge_leaves_the_merged_url_an_alias_of_the_survivor(tmp_path: Path) -> None:
+    """RewriteKnownPage's merge branch: the seed's new canonical names OTHER, written.
+
+    The seed is removed with reason merged, OTHER is refreshed from the candidate, and
+    the seed's URL becomes an alias of OTHER, so a link to either resolves to OTHER.
+    """
+    mirror, seed, other = written_pair(tmp_path)
+    candidate = candidate_for(mirror, converted=content(canonical_url=OTHER, body=NEW_BODY))
+    assert settle_candidate(candidate, FixedClock(LATER)) is other
+    assert (seed.status, seed.removal_reason) == (PageStatus.removed, RemovalReason.merged)
+    assert other.converted_body == NEW_BODY
+    assert alias_rows(mirror) == [(SEED, OTHER)]
+    assert mirror.known_page(SEED) is other
+    finalised_run(mirror)
+    assert not (tmp_path / seed.path).exists()
+    assert (tmp_path / archived(seed.path)).is_file()
+
+
+def test_a_move_drops_a_stale_alias_of_the_new_identity(tmp_path: Path) -> None:
+    """MovePage: an alias the new identity held is dropped, since an identity is no alias."""
+    mirror, seed, other = written_pair(tmp_path)
+    assert record_alias(mirror, NEW, seed) is not None
+    assert move_page(moved_candidate(mirror), FixedClock(LATER)) is other
+    assert mirror.alias(NEW) is None
+    assert alias_rows(mirror) == [(OTHER, NEW)]
+
+
+def test_a_move_onto_a_removed_identity_replaces_its_record_and_archive(tmp_path: Path) -> None:
+    """MovePage: a removed record holding the new identity leaves; its archived copy goes.
+
+    NEW was removed and archived by the second run; in the third OTHER moves to NEW: the
+    live page takes NEW's path, the removed record leaves the mirror, the archived copy
+    is deleted and OTHER's old file is gone.
+    """
+    mirror, (seed, other, new) = written_mirror(tmp_path, SEED, OTHER, NEW)
+    old_path = other.path
+    assert retire_page(new, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    assert (tmp_path / archived(new.path)).is_file()
+    assert move_page(moved_candidate(mirror, THIRD_RUN), FixedClock(LATEST)) is other
+    assert mirror.pages == [seed, other]
+    assert (other.identity, other.path) == (NEW, f"{ROOT}new.md")
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert (tmp_path / other.path).is_file()
+    assert not (tmp_path / old_path).exists()
+    assert not (tmp_path / "_removed").exists()

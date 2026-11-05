@@ -331,6 +331,8 @@ class SiteResponse:
     etag: str | None = None
     last_modified: str | None = None
     main_text: int = 0
+    # The raw Location header of a 3xx answer, as the fetcher read it; the follower's input.
+    location: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -523,14 +525,16 @@ class Run:
     # Implementation state, not specification fields: the timer the run paces on, the
     # jitter draw retry_wait scales a backoff by (a factor in [low, high]), and the
     # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns;
-    # the sitemaps read this run (FetchSitemap reads each at most once) and the frontier's
-    # row count when discovery ended (rovo.allium CloseRun's discovered_count).
+    # the sitemaps read this run (FetchSitemap reads each at most once), the frontier's
+    # row count when discovery ended (rovo.allium CloseRun's discovered_count), and the
+    # limiter of each host name a robots.txt hop reached before OpenHost opened it.
     timer: "Timer" = field(repr=False)
     draw: Callable[[float, float], float] = field(repr=False)
     discovery_failures: list["DiscoveryFailed"] = field(default_factory=list, repr=False)
     backoffs: list["HostBackedOff"] = field(default_factory=list, repr=False)
     sitemaps_read: set[str] = field(default_factory=set, repr=False)
     discovered_count: int = field(default=0, repr=False)
+    pending_limiters: dict[str, "Host"] = field(default_factory=dict, repr=False)
 
     @property
     def tripped_hosts(self) -> list["Host"]:

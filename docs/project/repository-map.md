@@ -33,6 +33,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── test_sitemaps.py       The sitemap and llms.txt black boxes
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
+│   │   ├── test_lifecycle_sync.py  Removal, archive, moves, duplicates and redirects
 │   │   └── test_second_sync.py     A second, incremental sync over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy

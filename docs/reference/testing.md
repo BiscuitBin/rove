@@ -145,7 +145,12 @@ and syncs them to check sitemaps, sitemap indexes, `llms.txt`, the observations,
 page budget and `rovo sync --dry-run`. `tests/e2e/test_second_sync.py` generates its
 sites the same way and syncs each again: an unchanged site rewrites no file, and a
 changed page, a page answered with the same document and `max_age` are each handled
-incrementally.
+incrementally. `tests/e2e/test_lifecycle_sync.py` generates its sites likewise, scripts
+redirects with `script=` and `always=`, and syncs them to check a page's lifecycle: a
+page answering 404 archived under `_removed/` and revived, a redirected page moved with
+an alias, a page redirected out of scope removed and a second URL settled as a
+duplicate, a narrowed scope retiring a page, and robots.txt and a sitemap reached
+through redirects.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

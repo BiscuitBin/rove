@@ -123,6 +123,33 @@ not changed, a sync rewrites no page file and no index and exits 0. In
 `per_host`'s `fetched` counts only pages answered with a document; `converted` counts
 the pages whose body changed and `skipped_unchanged` the pages seen whose body did not.
 
+A sync keeps the mirror's pages through their lifecycle. A redirect (301, 302, 303, 307
+or 308 with a `Location`) is followed when its target is within the scope, at most
+`discovery_max_redirects` (5) hops, never back to a URL already visited, each hop
+waiting its turn at its host name's limiter after its origin's robots.txt is read; the
+validators go on the first request only. The page is stored under the URL that answered,
+and every URL on the way becomes an alias of it. A redirect that loops, passes the hop
+limit or leaves the scope is not followed; nor is a hop robots.txt disallows (`redirect
+disallowed by robots.txt`), and a 3xx with no `Location` fails with its status. A page in
+the mirror that now answers `404` or `410`, or redirects out of the scope, is removed:
+its record keeps its path (`removal_reason` `absent` or `redirected_out`, the target in
+`redirect_target`), its file is archived under `_removed/<host>/` at the path it had
+under `pages/<host>/`, links to it become `dangling`, and the report lists it once as
+`removed`. A URL with no page that answers `404` or `410` is silent; one that loops,
+passes the hop limit or redirects out of scope is listed under `failed_urls`. A page
+whose URL now redirects to a URL no page holds moves there: it keeps its record, takes
+the new path, its old file goes and the report lists it `moved` with `moved_from`; links
+to the old URL are rewritten to the new file. A page whose new canonical URL names
+another page in the mirror is merged into it (`removal_reason` `merged`, its URL an
+alias of the page that stays). Two URLs that reach one page in the same sync give one
+page: the second is a `duplicate` row in the frontier and an alias. A removed page that
+answers again is written again, at its old path when that is free, and listed `added`;
+its archived copy goes. A page whose source URL the scope in force no longer admits (a
+narrowed `path_prefixes`, say) is not requested and is removed (`out_of_scope`) when the
+sync finalises. Files move only then, after the run: an interrupted sync leaves the
+pages and the archive as the last finished sync left them. A directory under `pages/` or
+`_removed/` left empty is removed.
+
 Before any page, `rovo sync` discovers pages beyond the seeds, host by host in sorted
 order, once each host's robots.txt is read. It reads the sitemaps that host's robots.txt
 declares (`Sitemap:` lines), in order, then `/sitemap.xml` and `/sitemap_index.xml`
@@ -172,7 +199,11 @@ also matches as a prefix with that `$` read as `%24`, so under `Disallow: /priva
 robots.txt that answers 401, 403, 429 or 5xx is refused, and one that never answers is
 unreachable: either disallows that whole origin, is listed under `discovery_problems`
 in `crawl-report.json` and makes the sync exit 1; a missing robots.txt (404) allows
-everything. Requests to one host name are spaced, with no burst, by at least
+everything. A robots.txt, a sitemap or `llms.txt` that redirects is followed within the
+allowed hosts, at most `discovery_max_redirects` (5) hops and never back to a URL already
+visited; a robots.txt redirect is followed with no further robots.txt read. A redirect
+that is not followed, or a 3xx with no `Location`, counts as unreachable: for robots.txt
+it disallows the origin (`robots_unreachable`). Requests to one host name are spaced, with no burst, by at least
 `1 / rate_per_host` (2 per second) and by the longest `Crawl-delay` any of its origins
 declares for `rovo`, read as decimal seconds; `Crawl-delay: 0` adds no delay, and one
 past `retry_after_cap` (120 s), however large, is never adopted. A
@@ -196,13 +227,12 @@ parse, a `max_age` that is not a finite number of seconds), names no root or
 start URL, sets `unblocking.provider`, changes the root URL the last run recorded,
 needs a browser or stealth engine that is not installed, or sets `robots = "ignore"`.
 The refusal is printed on standard error; the specification's refused report arrives
-with a later slice. When a run reaches a branch a later slice implements (a redirect,
-robots.txt's, a sitemap's and `llms.txt`'s included, a 404, a block, a 429 that survives its retries, a `Retry-After`
+with a later slice. When a run reaches a branch a later slice implements (a block, a
+429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-canonical URL that moves a page in the mirror onto another page, a non-HTML answer for a
-page in the mirror, a link to a missing page or to a URL that answers
-with a redirect or a non-HTML file, a profile other
+non-HTML answer for a page in the mirror, a link to a URL that answers with a non-HTML
+file, a profile other
 than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
 a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.

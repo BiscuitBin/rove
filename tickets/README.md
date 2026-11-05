@@ -38,6 +38,7 @@ snapshot.
 | T12 | Robots and politeness: rovo sync reads robots.txt per origin, paces each host, retries with backoff and Retry-After, and exits partial on a failure | `T12-robots-politeness.md` | T11 | none | open |
 | T13 | Discovery: rovo sync reads sitemaps and llms.txt, records what they name, keeps the sitemap budgets, and --dry-run lists what it would fetch | `T13-discovery.md` | T12 | none | open |
 | T14 | Incremental sync: a second rovo sync fetches known pages conditionally, keeps what did not change, reuses unchanged sitemaps, honours max_age and rewrites nothing on an unchanged site | `T14-incremental.md` | T13 | none | open |
+| T15 | Page lifecycle: rovo sync removes and archives absent pages, follows redirects within the scope, moves and merges pages with their aliases, revives returning pages, settles duplicates and retires pages a narrowed scope no longer admits | `T15-lifecycle.md` | T14 | none | open |
 
 ## Dependency graph
 
@@ -45,7 +46,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -93,6 +94,14 @@ T00 ─┬─ T01 ─┐
   not change, reconverts one that changed or that `max_age` forces, reuses a sitemap
   answered 304 from its snapshot in `.rovo/sitemaps.json`, and rewrites no page file and
   no index file on an unchanged site.
+- **T15** is slice 7: the page lifecycle. A page that answers 404 or 410 or redirects
+  out of scope is removed and its file archived under `_removed/<host>/`, mirroring
+  `pages/`; redirects within the scope are followed (robots.txt, sitemaps and
+  `llms.txt` included), a page whose identity moves is moved with its old URLs as
+  aliases, a canonical naming another page merges it, two URLs resolving to one page in
+  one run leave one page and a duplicate row, a removed page that answers again is
+  revived in place, a page a narrowed scope no longer admits is retired at the next
+  finalisation, and the report lists every removal.
 
 ## How to pick up a ticket
 

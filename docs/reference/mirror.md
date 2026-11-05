@@ -30,6 +30,9 @@ OUT_DIR/
 ├── pages/
 │   └── 127.0.0.1_8000/    one directory per host: its host segment
 │       └── start.md       one page file per written page, at its assigned path
+├── _removed/              the archive, only when a removed page's file is kept
+│   └── 127.0.0.1_8000/
+│       └── gone.md        a removed page's last published file, at its path
 └── .rovo/
     ├── manifest.json      the mirror: scope, profile, pages, aliases, links
     ├── frontier.json      every identity ever discovered, with its status
@@ -92,6 +95,15 @@ identity of the page that holds it, set only when the kind is `internal`) and
 `fragment_resolved`. Link rows are sorted by source, then target identity, then
 fragment. `rovo init` refuses a directory whose manifest exists, even
 one that does not parse; `rovo sync` refuses one that is missing or does not parse.
+
+A page row's `status` is `written` or `removed`. A removed page keeps its record and
+its `path`, with `removed_at`, `removal_reason` (`absent`, `redirected_out`,
+`out_of_scope` or `merged`) and, for a page redirected out of the scope, the target in
+`redirect_target`; it has no alias and no link. A moved page carries `moved_from`, its
+old path, until the finalisation that publishes the move. An alias row names a URL that
+reached the page: a redirect hop, the URL that answered, or the requested URL a
+canonical or a redirect moved past, including a merged page's URL. A URL that is a
+written page's own identity is never an alias.
 
 ## `.rovo/frontier.json` and `.rovo/runs.json`
 
@@ -320,6 +332,28 @@ its fragment, sorted by `url`: `url`, `kind` (as [Links](#links) defines it), `p
 (the holding page's path when the kind is `internal`, else `null`) and `cited_by`, the
 sorted paths of the pages that link to it.
 
+## `_removed/`
+
+The archive mirrors `pages/`: a removed page's file at `pages/<host>/<path>` is kept at
+`_removed/<host>/<path>`, the path the page's record keeps. A page answered again is
+written again at that path when it is still free (else at the path its identity is
+assigned), and its archived copy is deleted; a page that moves onto a removed page's
+identity replaces that record, and its archived copy is deleted too. Deleting a removed
+page's file instead of archiving it (`prune` in `mirror.allium`) is not configurable:
+`rovo.toml` has no such key, so the file is always archived.
+
+No file moves while a sync fetches. A removal, a move or a revival is recorded in
+memory, and the finalisation applies the file changes in order before it publishes the
+pages: a file is archived, an archived copy deleted, then, once the new file is
+written, a moved page's old file deleted unless another page now holds that path. Each
+change is idempotent, so a sync interrupted before its finalisation leaves the files as
+the last finished sync left them. A sync that stops inside the finalisation, after a
+file change and before the manifest is saved, can leave the files ahead of the
+manifest: the next finalisation writes any written page whose file is missing. A
+directory under `pages/` or `_removed/` left empty is removed, `pages/` and `_removed/`
+included (the specification does not say whether an emptied directory stays; rovo
+removes it, as it does under `_indexes/`).
+
 ## `crawl-report.json`
 
 The report of the last sync: every `CrawlReport` field of `rovo.allium` but the mirror,
@@ -328,7 +362,9 @@ the operator and the open or written status. It names the run (`run_id`, `kind`,
 options it used, the tallies (`discovered`, the frontier's rows when discovery ended, `fetched`, `converted`, `bytes_fetched`
 and the rest), one row per host, the quality summary and scores, the low-confidence
 pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` then
-`href`) and one row per change (`kind`, `url`, `path`, `moved_from`). Every list is
+`href`) and one row per change (`kind`, `url`, `path`, `moved_from`): `added`,
+`changed`, `unchanged`, `moved` (with the old path in `moved_from`), `removed` (once per
+removal, with the path the record keeps) or `failed`. Every list is
 sorted by URL or path, durations are seconds, and `started_at` and `finished_at` are
 the only times. `rovo sync` writes it once, when the report is ranked; a refused sync
 writes none yet.

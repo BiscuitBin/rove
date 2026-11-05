@@ -114,3 +114,12 @@ policy.
   `.rovo/sitemaps.json`). The validators (`etag`, `last_modified`) live in
   `.rovo/manifest.json` alone, never in a page's frontmatter or `index.jsonl`, so a
   moved validator over an unchanged body rewrites nothing.
+- `rovo sync` keeps pages through their lifecycle: redirects are followed within the
+  scope (robots.txt, sitemaps and `llms.txt` within the allowed hosts), at most
+  `discovery_max_redirects` hops without a revisit; a page that answers `404` or `410`
+  or redirects out of scope is removed and its file archived under `_removed/<host>/`,
+  mirroring `pages/`; a page whose URL redirects elsewhere moves with its old URL as an
+  alias, and one whose canonical names another page is merged into it; two URLs that
+  reach one page in a sync settle as one page and a `duplicate` row; a removed page that
+  answers again is revived at its path; a page a narrowed scope no longer admits is
+  retired at the next finalisation. The report lists each removal once as `removed`.

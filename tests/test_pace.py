@@ -9,6 +9,7 @@ one test of the real timer replaces `pace.time.sleep` and `pace.time.monotonic` 
 """
 
 import dataclasses
+import itertools
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -25,7 +26,9 @@ from fakes import (
     fixture_site,
     gaps,
     html_response,
+    redirect_response,
     text_response,
+    xml_response,
 )
 from rovo import _commands
 from rovo._convert import profiles
@@ -34,9 +37,12 @@ from rovo._crawl.fetch import Validators
 from rovo._crawl.model import (
     CONFIG,
     CrawlPolicy,
+    DiscoveryProblem,
     FrontierStatus,
+    Host,
     RenderMode,
     RobotsStance,
+    Run,
     RunKind,
     RunMode,
     RunRequest,
@@ -49,6 +55,7 @@ from rovo._crawl.pace import SystemTimer, anchored_now, retry_wait
 from rovo._crawl.run import (
     CrawlResult,
     create_frontier,
+    load_frontier,
     open_host,
     robots_allows,
     run_crawl,
@@ -58,7 +65,7 @@ from rovo._mirror.model import CrawlScope, Mirror, Operator, Tier
 from rovo._mirror.state import save_mirror
 from rovo._report import ExitCode, report_path
 from rovo._unfinished import NotInThisSlice
-from test_crawl import NULL_DELAYS, PAST_CAP_DELAYS, PAST_CAP_IDS, TINY_DELAY
+from test_crawl import NULL_DELAYS, PAST_CAP_DELAYS, PAST_CAP_IDS, TINY_DELAY, urlset
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -697,3 +704,416 @@ def test_fetch_resource_sends_its_validators_on_every_try(tmp_path: Path) -> Non
     pace.fetch_resource(maps, run, host, fetcher)
     assert fetcher.requests[-1] == maps
     assert fetcher.validators[-1] is None
+
+
+# --- Redirects (T15) ----------------------------------------------------------------
+#
+# crawl.allium RedirectsFollowedOnlyInScope (2264 at a0814ab), the AttemptTier guidance
+# (1559 to 1567) and fetch_resource's (FetchRobots guidance, 811 to 820): a page's hops
+# are followed within the scope, at most discovery_max_redirects, never revisiting, each
+# under the destination host name's limiter and its origin's robots.txt; fetch_resource
+# follows hops within the allowed hosts. tickets/T15-lifecycle.md Facts and Open points
+# items 5 to 7 state the interims.
+
+NEW_PAGE = f"{SITE}/guide/new.html"
+LOOPING = f"{SITE}/guide/loop.html"
+PRIVATE = f"{SITE}/guide/private/x.html"
+OFF_HOST = "http://elsewhere.example/guide/new.html"
+OFF_HOST_ROBOTS = "http://elsewhere.example/robots.txt"
+PORTED_PAGE = f"{PORTED}/guide/x.html"
+REAL_ROBOTS = f"{SITE}/robots-real.txt"
+SIDE_ROBOTS = f"{SITE}/robots-side.txt"
+MAPS = f"{SITE}/maps/guide.xml"
+REAL_MAPS = f"{SITE}/maps/real.xml"
+FLAKY_MAPS = f"{SITE}/maps/flaky.xml"
+ORPHAN = f"{SITE}/guide/orphan.html"
+LISTED = f"{SITE}/guide/listed.html"
+MOVED_BODY = "Moved"
+SEED_ETAG = '"seed-1"'
+
+
+def lone_page(title: str = "Getting started", extra: str = "") -> str:
+    """A page with a title, a heading and a paragraph of prose, and `extra` after it."""
+    prose = f"{title} explains one setting of the example product.{extra}"
+    return PAGE_HTML.format(title=title, prose=prose)
+
+
+def moved(url: str, location: str) -> SiteResponse:
+    """A 301 from `url` to `location` with a short body, so its bytes can be counted."""
+    return dataclasses.replace(
+        redirect_response(url, location), markup=MOVED_BODY, size=len(MOVED_BODY)
+    )
+
+
+def redirect_site(**answers: SiteResponse) -> dict[str, SiteResponse]:
+    """robots.txt disallowing /guide/private/, and `answers` by URL (keyword: a name)."""
+    responses = {ROBOTS: text_response(ROBOTS, NO_DELAY)}
+    responses.update({response.source_url: response for response in answers.values()})
+    return responses
+
+
+def failed_errors(result: CrawlResult) -> dict[str, str]:
+    """Each failed URL's error."""
+    return {failed.url: failed.error for failed in result.failed}
+
+
+def problems(result: CrawlResult) -> set[tuple[str, DiscoveryProblem]]:
+    """Each discovery problem as (url, problem)."""
+    return {(failed.url, failed.problem) for failed in result.discovery_failed}
+
+
+def test_RedirectsFollowedOnlyInScope_an_in_scope_hop_is_followed(tmp_path: Path) -> None:
+    """A page's in-scope redirect is followed: one fetch attempt, its hop's bytes counted.
+
+    The seed answers 301 to /guide/new.html: the hop is requested after its turn at the
+    host's limiter, the page is stored as NEW_PAGE with the seed its alias, the hop adds
+    no fetch attempt, and the redirect's own bytes count toward bytes_fetched.
+    """
+    direct, _, _ = paced(
+        tmp_path / "direct",
+        FakeFetcher(redirect_site(seed=html_response(SEED, lone_page()))),
+    )
+    fetcher = FakeFetcher(
+        redirect_site(
+            seed=moved(SEED, "/guide/new.html"), new=html_response(NEW_PAGE, lone_page())
+        )
+    )
+    result, stamping, _ = paced(tmp_path / "hopped", fetcher)
+    assert to_host(stamping) == [ROBOTS, *PROBES, SEED, NEW_PAGE]
+    (gap,) = gaps([stamp for stamp in stamping.stamps if stamp[0] in {SEED, NEW_PAGE}])
+    assert gap >= spacing() - EPSILON
+    assert result.run.fetch_attempts == direct.run.fetch_attempts == 1
+    assert result.run.bytes_fetched - direct.run.bytes_fetched == len(MOVED_BODY)
+    mirror = result.run.target
+    assert [page.identity for page in mirror.pages] == [NEW_PAGE]
+    assert [(alias.url, alias.target.identity) for alias in mirror.aliases] == [(SEED, NEW_PAGE)]
+    entry = result.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.done
+
+
+@pytest.mark.parametrize(
+    ("answers", "error", "never"),
+    [
+        pytest.param(
+            {"seed": redirect_response(SEED, OFF_HOST)},
+            "redirected out of scope",
+            OFF_HOST,
+            id="out-of-scope",
+        ),
+        pytest.param(
+            {
+                "seed": redirect_response(SEED, "/guide/loop.html"),
+                "loop": redirect_response(LOOPING, "/guide/start.html"),
+            },
+            "redirect loop",
+            OFF_HOST,
+            id="loop",
+        ),
+        pytest.param(
+            {"seed": redirect_response(SEED, "/guide/private/x.html")},
+            "redirect disallowed by robots.txt",
+            PRIVATE,
+            id="robots-disallowed",
+        ),
+    ],
+)
+def test_RedirectsFollowedOnlyInScope_a_stopped_hop_is_never_requested(
+    tmp_path: Path, answers: dict[str, SiteResponse], error: str, never: str
+) -> None:
+    """A hop out of scope, back to a URL already visited or robots disallows is not made.
+
+    The row fails with the stop's text (DisposeFetch; Open points item 5 for robots),
+    and nothing past the stop is requested. A loop or an out-of-scope stop is no error,
+    so no try is retried and no URL of the chain is requested twice; whether the robots
+    stop, an error, is retried is HttpRetry's to say, so it is not counted here.
+    """
+    fetcher = FakeFetcher(redirect_site(**answers))
+    result, _, _ = paced(tmp_path, fetcher)
+    assert failed_errors(result) == {SEED: error}
+    assert never not in fetcher.requests
+    assert OFF_HOST_ROBOTS not in fetcher.requests
+    hops = [url for url in fetcher.requests if url.startswith(f"{SITE}/guide/")]
+    if never != PRIVATE:
+        assert len(hops) == len(set(hops))
+
+
+def test_RedirectsFollowedOnlyInScope_a_chain_past_the_limit_stops_at_the_limit(
+    tmp_path: Path,
+) -> None:
+    """The hop past discovery_max_redirects is never requested; the row fails.
+
+    The seed is the first of a chain of discovery_max_redirects + 1 redirects: the seed
+    and discovery_max_redirects hops are requested, each once, and the row fails with
+    "too many redirects".
+    """
+    limit = CONFIG.discovery_max_redirects
+    urls = [SEED, *(f"{SITE}/guide/hop-{n}.html" for n in range(1, limit + 1)), NEW_PAGE]
+    answers = {
+        f"hop{index}": redirect_response(url, target.removeprefix(SITE))
+        for index, (url, target) in enumerate(itertools.pairwise(urls))
+    }
+    fetcher = FakeFetcher(redirect_site(**answers, new=html_response(NEW_PAGE, lone_page())))
+    result, _, _ = paced(tmp_path, fetcher)
+    assert failed_errors(result) == {SEED: "too many redirects"}
+    assert NEW_PAGE not in fetcher.requests
+    assert [url for url in fetcher.requests if url.startswith(f"{SITE}/guide/")] == urls[:-1]
+
+
+def test_RedirectsFollowedOnlyInScope_validators_go_on_the_first_request_only(
+    tmp_path: Path,
+) -> None:
+    """A known page's conditional fetch sends its validators to its own URL, not a hop.
+
+    Open points item 6: the second run's request for the seed carries the stored ETag;
+    the hop to NEW_PAGE carries none.
+    """
+    mirror = new_mirror(tmp_path)
+    first = FakeFetcher(
+        redirect_site(seed=dataclasses.replace(html_response(SEED, lone_page()), etag=SEED_ETAG))
+    )
+    run_crawl(request(mirror), None, first, FixedClock())
+    again = FakeFetcher(
+        redirect_site(
+            seed=redirect_response(SEED, "/guide/new.html"),
+            new=html_response(NEW_PAGE, lone_page()),
+        )
+    )
+    second = dataclasses.replace(request(mirror), id=2, kind=RunKind.update)
+    run_crawl(second, load_frontier(mirror), again, FixedClock())
+    sent = list(zip(again.requests, again.validators, strict=True))
+    assert (SEED, Validators(etag=SEED_ETAG, last_modified=None)) in sent
+    assert (NEW_PAGE, None) in sent
+    assert again.requests.count(NEW_PAGE) == 1
+
+
+def test_RedirectsFollowedOnlyInScope_a_hop_to_a_new_origin_reads_its_robots_and_waits(
+    tmp_path: Path,
+) -> None:
+    """A hop to another origin of the host reads that origin's robots.txt first.
+
+    Open points item 5: PORTED's robots.txt is requested before the hop, never twice,
+    and its Crawl-delay of 3 s, the longest of the host name's origins, spaces the hop
+    from the request before it on the host name's limiter.
+    """
+    fetcher = FakeFetcher(
+        redirect_site(
+            seed=redirect_response(SEED, PORTED_PAGE),
+            robots=text_response(PORTED_ROBOTS, "User-agent: *\nCrawl-delay: 3\n"),
+            ported=html_response(PORTED_PAGE, lone_page("Port page")),
+        )
+    )
+    result, stamping, _ = paced(tmp_path, fetcher)
+    urls = [url for url, _ in stamping.stamps]
+    assert urls.count(PORTED_ROBOTS) == 1
+    assert urls.index(SEED) < urls.index(PORTED_ROBOTS) < urls.index(PORTED_PAGE)
+    assert urls.count(PORTED_PAGE) == 1
+    at = dict(stamping.stamps)
+    assert at[PORTED_PAGE] - at[PORTED_ROBOTS] >= SECOND_ORIGIN_DELAY - EPSILON
+    assert [page.identity for page in result.run.target.pages] == [PORTED_PAGE]
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param({"robots": redirect_response(ROBOTS, OFF_HOST_ROBOTS)}, id="off-host"),
+        pytest.param(
+            {
+                "robots": SiteResponse(
+                    status=301, source_url=ROBOTS, markup="", size=0, content_type="text/plain"
+                )
+            },
+            id="no-location",
+        ),
+        pytest.param(
+            {
+                "robots": redirect_response(ROBOTS, "/robots-side.txt"),
+                "side": redirect_response(SIDE_ROBOTS, "/robots.txt"),
+            },
+            id="loop",
+        ),
+        pytest.param(
+            {
+                "robots": redirect_response(ROBOTS, PORTED_ROBOTS),
+                "ported": redirect_response(PORTED_ROBOTS, ROBOTS),
+            },
+            id="to-another-origin-and-back",
+        ),
+    ],
+)
+def test_RedirectsFollowedOnlyInScope_a_robots_txt_redirect_that_stops_disallows_its_origin(
+    tmp_path: Path, answers: dict[str, SiteResponse]
+) -> None:
+    """A robots.txt whose redirect stops, or that lacks a Location, disallows its origin.
+
+    fetch_resource returns an error answer, which DenyAllWhenRobotsUnreachable meets: a
+    robots_unreachable discovery problem and no page requested. robots.txt is not
+    governed by robots.txt, so no hop reads another robots.txt, and no URL is requested
+    twice, nor any off the allowed hosts.
+    """
+    fetcher = FakeFetcher({**answers_by_url(answers), SEED: html_response(SEED, lone_page())})
+    result = run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert problems(result) == {(ROBOTS, DiscoveryProblem.robots_unreachable)}
+    assert SEED not in fetcher.requests
+    assert OFF_HOST_ROBOTS not in fetcher.requests
+    assert fetcher.requests.count(ROBOTS) == 1
+    assert fetcher.requests.count(PORTED_ROBOTS) <= 1
+
+
+def answers_by_url(answers: dict[str, SiteResponse]) -> dict[str, SiteResponse]:
+    """`answers` keyed by each answer's own URL."""
+    return {response.source_url: response for response in answers.values()}
+
+
+def test_RedirectsFollowedOnlyInScope_a_robots_txt_redirected_within_its_origin_is_followed(
+    tmp_path: Path,
+) -> None:
+    """robots.txt redirected to /robots-real.txt is followed, with no second robots read.
+
+    The real file's rules are adopted: the seed's link to /guide/private/ is never
+    requested, and discovery reports no problem.
+    """
+    link = ' Read <a href="/guide/private/x.html">the private notes</a>.'
+    fetcher = FakeFetcher(
+        {
+            ROBOTS: redirect_response(ROBOTS, "/robots-real.txt"),
+            REAL_ROBOTS: text_response(REAL_ROBOTS, NO_DELAY),
+            SEED: html_response(SEED, lone_page(extra=link)),
+        }
+    )
+    result = run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert fetcher.requests[:2] == [ROBOTS, REAL_ROBOTS]
+    assert fetcher.requests.count(ROBOTS) == 1
+    assert fetcher.requests.count(REAL_ROBOTS) == 1
+    assert PRIVATE not in fetcher.requests
+    assert SEED in fetcher.requests
+    assert result.discovery_failed == ()
+    assert not robots_allows(result.run, PRIVATE)
+
+
+def opened_host(out_dir: Path, fetcher: FakeFetcher) -> tuple[Run, Host]:
+    """A running run whose host docs.example is open, its robots.txt read."""
+    run = start_run(request(new_mirror(out_dir)), FixedClock())
+    assert run is not None
+    assert create_frontier(run, None) is not None
+    host = open_host(run, HOST, SITE, fetcher)
+    assert host is not None
+    return run, host
+
+
+def test_fetch_resource_follows_a_redirect_within_the_allowed_hosts(tmp_path: Path) -> None:
+    """fetch_resource follows a hop on an allowed host; the size covers every hop's bytes."""
+    document = urlset((ORPHAN, None))
+    fetcher = FakeFetcher(
+        redirect_site(maps=moved(MAPS, "/maps/real.xml"), real=xml_response(REAL_MAPS, document))
+    )
+    run, host = opened_host(tmp_path, fetcher)
+    response = pace.fetch_resource(MAPS, run, host, fetcher)
+    assert response.ok
+    assert response.source_url == REAL_MAPS
+    assert response.markup == document
+    assert response.size == len(MOVED_BODY) + len(document.encode())
+    assert fetcher.requests[1:] == [MAPS, REAL_MAPS]
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param({"maps": redirect_response(MAPS, OFF_HOST)}, id="off-host"),
+        pytest.param(
+            {
+                "maps": SiteResponse(
+                    status=302, source_url=MAPS, markup="", size=0, content_type="text/xml"
+                )
+            },
+            id="no-location",
+        ),
+        pytest.param(
+            {
+                "maps": redirect_response(MAPS, "/maps/real.xml"),
+                "real": redirect_response(REAL_MAPS, "/maps/guide.xml"),
+            },
+            id="loop",
+        ),
+    ],
+)
+def test_fetch_resource_returns_an_error_for_a_redirect_it_does_not_follow(
+    tmp_path: Path, answers: dict[str, SiteResponse]
+) -> None:
+    """Off the allowed hosts, a loop or a 3xx without a Location: an error answer.
+
+    Nothing off the allowed hosts and no URL twice is requested.
+    """
+    fetcher = FakeFetcher(redirect_site(**answers))
+    run, host = opened_host(tmp_path, fetcher)
+    response = pace.fetch_resource(MAPS, run, host, fetcher)
+    assert not response.ok
+    assert response.error is not None
+    assert OFF_HOST not in fetcher.requests
+    assert fetcher.requests.count(MAPS) == 1
+    assert fetcher.requests.count(REAL_MAPS) <= 1
+
+
+def test_fetch_resource_stops_at_the_hop_limit(tmp_path: Path) -> None:
+    """A chain of discovery_max_redirects + 1 redirects: the hop past the limit is not made."""
+    limit = CONFIG.discovery_max_redirects
+    urls = [MAPS, *(f"{SITE}/maps/hop-{n}.xml" for n in range(1, limit + 1)), REAL_MAPS]
+    answers = {
+        f"hop{index}": redirect_response(url, target.removeprefix(SITE))
+        for index, (url, target) in enumerate(itertools.pairwise(urls))
+    }
+    fetcher = FakeFetcher(redirect_site(**answers, real=xml_response(REAL_MAPS, urlset())))
+    run, host = opened_host(tmp_path, fetcher)
+    response = pace.fetch_resource(MAPS, run, host, fetcher)
+    assert not response.ok
+    assert response.error is not None
+    assert REAL_MAPS not in fetcher.requests
+    assert fetcher.requests[1:] == urls[:-1]
+
+
+def test_fetch_resource_restarts_the_chain_on_a_retry(tmp_path: Path) -> None:
+    """A retryable answer at a hop ends the try; the retry starts again at the URL asked.
+
+    The hop's 503 is retried from MAPS, whose redirect is followed again to the answer.
+    """
+    document = urlset((ORPHAN, None))
+    fetcher = ScriptedFetcher(
+        redirect_site(
+            maps=redirect_response(MAPS, "/maps/flaky.xml"),
+            flaky=xml_response(FLAKY_MAPS, document),
+        ),
+        {FLAKY_MAPS: [text_response(FLAKY_MAPS, "", status=SERVICE_UNAVAILABLE)]},
+    )
+    run, host = opened_host(tmp_path, fetcher)
+    response = pace.fetch_resource(MAPS, run, host, fetcher)
+    assert response.ok
+    assert response.source_url == FLAKY_MAPS
+    assert fetcher.requests[1:] == [MAPS, FLAKY_MAPS, MAPS, FLAKY_MAPS]
+
+
+def test_discovery_follows_sitemap_and_llms_txt_redirects_within_the_allowed_hosts(
+    tmp_path: Path,
+) -> None:
+    """FetchSitemap and ReadLlmsTxt read through redirects within the allowed hosts.
+
+    /sitemap.xml answers 301 to /maps/real.xml, naming ORPHAN; /llms.txt answers 301 to
+    /docs/llms.txt, linking LISTED: both pages are fetched and stored, and discovery
+    reports no problem.
+    """
+    llms_real = f"{SITE}/docs/llms.txt"
+    fetcher = FakeFetcher(
+        redirect_site(
+            seed=html_response(SEED, lone_page()),
+            sitemap=redirect_response(f"{SITE}/sitemap.xml", "/maps/real.xml"),
+            real=xml_response(REAL_MAPS, urlset((ORPHAN, None))),
+            llms=redirect_response(f"{SITE}/llms.txt", "/docs/llms.txt"),
+            docs=text_response(llms_real, f"# Example docs\n\n- [Listed]({LISTED})\n"),
+            orphan=html_response(ORPHAN, lone_page("Orphan")),
+            listed=html_response(LISTED, lone_page("Listed")),
+        )
+    )
+    result = run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert result.discovery_failed == ()
+    assert {REAL_MAPS, llms_real, ORPHAN, LISTED} <= set(fetcher.requests)
+    stored = sorted(page.identity for page in result.run.target.pages)
+    assert stored == sorted([SEED, ORPHAN, LISTED])

@@ -33,6 +33,7 @@ from rovo._crawl.model import (
 )
 from rovo._crawl.run import CrawlResult, run_crawl
 from rovo._mirror.finalise import Finalisation, finalise, request_pass
+from rovo._mirror.intake import retire_page
 from rovo._mirror.model import (
     BrokenLink,
     BrokenLinkReason,
@@ -40,7 +41,9 @@ from rovo._mirror.model import (
     LinksRewritten,
     Mirror,
     Operator,
+    PageRemoved,
     PassKind,
+    RemovalReason,
     StoreOutcome,
     Tier,
 )
@@ -70,6 +73,7 @@ from rovo._report import (
     tally_discovery_problem,
     tally_failed_url,
     tally_finalised_page,
+    tally_removal,
 )
 from spec_values import spec_enum, spec_float
 
@@ -292,6 +296,54 @@ def test_rule_failure_TallyFinalisedPage_2(tmp_path: Path) -> None:
     report.status = CrawlReportStatus.written
     assert not tally_finalised_page(report, event)
     assert report.converted == 1
+
+
+def removal_of(finalised: Finalisation) -> PageRemoved:
+    """The seed, published by the run, retired as absent: RetirePage's PageRemoved."""
+    (event,) = finalised.finalised
+    removed = retire_page(event.page, RemovalReason.absent, FixedClock(LATER))
+    assert removed is not None
+    return removed
+
+
+def test_rule_success_TallyRemoval(tmp_path: Path) -> None:
+    """Verify rule TallyRemoval succeeds when all preconditions are met.
+
+    The open report of the mirror gains one removed change: the page's identity and its
+    path, which a removed page keeps, and no moved_from.
+    """
+    report, _, finalised = tallied(tmp_path)
+    removed = removal_of(finalised)
+    assert tally_removal(report, removed)
+    assert report.changes[-1] == Change(
+        kind=ChangeKind.removed, url=SEED, path=START_PATH, moved_from=None
+    )
+    assert len(report.changes) == len(["added", "removed"])
+
+
+def test_rule_failure_TallyRemoval_1(tmp_path: Path) -> None:
+    """Verify rule TallyRemoval is rejected when requires clause fails.
+
+    requires: exists report: the open report is another mirror's.
+    """
+    report, _, finalised = tallied(tmp_path / "one")
+    other, _, _ = tallied(tmp_path / "other")
+    removed = removal_of(finalised)
+    assert not tally_removal(other, removed)
+    assert [change.kind for change in other.changes] == [ChangeKind.added]
+    assert [change.kind for change in report.changes] == [ChangeKind.added]
+
+
+def test_rule_failure_TallyRemoval_2(tmp_path: Path) -> None:
+    """Verify rule TallyRemoval is rejected when requires clause fails.
+
+    requires: report.status = open: the report was written already.
+    """
+    report, _, finalised = tallied(tmp_path)
+    removed = removal_of(finalised)
+    report.status = CrawlReportStatus.written
+    assert not tally_removal(report, removed)
+    assert [change.kind for change in report.changes] == [ChangeKind.added]
 
 
 def test_rule_success_CloseRun(tmp_path: Path) -> None:

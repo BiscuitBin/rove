@@ -178,6 +178,7 @@ def _start_sync(
         tally_discovery_problem,
         tally_failed_url,
         tally_finalised_page,
+        tally_removal,
     )
 
     operator = Operator()
@@ -237,9 +238,13 @@ def _start_sync(
         tally_discovery_problem(report, problem)
     for failed in result.failed:
         tally_failed_url(report, failed)
+    for removed in result.removed:
+        tally_removal(report, removed)
     close_run(report, result.run, result.frontier)
     if not options.dry_run:  # CloseRun requested the finalise pass.
         finalised = finalise(operator, mirror, result.run.id, clock)
+        for removed in finalised.removed:
+            tally_removal(report, removed)
         for event in finalised.finalised:
             tally_finalised_page(report, event)
         if finalised.rewritten is not None:  # FinishLinkPass fires on every pending pass.

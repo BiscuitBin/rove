@@ -7,6 +7,12 @@ There is no burst: the starts of two requests to one host name are at least
 (AttemptTier guidance). The wait is computed once from the timer and never looped on, so
 a timer that stands still cannot hang a run.
 
+`follow` is the one redirect follower: a 301, 302, 303, 307 or 308 with a Location is
+followed hop by hop, each hop under its destination host name's limiter, at most
+`discovery_max_redirects` hops, never revisiting a URL (by identity), and only to a
+target the caller admits; validators go on the first request only. Pages
+(`run.attempt_tier`) and `fetch_resource` both use it.
+
 `time` is imported as a module and its functions are called as attributes, so a test
 can replace `pace.time.sleep` and `pace.time.monotonic`.
 """
@@ -18,7 +24,28 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from rovo._crawl.fetch import Fetcher, Validators
-from rovo._crawl.model import CONFIG, CrawlPolicy, Host, HostBackedOff, Run, SiteResponse
+from rovo._crawl.model import (
+    CONFIG,
+    CrawlPolicy,
+    Host,
+    HostBackedOff,
+    RedirectStop,
+    Run,
+    SiteResponse,
+)
+from rovo._crawl.sitemaps import resolve_url
+from rovo._mirror.urls import hostname_of
+
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_REDIRECTS = range(300, 400)
+# DisposeFetch's errors for an unfollowed redirect, by its stop.
+STOP_ERRORS = {
+    RedirectStop.loop: "redirect loop",
+    RedirectStop.hop_limit: "too many redirects",
+    RedirectStop.out_of_scope: "redirected out of scope",
+}
+DISALLOWED_HOP = "redirect disallowed by robots.txt"
+_NO_LOCATION = "redirect without a usable Location"
 
 
 class Timer(Protocol):
@@ -147,12 +174,99 @@ def pause_for_cap(host: Host) -> HostBackedOff:
     return backed_off
 
 
-def fetch_resource(
+def redirect_target(response: SiteResponse, run: Run) -> str | None:
+    """The redirect's target, its Location resolved against the URL that answered.
+
+    None when the answer is not a 301, 302, 303, 307 or 308, or its Location is missing
+    or gives no URL with an identity: such an answer is not followed.
+    """
+    if response.status not in _REDIRECT_STATUSES or not response.location:
+        return None
+    try:
+        target = resolve_url(response.source_url, response.location.strip())
+        run.target.scope.identity_of(target)
+    except ValueError:  # urljoin or normalise_url cannot parse it.
+        return None
+    return target
+
+
+def follow(  # noqa: PLR0913  One request's URL, its limiter and validators, and the hop tests.
+    url: str,
+    host: Host,
+    fetcher: Fetcher,
+    validators: Validators | None,
+    *,
+    admits: Callable[[str], bool],
+    ready: Callable[[str], Host | None],
+) -> SiteResponse:
+    """One request and its redirect hops: the final answer, its size every hop's bytes.
+
+    A hop's target that loops back (by identity), passes discovery_max_redirects or
+    `admits` refuses is not requested: the last answer comes back with redirect_location
+    and its redirect_stop. `ready(target)` gives the host name whose limiter the hop
+    waits at, or None when robots.txt disallows the hop, which ends as an error answer.
+    The final answer's redirect_hops are the URLs left behind, the requested one first.
+    """
+    identity_of = host.run.target.scope.identity_of
+    wait_turn(host)
+    response = fetcher.fetch(url, validators=validators)
+    received = response.size
+    visited = {identity_of(url)}
+    hops: list[str] = []
+    while (target := redirect_target(response, host.run)) is not None:
+        stop = None
+        if identity_of(target) in visited:
+            stop = RedirectStop.loop
+        elif len(hops) >= CONFIG.discovery_max_redirects:
+            stop = RedirectStop.hop_limit
+        elif not admits(target):
+            stop = RedirectStop.out_of_scope
+        destination = None if stop is not None else ready(target)
+        if destination is None:
+            return dataclasses.replace(
+                response,
+                size=received,
+                redirect_hops=tuple(hops),
+                redirect_location=target,
+                redirect_stop=stop,
+                error=None if stop is not None else DISALLOWED_HOP,
+            )
+        hops.append(response.source_url)
+        visited.add(identity_of(target))
+        wait_turn(destination)
+        response = fetcher.fetch(target)
+        received += response.size
+    return dataclasses.replace(response, size=received, redirect_hops=tuple(hops))
+
+
+def pending_limiter(host: Host, target: str) -> Host:
+    """The limiter of a hop's host name that no host of the run holds yet.
+
+    It spaces requests to that name as a newly opened host would (rate_per_host, no
+    Crawl-delay), and OpenHost takes its last start, so limits are kept per host name
+    (crawl.allium Politeness) even before the host opens.
+    """
+    run, name = host.run, hostname_of(target)
+    if name not in run.pending_limiters:
+        run.pending_limiters[name] = dataclasses.replace(
+            host,
+            name=name,
+            rate=run.policy.rate_per_host,
+            crawl_delay=timedelta(0),
+            paused_until=None,
+            last_started=None,
+        )
+    return run.pending_limiters[name]
+
+
+def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
     url: str,
     run: Run,
     host: Host,
     fetcher: Fetcher,
     validators: Validators | None = None,
+    *,
+    ready: Callable[[str], Host | None] | None = None,
 ) -> SiteResponse:
     """crawl.allium fetch_resource: the http tier under the host's limiter, with retries.
 
@@ -162,16 +276,35 @@ def fetch_resource(
     honor_retry_after holds adds one to the host's retry_after_honored. A Retry-After
     past retry_after_cap ends the tries with that answer, with no wait and no pause;
     whether it retires or pauses the host is the caller's to say. Every try sends the
-    validators given, which only a sitemap with a snapshot has. No redirect is
-    followed. The size covers every try's bytes; no try counts as a fetch attempt.
+    validators given, which only a sitemap with a snapshot has, on its first request.
+    Redirects within the allowed hosts are followed (`follow`); each try starts again at
+    `url`. A redirect not followed, a 3xx with no usable Location included, ends the
+    tries as an error answer. `ready` gives a hop's host, or None when robots.txt
+    disallows it; by default the hop's open host, else its host name's pending limiter
+    (`pending_limiter`), with no robots.txt read (robots.txt itself is not governed by
+    robots.txt). The size covers every try's and
+    every hop's bytes; no try counts as a fetch attempt.
     """
     policy = run.policy
+    scope = run.target.scope
+    hop_host = ready or (
+        lambda target: run.host(hostname_of(target)) or pending_limiter(host, target)
+    )
     received = 0
     try_ = 1
     while True:
-        wait_turn(host)
-        response = fetcher.fetch(url, validators=validators)
+        response = follow(
+            url, host, fetcher, validators, admits=scope.host_allowed, ready=hop_host
+        )
         received += response.size
+        unfollowed = response.status in _REDIRECTS and not response.not_modified
+        if response.unfollowed_redirect or unfollowed:
+            error = response.error or (
+                _NO_LOCATION
+                if response.redirect_stop is None
+                else STOP_ERRORS[response.redirect_stop]
+            )
+            return dataclasses.replace(response, size=received, error=error)
         if response.retryable and response.retry_after is not None and policy.honor_retry_after:
             host.retry_after_honored += 1
         if past_cap(response, policy) or not response.retryable or try_ >= CONFIG.http_attempts:

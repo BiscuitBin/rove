@@ -1,29 +1,32 @@
 """Page intake (mirror.allium 515 to 896): candidates become pages and aliases.
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
-`settle_candidate` fires the one whose guards hold. This slice implements StoreNewPage,
-RefuseUnplaceableCandidate, RecordUnchanged, DiscardUnchangedWithoutPage,
-RewriteKnownPage (when the requested page is its own target), and the shared
-RefreshPage with the aliases it records; a candidate that would need another rule stops
-with NotInThisSlice.
+`settle_candidate` fires the one whose guards hold, exactly one per candidate. The
+lifecycle rules (RetirePage, MovePage, ReviveRemovedPage) move no file here: each records
+its file event on the mirror, and the next finalise pass applies it.
 """
 
 from rovo._mirror.model import (
+    CONFIG,
     Alias,
     CandidateDelivered,
     CandidateDiscarded,
+    CandidateDuplicate,
     CandidateOutcome,
     CandidateStatus,
+    FileEffect,
+    FileEffectKind,
     LinksFound,
     Mirror,
     Page,
     PageCandidate,
+    PageRemoved,
     PageStatus,
+    RemovalReason,
     StoreOutcome,
 )
-from rovo._mirror.state import Clock
+from rovo._mirror.state import Clock, SystemClock
 from rovo._mirror.urls import assign_path, digest, version_label
-from rovo._unfinished import NotInThisSlice
 
 _NO_FREE_PATH = "no free path"
 _NO_PAGE_TO_CONFIRM = "no page to confirm"
@@ -121,7 +124,8 @@ def refuse_unplaceable_candidate(candidate: PageCandidate) -> CandidateDiscarded
 
     A pending converted candidate whose identity has no page, or only a removed one, and
     for which assign_path finds no free path is accepted and discarded; nothing else in
-    the mirror changes.
+    the mirror changes. The page a move would move is not another page holding a path,
+    as MovePage reads it.
     """
     if candidate.status is not CandidateStatus.pending:
         return None
@@ -132,7 +136,7 @@ def refuse_unplaceable_candidate(candidate: PageCandidate) -> CandidateDiscarded
     target = mirror.page(identity)
     if target is not None and target.status is not PageStatus.removed:
         return None
-    if assign_path(mirror, identity) is not None:
+    if assign_path(mirror, identity, mirror.known_page(candidate.requested_identity)) is not None:
         return None
     candidate.status = CandidateStatus.accepted
     return CandidateDiscarded(candidate=candidate, reason=_NO_FREE_PATH)
@@ -176,12 +180,7 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> LinksFou
     page.fetched_at = now
     page.last_seen = now
     mirror.links = [link for link in mirror.links if link.source is not page]
-    passed = [
-        *(mirror.scope.identity_of(hop) for hop in candidate.redirect_hops),
-        mirror.scope.identity_of(candidate.source_url),
-        candidate.requested_identity,
-    ]
-    for url in passed:
+    for url in _passed(candidate):
         if url != page.identity:
             _alias_recorded(mirror, url, page)
     candidate.status = CandidateStatus.accepted
@@ -266,9 +265,9 @@ def discard_unchanged_without_page(candidate: PageCandidate) -> CandidateDiscard
 def rewrite_known_page(candidate: PageCandidate, clock: Clock) -> Page | None:
     """Realises mirror.allium RewriteKnownPage: the refreshed target, else None.
 
-    The target keeps its content digest as its previous digest, then RefreshPage
-    (raised as PageContentAccepted) refreshes it. The merge branch, a known page other
-    than the target (PageRetired with reason merged), is a later slice's.
+    The target keeps its content digest as its previous digest; a known page other than
+    the target is merged into it (PageRetired, reason merged); then RefreshPage (raised as
+    PageContentAccepted) refreshes the target and makes the merged URL its alias.
     """
     if candidate.status is not CandidateStatus.pending:
         return None
@@ -281,33 +280,241 @@ def rewrite_known_page(candidate: PageCandidate, clock: Clock) -> Page | None:
     if target.last_stored_run == candidate.run_id:
         return None
     previous = mirror.known_page(candidate.requested_identity)
-    if previous is not None and previous is not target:
-        raise NotInThisSlice(rule="RewriteKnownPage")
     target.previous_digest = target.content_digest
+    if previous is not None and previous is not target:
+        retire_page(previous, RemovalReason.merged, clock)
     refresh_page(candidate, target, clock)
     return target
 
 
-def settle_candidate(candidate: PageCandidate, clock: Clock) -> Page | CandidateDiscarded | None:
-    """Settle one candidate: the rule whose guards hold fires; None when it is not pending.
+def reject_duplicate_candidate(
+    candidate: PageCandidate, clock: Clock | None = None
+) -> CandidateDuplicate | None:
+    """Realises mirror.allium RejectDuplicateCandidate; None when its guards do not hold.
 
-    In order: StoreNewPage, RefuseUnplaceableCandidate, RecordUnchanged,
-    DiscardUnchangedWithoutPage, RewriteKnownPage; a page is PageStored's, a discard
-    CandidateDiscarded's. A pending candidate none takes needs a rule a later slice
-    implements (RejectDuplicateCandidate, MovePage, ReviveRemovedPage, or an absent or
-    redirected-out outcome).
+    The target was stored by this run, so the first store's content stands: a known page
+    the requested URL held is merged into it, and every URL on the way becomes its alias.
+    `clock` dates that merge; the real clock when none is given.
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.converted:
+        return None
+    mirror = candidate.mirror
+    target = mirror.page(_page_identity(candidate))
+    if target is None or target.status is not PageStatus.written:
+        return None
+    if target.last_stored_run != candidate.run_id:
+        return None
+    previous = mirror.known_page(candidate.requested_identity)
+    if previous is not None and previous is not target:
+        retire_page(previous, RemovalReason.merged, clock or SystemClock())
+    for url in _passed(candidate):
+        if url != target.identity:
+            _alias_recorded(mirror, url, target)
+    candidate.status = CandidateStatus.duplicate
+    return CandidateDuplicate(candidate=candidate, page=target)
+
+
+def move_page(candidate: PageCandidate, clock: Clock) -> Page | None:
+    """Realises mirror.allium MovePage: the moved page, refreshed; None when its guards fail.
+
+    The known page takes the new identity; a removed record holding it leaves the mirror
+    and its archived copy is deleted, and an alias the identity held is dropped. The path
+    follows the identity: when it changes, the file move is recorded for finalisation.
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.converted:
+        return None
+    mirror = candidate.mirror
+    identity = _page_identity(candidate)
+    target = mirror.page(identity)
+    previous = mirror.known_page(candidate.requested_identity)
+    if previous is None:
+        return None
+    if target is not None and target.status is not PageStatus.removed:
+        return None
+    old_path = previous.path
+    new_path = assign_path(mirror, identity, previous)
+    if new_path is None:
+        return None
+    if target is not None:
+        mirror.record_file_effect(
+            FileEffect(kind=FileEffectKind.archived_copy_deleted, path=target.path)
+        )
+        mirror.pages.remove(target)
+    stale = mirror.alias(identity)
+    if stale is not None:
+        mirror.aliases.remove(stale)
+    previous.identity = identity
+    previous.previous_digest = previous.content_digest
+    if new_path != old_path:
+        previous.moved_from = old_path
+        previous.path = new_path
+        mirror.record_file_effect(
+            FileEffect(kind=FileEffectKind.moved, path=old_path, source=new_path)
+        )
+    refresh_page(candidate, previous, clock)
+    return previous
+
+
+def revive_removed_page(candidate: PageCandidate, clock: Clock) -> Page | None:
+    """Realises mirror.allium ReviveRemovedPage: the revived page; None when its guards fail.
+
+    The removed record is written again at a path for its identity, new again, and its
+    archived copy leaves the removed area.
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.converted:
+        return None
+    mirror = candidate.mirror
+    identity = _page_identity(candidate)
+    target = mirror.page(identity)
+    if mirror.known_page(candidate.requested_identity) is not None:
+        return None
+    if target is None or target.status is not PageStatus.removed:
+        return None
+    archived_path = target.path
+    new_path = assign_path(mirror, identity)
+    if new_path is None:
+        return None
+    target.status = PageStatus.written
+    target.removed_at = None
+    target.removal_reason = None
+    target.redirect_target = None
+    target.path = new_path
+    target.previous_digest = None
+    target.first_seen = clock.now()
+    mirror.record_file_effect(
+        FileEffect(kind=FileEffectKind.archived_copy_deleted, path=archived_path)
+    )
+    refresh_page(candidate, target, clock)
+    return target
+
+
+def remove_absent_page(candidate: PageCandidate, clock: Clock) -> PageRemoved | None:
+    """Realises mirror.allium RemoveAbsentPage: RetirePage's PageRemoved, else None."""
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.absent:
+        return None
+    previous = candidate.mirror.known_page(candidate.requested_identity)
+    if previous is None:
+        return None
+    candidate.status = CandidateStatus.accepted
+    return retire_page(previous, RemovalReason.absent, clock, candidate=candidate)
+
+
+def accept_absent_without_page(candidate: PageCandidate) -> bool:
+    """Realises mirror.allium AcceptAbsentWithoutPage; False when its guards do not hold."""
+    return _accept_without_page(candidate, CandidateOutcome.absent)
+
+
+def remove_redirected_out_page(candidate: PageCandidate, clock: Clock) -> PageRemoved | None:
+    """Realises mirror.allium RemoveRedirectedOutPage: RetirePage's PageRemoved, else None.
+
+    The out-of-scope target the candidate carries is recorded on the removed page.
+    """
+    if candidate.status is not CandidateStatus.pending:
+        return None
+    if candidate.outcome is not CandidateOutcome.redirected_out:
+        return None
+    previous = candidate.mirror.known_page(candidate.requested_identity)
+    if previous is None:
+        return None
+    candidate.status = CandidateStatus.accepted
+    return retire_page(
+        previous,
+        RemovalReason.redirected_out,
+        clock,
+        redirect_target=candidate.redirect_target,
+        candidate=candidate,
+    )
+
+
+def accept_redirected_out_without_page(candidate: PageCandidate) -> bool:
+    """Realises mirror.allium AcceptRedirectedOutWithoutPage; False when its guards fail."""
+    return _accept_without_page(candidate, CandidateOutcome.redirected_out)
+
+
+def retire_page(
+    page: Page,
+    reason: RemovalReason,
+    clock: Clock,
+    *,
+    redirect_target: str | None = None,
+    candidate: PageCandidate | None = None,
+) -> PageRemoved | None:
+    """Realises mirror.allium RetirePage: its PageRemoved; None when the page is not written.
+
+    The page keeps its record and path; its aliases and outbound links go. Its file is
+    archived at _removed/<host>/<relative path>, or deleted under CONFIG.prune; no file
+    moves here: the event is recorded and the next finalise pass applies it. A page moved
+    this run and not yet published is still at its published path, which the event takes.
+    """
+    if page.status is not PageStatus.written:
+        return None
+    mirror = page.mirror
+    page.status = PageStatus.removed
+    page.removed_at = clock.now()
+    page.removal_reason = reason
+    page.redirect_target = redirect_target
+    page.moved_from = None
+    mirror.aliases = [alias for alias in mirror.aliases if alias.target is not page]
+    mirror.links = [link for link in mirror.links if link.source is not page]
+    kind = FileEffectKind.deleted if CONFIG.prune else FileEffectKind.archived
+    source = _published_path(mirror, page.path)
+    mirror.record_file_effect(FileEffect(kind=kind, path=page.path, source=source))
+    removed = PageRemoved(mirror=mirror, page=page, reason=reason, candidate=candidate)
+    mirror.removals.append(removed)
+    return removed
+
+
+def _published_path(mirror: Mirror, path: str) -> str | None:
+    """The file a page at `path` is still at, when the moves recorded this run moved it.
+
+    No file moves before finalisation, so the moves are walked back, latest first, from
+    `path` to the path the page was last published at; None when no move led to `path`.
+    """
+    current = path
+    for effect in reversed(mirror.file_effects):
+        if effect.kind is FileEffectKind.moved and effect.source == current:
+            current = effect.path
+    return None if current == path else current
+
+
+def settle_candidate(
+    candidate: PageCandidate, clock: Clock
+) -> Page | CandidateDiscarded | CandidateDuplicate | PageRemoved | None:
+    """Settle one candidate: the one intake rule whose guards hold fires.
+
+    In order: StoreNewPage, RefuseUnplaceableCandidate, RejectDuplicateCandidate,
+    RewriteKnownPage, MovePage, ReviveRemovedPage, RecordUnchanged,
+    DiscardUnchangedWithoutPage, RemoveAbsentPage, AcceptAbsentWithoutPage,
+    RemoveRedirectedOutPage, AcceptRedirectedOutWithoutPage; the guards are exclusive, so
+    trying the two Accept rules last changes nothing. The answer is PageStored's page,
+    CandidateDiscarded, CandidateDuplicate or PageRemoved; None when the candidate is not
+    pending or an Accept...WithoutPage rule took it, which raises no event.
     """
     if candidate.status is not CandidateStatus.pending:
         return None
     settled = (
         store_new_page(candidate, clock)
         or refuse_unplaceable_candidate(candidate)
+        or reject_duplicate_candidate(candidate, clock)
+        or rewrite_known_page(candidate, clock)
+        or move_page(candidate, clock)
+        or revive_removed_page(candidate, clock)
         or record_unchanged(candidate, clock)
         or discard_unchanged_without_page(candidate)
-        or rewrite_known_page(candidate, clock)
+        or remove_absent_page(candidate, clock)
+        or remove_redirected_out_page(candidate, clock)
     )
-    if settled is None:
-        raise NotInThisSlice(rule="PageCandidate.created")
+    # The two rules that raise no event, one per outcome.
+    if settled is None and not accept_absent_without_page(candidate):
+        accept_redirected_out_without_page(candidate)
     return settled
 
 
@@ -315,6 +522,26 @@ def take_candidate(candidate: PageCandidate, clock: Clock) -> Page | None:
     """Settle one candidate as `settle_candidate` does: PageStored's page, else None."""
     settled = settle_candidate(candidate, clock)
     return settled if isinstance(settled, Page) else None
+
+
+def _accept_without_page(candidate: PageCandidate, outcome: CandidateOutcome) -> bool:
+    """Accept a pending candidate of `outcome` whose requested URL has no known page."""
+    if candidate.status is not CandidateStatus.pending or candidate.outcome is not outcome:
+        return False
+    if candidate.mirror.known_page(candidate.requested_identity) is not None:
+        return False
+    candidate.status = CandidateStatus.accepted
+    return True
+
+
+def _passed(candidate: PageCandidate) -> list[str]:
+    """Every URL on the way to the page, as identities: each hop, the source, the request."""
+    scope = candidate.mirror.scope
+    return [
+        *(scope.identity_of(hop) for hop in candidate.redirect_hops),
+        scope.identity_of(candidate.source_url),
+        candidate.requested_identity,
+    ]
 
 
 def _page_identity(candidate: PageCandidate) -> str:

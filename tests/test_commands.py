@@ -710,3 +710,93 @@ def test_UnchangedRunIsStable_a_moved_validator_rewrites_no_page_or_index_file(
     assert report(out)["changes"] == [
         {"kind": "unchanged", "url": SEED, "path": START_PATH, "moved_from": None}
     ]
+
+
+# --- The page lifecycle (T15) -----------------------------------------------------------
+
+OTHER = f"{SITE}/guide/other.html"
+KEEP = f"{SITE}/guide/keep/a.html"
+DROP = f"{SITE}/guide/drop/b.html"
+
+
+def linking(*paths: str) -> str:
+    """The fixture page with one link per path appended to its main."""
+    links = "".join(f'<p><a href="{path}">{path}</a></p>' for path in paths)
+    return PAGE.replace("</main>", f"{links}</main>")
+
+
+def manifest_page(out_dir: Path, identity: str) -> dict[str, object]:
+    """The manifest's record of the page whose identity is `identity`."""
+    manifest = json.loads(manifest_path(out_dir).read_text(encoding="utf-8"))
+    (record,) = [page for page in manifest["pages"] if page["identity"] == identity]
+    assert isinstance(record, dict)
+    return record
+
+
+def removed_rows(out_dir: Path) -> list[object]:
+    """The report's removed changes."""
+    changes = report(out_dir)["changes"]
+    assert isinstance(changes, list)
+    return [row for row in changes if row["kind"] == "removed"]
+
+
+def test_sync_removes_and_archives_a_page_that_answers_404(tmp_path: Path) -> None:
+    """Two syncs over a FakeFetcher: a page that answers 404 is removed and archived.
+
+    RemoveAbsentPage at intake, its file archived by the finalise pass at
+    _removed/<host>/<relative path>, and TallyRemoval's one removed row; the sync exits 0.
+    """
+    out = initialised(tmp_path / "out")
+    other_path = "pages/docs.example/other.md"
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, linking("other.html")), OTHER: html_response(OTHER, PAGE)}
+    )
+    assert synced(out, fetcher) is ExitCode.ok
+    published = (out / other_path).read_bytes()
+    del fetcher.responses[OTHER]
+    assert synced(out, fetcher) is ExitCode.ok
+    record = manifest_page(out, OTHER)
+    assert (record["status"], record["removal_reason"]) == ("removed", "absent")
+    assert record["path"] == other_path
+    assert not (out / other_path).exists()
+    assert (out / "_removed" / "docs.example" / "other.md").read_bytes() == published
+    assert removed_rows(out) == [
+        {"kind": "removed", "url": OTHER, "path": other_path, "moved_from": None}
+    ]
+    assert report(out)["exit_code"] == "ok"
+    frontier = json.loads((out / ".rovo" / "frontier.json").read_text(encoding="utf-8"))
+    rows = {row["identity"]: row["status"] for row in frontier["entries"]}
+    assert rows[OTHER] == "absent"
+
+
+def test_sync_retires_a_page_a_narrowed_scope_no_longer_admits(tmp_path: Path) -> None:
+    """RetireOutOfScopePages through two syncs: path_prefixes narrows to /guide/keep/.
+
+    The second sync never requests DROP, retires it out_of_scope at finalisation,
+    archives its file, removes the emptied directory and reports one removed row; the
+    seed and KEEP stay written.
+    """
+    out = initialised(tmp_path / "out")
+    fetcher = FakeFetcher(
+        {
+            SEED: html_response(SEED, linking("keep/a.html", "drop/b.html")),
+            KEEP: html_response(KEEP, PAGE),
+            DROP: html_response(DROP, PAGE),
+        }
+    )
+    assert synced(out, fetcher) is ExitCode.ok
+    drop_path = "pages/docs.example/drop/b.md"
+    published = (out / drop_path).read_bytes()
+    set_key(out, "path_prefixes", '["/guide/keep/"]')
+    before = len(fetcher.requests)
+    assert synced(out, fetcher) is ExitCode.ok
+    assert DROP not in fetcher.requests[before:]
+    record = manifest_page(out, DROP)
+    assert (record["status"], record["removal_reason"]) == ("removed", "out_of_scope")
+    assert not (out / "pages" / "docs.example" / "drop").exists()
+    assert (out / "_removed" / "docs.example" / "drop" / "b.md").read_bytes() == published
+    assert removed_rows(out) == [
+        {"kind": "removed", "url": DROP, "path": drop_path, "moved_from": None}
+    ]
+    assert manifest_page(out, SEED)["status"] == "written"
+    assert manifest_page(out, KEEP)["status"] == "written"

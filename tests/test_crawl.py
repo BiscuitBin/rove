@@ -10,6 +10,7 @@ FetchEntry makes its first attempt); the run's driver, `run_crawl`, does the res
 
 import dataclasses
 import importlib.metadata
+import itertools
 import json
 import sys
 from datetime import timedelta
@@ -29,6 +30,7 @@ from fakes import (
     fixture_site,
     html_response,
     not_found,
+    redirect_response,
     text_response,
     xml_response,
 )
@@ -53,6 +55,7 @@ from rovo._crawl.model import (
     Host,
     LadderWalk,
     ObservedUrl,
+    RedirectStop,
     RenderMode,
     RenderReason,
     RobotsMode,
@@ -122,6 +125,7 @@ from rovo._crawl.run import (
     run_crawl,
     save_frontier,
     select_batch,
+    settle_duplicate_entry,
     settle_stored_entry,
     settle_walk,
     skip_robots_disallowed,
@@ -132,6 +136,7 @@ from rovo._crawl.run import (
 from rovo._mirror.intake import admit_candidate, take_candidate
 from rovo._mirror.model import (
     CandidateDelivered,
+    CandidateDuplicate,
     CandidateOutcome,
     CrawlScope,
     Link,
@@ -141,11 +146,13 @@ from rovo._mirror.model import (
     Operator,
     Page,
     PageCandidate,
+    PageRemoved,
+    PageStatus,
+    RemovalReason,
     Tier,
 )
 from rovo._mirror.state import save_mirror
 from rovo._mirror.urls import hostname_of
-from rovo._unfinished import NotInThisSlice
 from spec_values import spec_duration, spec_enum, spec_float, spec_int
 
 SITE = "http://docs.example"
@@ -5362,13 +5369,21 @@ def test_raw_unchanged_is_defeated_by_a_forced_refetch_and_a_new_signature(
 def test_raw_unchanged_is_defeated_by_a_redirect_hop(tmp_path: Path) -> None:
     """A response that arrived through a redirect is never unchanged (DisposeFetch guidance).
 
-    Following a redirect is the lifecycle slice's, so the walk stops there rather than
-    delivering an unchanged candidate.
+    Re-propagated by T15, which follows redirects: the known seed now redirects to OTHER,
+    which answers the seed's stored raw document. The answer came through a hop, so it
+    is not unchanged: it counts as fetched and raises PageFetched, its row in progress.
     """
-    hopped = dataclasses.replace(html_response(SEED, PAGE), redirect_hops=(OTHER,))
-    _, _, walk = known_walk(tmp_path, FakeFetcher({SEED: hopped}))
-    with pytest.raises(NotInThisSlice):
-        dispose_fetch(walk)
+    again = FakeFetcher(
+        {
+            SEED: redirect_response(SEED, "/guide/other.html"),
+            OTHER: validated(html_response(OTHER, PAGE)),
+        }
+    )
+    _, _, walk = known_walk(tmp_path, again)
+    response = walk.attempts[-1].response
+    assert (response.source_url, response.redirect_hops) == (OTHER, (SEED,))
+    assert response.raw_digest == html_response(SEED, PAGE).raw_digest
+    assert dispose_fetch(walk) is True
     assert walk.entry.status is FrontierStatus.in_progress
 
 
@@ -5748,3 +5763,307 @@ def test_a_second_run_fetches_what_an_unchanged_page_links_unless_refollow_is_of
         assert row.status is FrontierStatus.unchanged
         outcomes[refollow] = sorted(url for url in again.requests if url in {OTHER, OUT_OF_SCOPE})
     assert outcomes == {True: sorted([OTHER, OUT_OF_SCOPE]), False: []}
+
+
+# --- The page lifecycle (T15) -------------------------------------------------------
+#
+# Redirects followed within the scope, at most discovery_max_redirects, never revisiting
+# (AttemptTier guidance); DisposeFetch's absent, redirected-out and unfollowed-redirect
+# branches; SettleDuplicateEntry; the intake's removals in CrawlResult.removed.
+
+NEW_PAGE = f"{SITE}/guide/new.html"
+LOOPING = f"{SITE}/guide/loop.html"
+B_TOPIC = f"{SITE}/guide/b.html"
+C_TOPIC = f"{SITE}/guide/c.html"
+LINKS_TO_B_AND_C = PAGE.replace(
+    "</main>",
+    '<p>Read <a href="/guide/b.html">B</a> and <a href="/guide/c.html">C</a>.</p></main>',
+)
+CANONICAL_C = PAGE.replace("<head>", f'<head><link rel="canonical" href="{C_TOPIC}">')
+CANONICAL_OTHER = PAGE.replace("<head>", f'<head><link rel="canonical" href="{OTHER}">')
+LINKS_TO_OTHER = PAGE.replace(
+    "</main>", '<p>Read <a href="/guide/other.html">the other page</a>.</p></main>'
+)
+GONE = 410
+STOP_ERRORS = {
+    RedirectStop.loop: "redirect loop",
+    RedirectStop.hop_limit: "too many redirects",
+    RedirectStop.out_of_scope: "redirected out of scope",
+}
+
+
+def hop_chain(redirects: int) -> dict[str, SiteResponse]:
+    """SEED redirecting `redirects` times in all, the last hop to NEW_PAGE, which answers.
+
+    Each Location is a path, resolved against the URL that answered it.
+    """
+    urls = [SEED, *(f"{SITE}/guide/hop-{n}.html" for n in range(1, redirects)), NEW_PAGE]
+    responses = {
+        url: redirect_response(url, target.removeprefix(SITE))
+        for url, target in itertools.pairwise(urls)
+    }
+    responses[NEW_PAGE] = html_response(NEW_PAGE, PAGE)
+    return responses
+
+
+def stopping(stop: RedirectStop) -> dict[str, SiteResponse]:
+    """A site whose seed's redirect stops for `stop`: a loop, a chain past the limit, or out."""
+    if stop is RedirectStop.loop:
+        return {
+            SEED: redirect_response(SEED, "/guide/loop.html"),
+            LOOPING: redirect_response(LOOPING, "/guide/start.html"),
+        }
+    if stop is RedirectStop.hop_limit:
+        return hop_chain(model.CONFIG.discovery_max_redirects + 1)
+    return {SEED: redirect_response(SEED, OFF_SITE)}
+
+
+def page_requests(fetcher: FakeFetcher) -> list[str]:
+    """The requests under /guide/, in order: discovery's robots.txt and probes left out."""
+    return [url for url in fetcher.requests if url.startswith(f"{SITE}/guide/")]
+
+
+def statuses(result: CrawlResult) -> dict[str, FrontierStatus]:
+    """Each frontier row's status, by identity."""
+    return {entry.identity: entry.status for entry in result.frontier.entries}
+
+
+def test_config_default_discovery_max_redirects(tmp_path: Path) -> None:
+    """Verify config parameter discovery_max_redirects has its declared default.
+
+    A chain of exactly that many redirects is followed to the page; one more stops at
+    the hop past the limit, which is never requested.
+    """
+    limit = model.CONFIG.discovery_max_redirects
+    assert limit == spec_int("crawl", "discovery_max_redirects")
+    within = FakeFetcher(hop_chain(limit))
+    _, _, walk = settled(tmp_path / "within", within)
+    response = walk.attempts[-1].response
+    assert response.ok
+    assert response.source_url == NEW_PAGE
+    assert len(response.redirect_hops) == limit
+    assert response.redirect_hops[0] == SEED
+    assert page_requests(within)[-1] == NEW_PAGE
+    past = FakeFetcher(hop_chain(limit + 1))
+    _, _, stopped = settled(tmp_path / "past", past)
+    answer = stopped.attempts[-1].response
+    assert answer.redirect_stop is RedirectStop.hop_limit
+    assert answer.redirect_location == NEW_PAGE
+    assert NEW_PAGE not in past.requests
+    assert len(page_requests(past)) == limit + 1
+
+
+def test_enum_comparable_RedirectStop(tmp_path: Path) -> None:
+    """Verify fields typed with enum RedirectStop are comparable.
+
+    The follower stops a loop, a chain past the limit and an out-of-scope hop, each
+    with its own reason, the stopped target as redirect_location.
+    """
+    stops: dict[RedirectStop, RedirectStop | None] = {}
+    for stop in RedirectStop:
+        _, _, walk = settled(tmp_path / stop.value, FakeFetcher(stopping(stop)))
+        response = walk.attempts[-1].response
+        assert response.unfollowed_redirect
+        stops[stop] = response.redirect_stop
+    assert stops == {stop: stop for stop in RedirectStop}
+    assert stops[RedirectStop.loop] == RedirectStop.loop
+    assert stops[RedirectStop.loop] != stops[RedirectStop.out_of_scope]
+    assert {stop.value for stop in RedirectStop} == set(spec_enum("crawl", "RedirectStop"))
+
+
+def test_DisposeFetch_an_unfollowed_redirect_fails_the_entry_with_its_stop(
+    tmp_path: Path,
+) -> None:
+    """DisposeFetch's unfollowed_redirect branch: EntryFailed, its error the stop's text.
+
+    A URL with no page that redirects out of scope fails as well: only a known page
+    redirected out is removed. The out-of-scope target is never requested.
+    """
+    for stop, error in STOP_ERRORS.items():
+        fetcher = FakeFetcher(stopping(stop))
+        _, _, walk = settled(tmp_path / stop.value, fetcher)
+        failed = dispose_fetch(walk)
+        assert isinstance(failed, EntryFailed), stop
+        assert (failed.error, failed.attempts) == (error, 1)
+        assert walk.entry.status is FrontierStatus.in_progress
+        assert OFF_SITE not in fetcher.requests
+    looped = FakeFetcher(stopping(RedirectStop.loop))
+    _, _, walk = settled(tmp_path / "looped", looped)
+    assert walk.attempts[-1].response.redirect_location == SEED
+    assert page_requests(looped) == [SEED, LOOPING]
+
+
+def test_transition_edge_FrontierEntry_in_progress_absent(tmp_path: Path) -> None:
+    """Verify transition in_progress -> absent on FrontierEntry.status is reachable via a witnessing rule.
+
+    DisposeFetch's absent branch: a 404 or 410 settles the row absent and delivers an
+    absent candidate with no validators. Through the driver, a seed that never had a
+    page and answers 404 is silent: no failed URL and no removal.
+    """  # noqa: E501  The obligation's description, quoted.
+    for status in (NOT_FOUND, GONE):
+        answer = dataclasses.replace(
+            html_response(SEED, "", status=status), etag='"x"', last_modified=STAMP
+        )
+        _, _, walk = settled(tmp_path / str(status), FakeFetcher({SEED: answer}))
+        delivered = dispose_fetch(walk)
+        assert isinstance(delivered, CandidateDelivered)
+        assert delivered.outcome is CandidateOutcome.absent
+        assert (delivered.etag, delivered.last_modified, delivered.content) == (None, None, None)
+        assert delivered.raw_digest == answer.raw_digest
+        assert delivered.requested_identity == SEED
+        assert walk.entry.status is FrontierStatus.absent
+    result = crawl_once(tmp_path / "run", FakeFetcher({}))
+    assert statuses(result) == {SEED: FrontierStatus.absent}
+    assert (result.failed, result.removed) == ((), ())
+    assert result.run.target.pages == []
+
+
+def test_transition_edge_FrontierEntry_absent_pending(tmp_path: Path) -> None:
+    """Verify transition absent -> pending on FrontierEntry.status is reachable via a witnessing rule.
+
+    PrepareRun's removed-page recheck: the seed, written by the first run, answers 404
+    in the second, which removes it and settles its row absent; the third run re-pends
+    the row at deferred_priority.
+    """  # noqa: E501  The obligation's description, quoted.
+    mirror = first_synced(tmp_path, seed_site())
+    gone = synced_again(mirror, FakeFetcher({}))
+    assert statuses(gone) == {SEED: FrontierStatus.absent}
+    (page,) = mirror.pages
+    assert page.status is PageStatus.removed
+    run = start_run(update_request(mirror, run_id=THIRD_RUN), FixedClock())
+    assert run is not None
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    assert attach_frontier(run, frontier) is frontier
+    assert prepare_run(run, frontier)
+    row = frontier.entry(SEED)
+    assert row is not None
+    assert row.status is FrontierStatus.pending
+    assert row.priority == model.CONFIG.deferred_priority
+
+
+def test_transition_edge_FrontierEntry_in_progress_duplicate(tmp_path: Path) -> None:
+    """Verify transition in_progress -> duplicate on FrontierEntry.status is reachable via a witnessing rule.
+
+    SettleDuplicateEntry: the seed links B and C; B names C canonical, so B is stored
+    as C; C, fetched next in the same run, is a duplicate of it.
+    """  # noqa: E501  The obligation's description, quoted.
+    fetcher = FakeFetcher(
+        {
+            SEED: html_response(SEED, LINKS_TO_B_AND_C),
+            B_TOPIC: html_response(B_TOPIC, CANONICAL_C),
+            C_TOPIC: html_response(C_TOPIC, PAGE),
+        }
+    )
+    result = crawl_once(tmp_path, fetcher)
+    assert page_requests(fetcher) == [SEED, B_TOPIC, C_TOPIC]
+    assert statuses(result) == {
+        SEED: FrontierStatus.done,
+        B_TOPIC: FrontierStatus.done,
+        C_TOPIC: FrontierStatus.duplicate,
+    }
+    mirror = result.run.target
+    assert sorted(page.identity for page in mirror.pages) == [C_TOPIC, SEED]
+    assert [(alias.url, alias.target.identity) for alias in mirror.aliases] == [(B_TOPIC, C_TOPIC)]
+    assert result.failed == ()
+
+
+def duplicate_of_seed(out_dir: Path) -> tuple[Frontier, FrontierEntry, CandidateDuplicate]:
+    """The seed's row in progress, and a CandidateDuplicate for a candidate of the seed."""
+    run, frontier, walk = settled(out_dir, site())
+    delivered = convert_fetched(run, walk.entry, walk)
+    assert delivered is not None
+    candidate = admit_candidate(delivered)
+    page = take_candidate(candidate, FixedClock())
+    assert page is not None
+    return frontier, walk.entry, CandidateDuplicate(candidate=candidate, page=page)
+
+
+def test_rule_success_SettleDuplicateEntry(tmp_path: Path) -> None:
+    """Verify rule SettleDuplicateEntry succeeds when all preconditions are met."""
+    frontier, entry, duplicate = duplicate_of_seed(tmp_path)
+    assert entry.status is FrontierStatus.in_progress
+    assert settle_duplicate_entry(frontier, duplicate) is True
+    assert [row.status for row in frontier.entries if row is entry] == [FrontierStatus.duplicate]
+
+
+def test_rule_failure_SettleDuplicateEntry_1(tmp_path: Path) -> None:
+    """Verify rule SettleDuplicateEntry is rejected when requires clause fails.
+
+    requires: exists entry and entry.status = in_progress: the row is settled already,
+    or the requested identity has no row.
+    """
+    frontier, entry, duplicate = duplicate_of_seed(tmp_path)
+    entry.status = FrontierStatus.done
+    assert settle_duplicate_entry(frontier, duplicate) is False
+    assert entry.status is FrontierStatus.done
+    rowless = dataclasses.replace(
+        duplicate,
+        candidate=admit_candidate(
+            dataclasses.replace(
+                CandidateDelivered(
+                    run_id=1,
+                    mirror=frontier.mirror,
+                    requested_identity=SEED,
+                    source_url=SEED,
+                    redirect_hops=(),
+                    depth=0,
+                    outcome=CandidateOutcome.converted,
+                    tier=Tier.http,
+                    raw_digest="0" * 64,
+                ),
+                requested_identity=OTHER,
+            )
+        ),
+    )
+    entry.status = FrontierStatus.in_progress
+    assert settle_duplicate_entry(frontier, rowless) is False
+    assert entry.status is FrontierStatus.in_progress
+
+
+def test_DisposeFetch_a_known_page_redirected_out_is_delivered_and_settled_done(
+    tmp_path: Path,
+) -> None:
+    """DisposeFetch's redirected_out branch: a known page whose redirect leaves the scope.
+
+    The row settles done and the candidate carries the out-of-scope target; the target
+    is never requested.
+    """
+    again = FakeFetcher({SEED: redirect_response(SEED, OFF_SITE)})
+    _, _, walk = known_walk(tmp_path, again)
+    delivered = dispose_fetch(walk)
+    assert isinstance(delivered, CandidateDelivered)
+    assert delivered.outcome is CandidateOutcome.redirected_out
+    assert delivered.redirect_target == OFF_SITE
+    assert (delivered.etag, delivered.last_modified, delivered.content) == (None, None, None)
+    assert walk.entry.status is FrontierStatus.done
+    assert OFF_SITE not in again.requests
+
+
+def test_CrawlResult_carries_the_intakes_removals(tmp_path: Path) -> None:
+    """Intake removals travel in CrawlResult.removed: an absent page and a merged one.
+
+    The seed answers 404 on the second run; elsewhere, the seed's new canonical names
+    OTHER, written by the first run, which merges the seed into OTHER.
+    """
+    mirror = first_synced(tmp_path / "absent", seed_site())
+    result = synced_again(mirror, FakeFetcher({}))
+    (removal,) = result.removed
+    assert (removal.page.identity, removal.reason) == (SEED, RemovalReason.absent)
+    assert removal.mirror is mirror
+    assert removal.candidate is not None
+
+    merging = new_mirror(tmp_path / "merged")
+    first = FakeFetcher(
+        {SEED: html_response(SEED, LINKS_TO_OTHER), OTHER: html_response(OTHER, PAGE)}
+    )
+    run_crawl(request(merging), None, first, FixedClock())
+    again = FakeFetcher(
+        {SEED: html_response(SEED, CANONICAL_OTHER), OTHER: html_response(OTHER, PAGE)}
+    )
+    merged = synced_again(merging, again)
+    assert [(row.page.identity, row.reason) for row in merged.removed] == [
+        (SEED, RemovalReason.merged)
+    ]
+    assert isinstance(merged.removed[0], PageRemoved)
+    assert merging.known_page(SEED) is merging.page(OTHER)

@@ -10,7 +10,7 @@ from rovo._unfinished import NotInThisSlice
 
 if TYPE_CHECKING:
     from rovo._convert.model import Profile
-    from rovo._mirror.model import Mirror
+    from rovo._mirror.model import Mirror, Page
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _WEB_SCHEMES = frozenset(_DEFAULT_PORTS)
@@ -127,7 +127,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
     return mapped.get(raw, profile.version_default) if raw is not None else profile.version_default
 
 
-def assign_path(mirror: "Mirror", identity: str) -> str | None:
+def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) -> str | None:
     """The page path for an identity, per MovePage's guidance (mirror.allium 648 to 714).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
@@ -140,8 +140,9 @@ def assign_path(mirror: "Mirror", identity: str) -> str | None:
     becomes the stem cut to max_path_chars - 10, "-" and the first collision_hash_chars
     hex of the identity's digest; when that path is unusable too, the suffix is the full
     digest, the stem cut to fit; a cut never shortens pages/<host>/. When no option is
-    usable, None (RefuseUnplaceableCandidate). A version label's form is not yet
-    specified, so a page whose path would carry one is NotInThisSlice.
+    usable, None (RefuseUnplaceableCandidate). `mover` is the page MovePage gives the
+    identity: it is not another page, so the path it holds is usable. A version label's
+    form is not yet specified, so a page whose path would carry one is NotInThisSlice.
     """
     from rovo._mirror.model import CONFIG  # noqa: PLC0415  The model imports this module.
 
@@ -163,7 +164,7 @@ def assign_path(mirror: "Mirror", identity: str) -> str | None:
         (
             path
             for path in options
-            if path.startswith(root) and _usable(mirror, identity, path, max_chars)
+            if path.startswith(root) and _usable(mirror, identity, path, max_chars, mover)
         ),
         None,
     )
@@ -254,9 +255,13 @@ def _cut(stem: str, length: int, root: str) -> str:
     return stem[:length] if length >= len(root) else ""
 
 
-def _usable(mirror: "Mirror", identity: str, candidate: str, max_chars: int) -> bool:
+def _usable(
+    mirror: "Mirror", identity: str, candidate: str, max_chars: int, mover: "Page | None"
+) -> bool:
     held = any(
-        page.identity != identity and page.path.casefold() == candidate.casefold()
+        page is not mover
+        and page.identity != identity
+        and page.path.casefold() == candidate.casefold()
         for page in mirror.pages
     )
     return not held and len(candidate) <= max_chars

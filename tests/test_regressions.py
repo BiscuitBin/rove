@@ -18,19 +18,31 @@ exponent past Decimal's limit are past the cap, while a value outside float's gr
 no Crawl-delay and one too small for Decimal is no delay. T13 (planning): the report's
 discovered counts the frontier's rows after discovery, and a sitemap entry or llms.txt
 target with no identity is skipped (crawl.allium ExpandSitemapEntries and ReadLlmsTxt
-guidance, at ecfa257).
+guidance, at ecfa257). T15 (weed 1, ai_tmp/T15/weed-1.md): a move whose natural path is
+unchanged keeps its path, and a redirected llms.txt's relative targets resolve against
+llms_txt_url. T15 (weed 2 and 3, ai_tmp/T15/weed-3.md): a case-only move leaves the page
+file in place under its new spelling.
 """
 
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from http import HTTPStatus
 from pathlib import Path
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
-from fakes import FakeFetcher, FixedClock, fixture_site, html_response, text_response, xml_response
+from fakes import (
+    FakeFetcher,
+    FixedClock,
+    fixture_site,
+    html_response,
+    redirect_response,
+    text_response,
+    xml_response,
+)
 from rovo import _commands
 from rovo._config import initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
@@ -45,21 +57,39 @@ from rovo._crawl.run import (
     dispose_fetch,
     entry_fails,
     fail_discarded_entry,
+    read_llms_txt,
     run_crawl,
 )
 from rovo._mirror import model
 from rovo._mirror.finalise import finalise
-from rovo._mirror.intake import admit_candidate, take_candidate
-from rovo._mirror.model import CandidateDiscarded, CandidateStatus, Operator, Tier
+from rovo._mirror.intake import admit_candidate, move_page, take_candidate
+from rovo._mirror.model import (
+    CandidateDiscarded,
+    CandidateStatus,
+    Operator,
+    StoreOutcome,
+    Tier,
+)
 from rovo._mirror.state import load_mirror, manifest_path
 from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, origin_of
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
 from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
-from test_crawl import declaring, settled, site, urlset
+from test_crawl import LLMS_TXT, declaring, host_open, settled, site, urlset
 from test_crawl import new_mirror as crawl_mirror
 from test_crawl import request as crawl_request
-from test_mirror import FIRST_RUN, ROOT, new_mirror, stored
+from test_mirror import (
+    FIRST_RUN,
+    OTHER,
+    OTHER_BODY,
+    ROOT,
+    candidate_for,
+    content,
+    finalised_run,
+    new_mirror,
+    stored,
+    written_pair,
+)
 from test_report import crawled, opened
 from test_unplaceable_candidate import crowded, victim_candidate
 
@@ -98,11 +128,24 @@ def test_a_stopped_finalisation_persists_no_done_row(tmp_path: Path) -> None:
     """crawl.allium SettleStoredEntry: a done row always has a page in the mirror.
 
     A sync whose finalisation stops saves neither the frontier nor the run, so the next
-    sync fetches and stores the page again.
+    sync fetches and stores the page again. Re-propagated by T15 (origin T09): the stop
+    was next.html's 404, which T15 settles silently (AcceptAbsentWithoutPage); next.html
+    now answers a non-HTML document, whose skipped_not_html branch still stops the run.
     """
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
-    assert sync(out_dir, LINKED) is ExitCode.partial
+    following = f"{SITE}/guide/next.html"
+    fetcher = FakeFetcher(
+        {
+            SEED: html_response(SEED, LINKED),
+            following: text_response(following, "Not a page.\n"),
+        }
+    )
+    stopped = _commands.sync(
+        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+    )
+    assert stopped is ExitCode.partial
+    assert following in fetcher.requests
     state = out_dir / ".rovo"
     assert not (state / "frontier.json").exists()
     assert not (state / "runs.json").exists()
@@ -710,16 +753,24 @@ def test_a_saturated_retry_after_retires_the_host(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("status", MOVED_STATUSES)
-def test_a_raw_page_redirect_is_a_later_slices(tmp_path: Path, status: int) -> None:
-    """Implement T12-2: a page's raw 3xx other than 304 stops at DisposeFetch.
+def test_a_raw_page_redirect_without_a_location_fails_with_its_status_text(
+    tmp_path: Path, status: int
+) -> None:
+    """Implement T12-2, re-propagated by T15: a page's 3xx with no Location fails.
 
-    Following a redirect is the redirects slice's, so the answer never reaches the
-    not-ok branch and is never failed as its status text.
+    Was test_a_raw_page_redirect_is_a_later_slices, which expected
+    NotInThisSlice("DisposeFetch"). T15 follows redirects; a 3xx with no usable Location
+    is not followed and is not an unfollowed redirect (tickets/T15-lifecycle.md Open
+    points item 6), so it reaches DisposeFetch's not-ok branch and fails the entry with
+    its status text after its one try.
     """
     _, _, walk = settled(tmp_path, FakeFetcher({SEED: html_response(SEED, "", status=status)}))
-    with pytest.raises(NotInThisSlice) as stopped:
-        dispose_fetch(walk)
-    assert stopped.value.rule == "DisposeFetch"
+    response = walk.attempts[-1].response
+    assert (response.redirect_location, response.redirect_hops) == (None, ())
+    failed = dispose_fetch(walk)
+    assert isinstance(failed, EntryFailed)
+    assert failed.error == f"{status} {HTTPStatus(status).phrase}"
+    assert failed.attempts == 1
     assert walk.entry.status is FrontierStatus.in_progress
 
 
@@ -878,3 +929,70 @@ def test_a_sitemap_entry_or_llms_txt_target_with_no_identity_is_skipped(tmp_path
     assert [entry.identity for entry in result.frontier.entries] == [SEED]
     (host,) = result.run.hosts
     assert host.sitemap_entries_admitted == 1
+
+
+def test_a_move_whose_natural_path_is_unchanged_keeps_its_path(tmp_path: Path) -> None:
+    """Weed T15-1, mirror.allium MovePage: the file moves only if new_path != old_path.
+
+    assign_path suffixes a path held by another page; the page being moved is not
+    another page. OTHER redirecting from http to https keeps pages/<host>/other.md: no
+    digest suffix, no moved_from, no moved outcome, and no file under _removed/.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    old_path, old_digest = other.path, other.content_digest
+    secure = OTHER.replace("http://", "https://", 1)
+    candidate = candidate_for(
+        mirror, requested=OTHER, source=secure, hops=(OTHER,), converted=content(body=OTHER_BODY)
+    )
+    assert move_page(candidate, FixedClock()) is other
+    assert (other.identity, other.path) == (secure, old_path)
+    assert other.moved_from is None
+    assert not other.was_moved
+    assert other.previous_digest == old_digest
+    assert [(alias.url, alias.target.identity) for alias in mirror.aliases] == [(OTHER, secure)]
+    finalisation = finalised_run(mirror)
+    assert all(event.outcome is not StoreOutcome.moved for event in finalisation.finalised)
+    assert (tmp_path / old_path).is_file()
+    assert sorted(path.name for path in (tmp_path / ROOT).iterdir()) == ["other.md", "start.md"]
+    assert not (tmp_path / "_removed").exists()
+
+
+def test_a_redirected_llms_txt_resolves_its_targets_against_llms_txt_url(tmp_path: Path) -> None:
+    """Weed T15-1, crawl.allium ReadLlmsTxt: llms_txt_targets(response, llms_txt_url(name)).
+
+    /llms.txt answers 301 to /docs/llms.txt, which links the relative guide/a.html: the
+    target is resolved against the requested llms_txt_url, as a sitemap's entries are
+    against the requested sitemap URL, so it is observed at /guide/a.html.
+    """
+    fetcher = site()
+    moved = f"{SITE}/docs/llms.txt"
+    fetcher.responses[LLMS_TXT] = redirect_response(LLMS_TXT, "/docs/llms.txt")
+    fetcher.responses[moved] = text_response(moved, "# Example docs\n\n- [A](guide/a.html)\n")
+    run, frontier, host = host_open(tmp_path, fetcher)
+    response = read_llms_txt(run, host.name, frontier, fetcher)
+    assert response is not None
+    assert response.ok
+    assert [seen.url for seen in frontier.observed_urls] == [f"{SITE}/guide/a.html"]
+
+
+def test_a_case_only_move_leaves_the_file_under_its_new_spelling(tmp_path: Path) -> None:
+    """Weed T15-2 and T15-3, mirror.allium MovePage: previous.path = new_path.
+
+    OTHER redirecting to /guide/Other.html moves the page to pages/<host>/Other.md, a
+    path that differs from other.md only in case. PageFileMoved(old_path, new_path) ends
+    with the page file present and the directory entry spelled Other.md, as the manifest
+    and every relative link name it, on a case-insensitive file system as on a
+    case-sensitive one; nothing is archived.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    old_path = other.path
+    mixed = OTHER.replace("other.html", "Other.html")
+    candidate = candidate_for(
+        mirror, requested=OTHER, source=mixed, hops=(OTHER,), converted=content(body=OTHER_BODY)
+    )
+    assert move_page(candidate, FixedClock()) is other
+    assert (other.path, other.moved_from) == (f"{ROOT}Other.md", old_path)
+    finalised_run(mirror)
+    assert (tmp_path / other.path).is_file()
+    assert sorted(path.name for path in (tmp_path / ROOT).iterdir()) == ["Other.md", "start.md"]
+    assert not (tmp_path / "_removed").exists()

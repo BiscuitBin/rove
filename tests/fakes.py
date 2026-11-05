@@ -31,6 +31,7 @@ HTML = "text/html; charset=utf-8"
 TEXT = "text/plain; charset=utf-8"
 XML = "application/xml"
 NOT_FOUND = 404
+MOVED_PERMANENTLY = 301
 
 
 def html_response(url: str, markup: str, *, status: int = 200) -> SiteResponse:
@@ -61,6 +62,13 @@ def xml_response(url: str, text: str, *, status: int = 200) -> SiteResponse:
 def not_found(url: str) -> SiteResponse:
     """A 404 with an empty body."""
     return SiteResponse(status=NOT_FOUND, source_url=url, markup="", size=0, content_type=HTML)
+
+
+def redirect_response(url: str, location: str, *, status: int = MOVED_PERMANENTLY) -> SiteResponse:
+    """A 3xx from `url` whose raw Location header is `location`, with an empty body."""
+    return SiteResponse(
+        status=status, source_url=url, markup="", size=0, content_type=HTML, location=location
+    )
 
 
 def fixture_site(name: str, base: str) -> dict[str, SiteResponse]:
