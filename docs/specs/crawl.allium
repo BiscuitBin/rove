@@ -795,7 +795,7 @@ rule FetchRobots {
     when: RobotsRequested(run, name, origin)
     requires: run.status = running
     let host = Host{run: run, name: name}
-    requires: exists host
+    requires: exists host and not host.breaker_tripped
     requires: not exists RobotsPolicy{run: run, origin: origin}
     let response = fetch_resource(robots_url(origin), null, null, run, host)
     let breaker = host.breaker
@@ -831,6 +831,11 @@ rule FetchRobots {
         -- robots.txt is not governed by robots.txt (RFC 9309): they are
         -- bounded by the allowed hosts, the hop limit and the no-revisit
         -- test alone, so they never request robots.txt again.
+        -- Decided: on any fetch_resource redirect, robots.txt's own
+        -- included, a hop onto a host whose breaker has tripped is not
+        -- requested and its robots.txt is not read: the redirect stops
+        -- there and the fetch comes back as an error, "redirect to a
+        -- retired host".
         -- Its size covers every byte its retries received. It never
         -- classifies blocks and never feeds the breaker.
         -- Whatever it fetches (robots.txt here, a sitemap in FetchSitemap,
@@ -850,6 +855,13 @@ rule FetchRobots {
         -- pauses the host for retry_after_cap instead (QueueSitemaps,
         -- FetchSitemap, ReadLlmsTxt). For robots.txt the answer then
         -- stands: a 429 or 5xx is robots_refused.
+        -- Once a host's breaker has tripped, by a retirement or by its
+        -- block rate, no further discovery request goes to it: this rule,
+        -- QueueSitemaps, ReadRobotsBeforeSitemap, FetchSitemap and
+        -- ReadLlmsTxt each require an untripped host, as FetchEntry does.
+        -- Decided: a declared sitemap left unread because its host was
+        -- retired is not reported (no sitemap_unavailable for it); only the
+        -- retirement is (BreakerTripped).
 }
 
 rule AdoptRobotsRules {
@@ -964,7 +976,7 @@ rule QueueSitemaps {
     when: SitemapsRequested(run, name)
     requires: run.status = running
     let host = Host{run: run, name: name}
-    requires: exists host
+    requires: exists host and not host.breaker_tripped
     let policy = RobotsPolicy{run: run, origin: host.origin}
     let declared = policy?.declared_sitemaps ?? []
     ensures:
@@ -985,7 +997,7 @@ rule ReadRobotsBeforeSitemap {
     when: SitemapDue(run, name, url, declared)
     requires: run.status = running
     let host = Host{run: run, name: name}
-    requires: exists host
+    requires: exists host and not host.breaker_tripped
     requires: run.target.scope.identity_of(url) != null
     requires: hostname_of(url) = name
     requires: sitemap_admitted(url, run.target.profile, run.target.scope)
@@ -999,7 +1011,7 @@ rule FetchSitemap {
     when: SitemapDue(run, name, url, declared)
     requires: run.status = running
     let host = Host{run: run, name: name}
-    requires: exists host
+    requires: exists host and not host.breaker_tripped
     requires: run.target.scope.identity_of(url) != null
     requires: hostname_of(url) = name
     requires: sitemap_admitted(url, run.target.profile, run.target.scope)
@@ -1229,7 +1241,7 @@ rule ReadLlmsTxt {
     when: LlmsTxtRequested(run, name)
     requires: run.status = running
     let host = Host{run: run, name: name}
-    requires: exists host
+    requires: exists host and not host.breaker_tripped
     requires: robots_allows(run, llms_txt_url(name))
     let scope = run.target.scope
     let response = fetch_resource(llms_txt_url(name), null, null, run, host)
@@ -1359,8 +1371,9 @@ rule DryRun {
     @guidance
         -- Fetches no pages and lists the frontier as plain text, even
         -- under JSON progress. Discovery still reads robots.txt, sitemaps
-        -- and llms.txt, the re-pended rows persist, and the dry run's
-        -- report replaces the previous one.
+        -- and llms.txt, but none of a host once it is retired (FetchRobots),
+        -- the re-pended rows persist, and the dry run's report replaces the
+        -- previous one.
         -- The listing goes to standard output, one identity per line: the
         -- identity of every row SelectBatch's pending_rows would hold at
         -- this moment, rows on a retired host included, in next_pending
@@ -1584,10 +1597,18 @@ rule AttemptTier {
     @guidance
         -- classify_block checks, in order, a challenge header or page, an
         -- access-denied reference, a bot cookie on a tiny body, a 401 or
-        -- 403 (hard), a 429 that survived its retries (hard), then on a
+        -- 403 (hard), a 429 (hard), then on a
         -- 200 a main text under soft_block_ratio of the host's median
         -- (soft, only once the host has a text baseline) or a login wall
-        -- (soft). render_reason_of recognises an SPA shell, a noscript
+        -- (soft). The challenge recognisers name no header, page marker,
+        -- reference or cookie yet: until they are specified none is
+        -- recognised, and such an answer falls to the later checks.
+        -- classify_block cannot see the try, so every 429 is hard, but
+        -- only the standing attempt's verdict is disposed of and fed
+        -- (DisposeFetch, FeedBreaker): a 429 blocks once HttpRetry's
+        -- retries leave it standing. A Retry-After past retry_after_cap
+        -- retires the host (RetireHostOnLongRetryAfter) and the answer
+        -- stands: a 429 is blocked, a 503 fails. render_reason_of recognises an SPA shell, a noscript
         -- notice, an absent main selector, or thin text on a page over
         -- large_raw_html bytes.
         -- fetch_or_render applies request_policy(run, destination host):
@@ -1612,7 +1633,11 @@ rule AttemptTier {
         -- first as OpenHostForEntry opens one when the run has none); a hop
         -- robots.txt disallows is not requested and the response is an
         -- error, "redirect disallowed by robots.txt", which HttpRetry
-        -- retries as it does any error answer. Every response counts toward
+        -- retries as it does any error answer. Decided: a hop onto a host
+        -- whose breaker has tripped is not requested and its robots.txt is
+        -- not read: the redirect stops there and the response is an error,
+        -- "redirect to a retired host", retried as any error answer is, so
+        -- the page fails with it (DisposeFetch). Every response counts toward
         -- max_bytes the moment it arrives, retries and discarded renders
         -- included. Enabled controls wait for a free concurrency
         -- slot, any host pause and a rate token. There is no burst: the

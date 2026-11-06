@@ -686,8 +686,10 @@ rule MovePage {
         --
         -- The version label stays in the page path, outside the fixed
         -- template "pages/{host}/{path}", and only when the identity
-        -- carries the profile's version_param: the label is that value
-        -- mapped through version_map, or, when unmapped, the raw value,
+        -- carries the profile's version_param: the label is that value,
+        -- form-decoded first (application/x-www-form-urlencoded: "+" is a
+        -- space and %XX is decoded, so ?view=a%2Fb is a/b, labelled a-b),
+        -- mapped through version_map, or, when unmapped, the decoded value,
         -- either one with every character outside [A-Za-z0-9._-] replaced
         -- with "-". The rewritten last segment, less a final ".md" (exact,
         -- in lower case) when it has one, gets "@" and the label, then
@@ -826,8 +828,8 @@ rule StoreNewPage {
         -- or known, so there is one definition of what a store writes.
         -- version_label is null when the profile has no version_param.
         -- When the identity carries that parameter, it is the label
-        -- assign_path appends (MovePage's guidance: the value mapped
-        -- through version_map, or the raw value sanitised when unmapped);
+        -- assign_path appends (MovePage's guidance: the form-decoded
+        -- value mapped through version_map, or sanitised when unmapped);
         -- when it does not, it is the profile's version_default, which is
         -- only ever this recorded Page.version and never touches the path.
 }
