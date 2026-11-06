@@ -28,6 +28,8 @@ _ACCESS_REFUSED = frozenset({401, 403, 429})
 _TOO_MANY_REQUESTS = 429
 _SERVER_ERROR = 500
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
+# The error of a redirect hop not requested because its host had tripped.
+RETIRED_HOP = "redirect to a retired host"
 
 
 class RunKind(enum.Enum):
@@ -528,9 +530,11 @@ class Run:
     # DiscoveryFailed and HostBackedOff events raised so far, which CrawlResult returns;
     # the sitemaps read this run (FetchSitemap reads each at most once), the frontier's
     # row count when discovery ended (rovo.allium CloseRun's discovered_count), and the
-    # limiter of each host name a robots.txt hop reached before OpenHost opened it; and
-    # the root's sinks: its progress sink (start and page) and its AnnounceBackoff, which
-    # the run hands each HostBackedOff as it is raised.
+    # limiter of each host name a robots.txt hop reached before OpenHost opened it; the
+    # UrlBlocked, UrlSkippedBlocked and BreakerTripped events raised so far, which
+    # CrawlResult returns; and the root's sinks: its progress sink (start and page), its
+    # AnnounceBackoff, which the run hands each HostBackedOff as it is raised, and its
+    # AnnounceTrip, which it hands each BreakerTripped.
     timer: "Timer" = field(repr=False)
     draw: Callable[[float, float], float] = field(repr=False)
     discovery_failures: list["DiscoveryFailed"] = field(default_factory=list, repr=False)
@@ -540,6 +544,10 @@ class Run:
     pending_limiters: dict[str, "Host"] = field(default_factory=dict, repr=False)
     progress: Callable[["ProgressEvent"], None] | None = field(default=None, repr=False)
     on_backoff: Callable[["HostBackedOff"], None] | None = field(default=None, repr=False)
+    blocks: list["UrlBlocked"] = field(default_factory=list, repr=False)
+    skips: list["UrlSkippedBlocked"] = field(default_factory=list, repr=False)
+    trips: list["BreakerTripped"] = field(default_factory=list, repr=False)
+    on_trip: Callable[["BreakerTripped"], None] | None = field(default=None, repr=False)
 
     @property
     def tripped_hosts(self) -> list["Host"]:
@@ -785,6 +793,11 @@ class FetchAttempt:
         return self.response.error is not None or self.response.status == 0
 
     @property
+    def hop_refused(self) -> bool:
+        """A hop fetch_or_render did not request because its host had tripped."""
+        return self.response.error == RETIRED_HOP
+
+    @property
     def wants_escalation(self) -> bool:
         """The attempt asks for the next tier."""
         return (
@@ -838,10 +851,28 @@ class HostBackedOff:
 
 @dataclass(frozen=True, kw_only=True)
 class UrlSkippedBlocked:
-    """The UrlSkippedBlocked trigger (crawl.allium SelectBatch's all-tripped branch, T18)."""
+    """The UrlSkippedBlocked trigger (SelectBatch, SkipTrippedHost and BreakerTrips)."""
 
     run: Run
     url: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class UrlBlocked:
+    """The UrlBlocked trigger (crawl.allium DisposeFetch's hard or challenge branch)."""
+
+    run: Run
+    url: str
+    status: int
+    signature: str
+    tier: Tier
+
+
+@dataclass(frozen=True, kw_only=True)
+class BreakerTripped:
+    """The BreakerTripped trigger (BreakerTrips and the two host retirements)."""
+
+    host: Host
 
 
 @dataclass(frozen=True, kw_only=True)

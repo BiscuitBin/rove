@@ -33,6 +33,7 @@ nothing.
 """
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from http import HTTPStatus
@@ -59,7 +60,7 @@ from rovo._convert.model import ExtractionMethod, Profile
 from rovo._crawl import pace
 from rovo._crawl.fetch import HttpxFetcher
 from rovo._crawl.model import CONFIG as CRAWL_CONFIG
-from rovo._crawl.model import EntryFailed, FrontierStatus, RunStatus
+from rovo._crawl.model import BlockKind, EntryFailed, FrontierStatus, RunStatus
 from rovo._crawl.run import (
     classify_block,
     convert_fetched,
@@ -83,8 +84,8 @@ from rovo._mirror.model import (
 from rovo._mirror.state import load_mirror, manifest_path
 from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, origin_of
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
-from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
+from test_commands import set_key
 from test_convert import DEVSITE_CHROME, LEARN_URL, MSLEARN_PAGE, TABS_PAGE, converted_by
 from test_crawl import LLMS_TXT, declaring, host_open, settled, site, urlset
 from test_crawl import new_mirror as crawl_mirror
@@ -143,27 +144,35 @@ def test_a_stopped_finalisation_persists_no_done_row(tmp_path: Path) -> None:
     sync fetches and stores the page again. Re-propagated by T15 (origin T09): the stop
     was next.html's 404, which T15 settles silently (AcceptAbsentWithoutPage); next.html
     then answered a non-HTML document. Re-propagated by T16 (origin T09): T16 settles a
-    non-HTML answer skipped_not_html, so next.html now serves a login wall, whose soft
-    verdict (classify_block, T18) still stops the run.
+    non-HTML answer skipped_not_html, so next.html served a login wall. Re-propagated by
+    T18 (origin T09): T18 settles a login wall as a soft verdict and converts it, so
+    next.html now serves an SPA shell under render_mode = auto with the browser engine
+    installed, whose escalation (crawl.allium Escalate, a later slice's) still stops the
+    run; the second sync renders never again.
     """
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
+    set_key(out_dir, "render_mode", '"auto"')
     following = f"{SITE}/guide/next.html"
-    login_wall = LINKED.replace("</main>", '<input type="password"></main>')
+    spa_shell = '<html><body><div id="root"></div><script src="a.js"></script></body></html>'
     fetcher = FakeFetcher(
         {
             SEED: html_response(SEED, LINKED),
-            following: html_response(following, login_wall),
+            following: html_response(following, spa_shell),
         }
     )
     stopped = _commands.sync(
-        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=lambda tier: tier is not Tier.http,
     )
     assert stopped is ExitCode.partial
     assert following in fetcher.requests
     state = out_dir / ".rovo"
     assert not (state / "frontier.json").exists()
     assert not (state / "runs.json").exists()
+    set_key(out_dir, "render_mode", '"never"')
     assert sync(out_dir, UNLINKED) is ExitCode.ok
     assert len(load_mirror(out_dir).pages) == 1
     frontier = json.loads((state / "frontier.json").read_text(encoding="utf-8"))
@@ -332,11 +341,12 @@ def test_sync_refuses_a_malformed_start_url(tmp_path: Path) -> None:
 def test_a_password_input_is_a_login_wall_however_quoted(field: str) -> None:
     """crawl.allium classify_block guidance: a password form is a login wall (review B5, C1).
 
-    The verdict is a later slice's, so the slice stops there.
+    Re-propagated by T18 (origin T12), which expected NotInThisSlice: the verdict is
+    soft, signed "login wall", however the attribute is quoted or cased.
     """
     markup = UNLINKED.replace("</main>", f"<form>{field}</form></main>")
-    with pytest.raises(NotInThisSlice):
-        classify_block(html_response(SEED, markup), None)
+    verdict = classify_block(html_response(SEED, markup), None)
+    assert (verdict.kind, verdict.signature) == (BlockKind.soft, "login wall")
 
 
 def test_a_text_input_is_no_login_wall() -> None:
@@ -747,10 +757,12 @@ def test_a_non_ascii_digit_retry_after_is_unreadable(value: bytes) -> None:
 
 
 def test_a_saturated_retry_after_retires_the_host(tmp_path: Path) -> None:
-    """Implement T12-3, end to end: a 503 with a huge Retry-After reaches the trip guard.
+    """Implement T12-3, end to end: a 503 with a huge Retry-After retires the host.
 
     Through HttpxFetcher and the driver, the honoured Retry-After past retry_after_cap
-    stops at RetireHostOnLongRetryAfter, the breaker slice's, instead of an overflow.
+    retires the host (RetireHostOnLongRetryAfter) instead of an overflow: the seed is
+    asked once and fails, and the sync exits blocked (3). Re-propagated by T18 (origin
+    T12), which expected NotInThisSlice("RetireHostOnLongRetryAfter").
     """
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -760,13 +772,19 @@ def test_a_saturated_retry_after_retires_the_host(tmp_path: Path) -> None:
             SERVICE_UNAVAILABLE, headers={"retry-after": TOO_LONG_FOR_A_DURATION[0]}
         )
 
-    mirror = crawl_mirror(tmp_path)
-    with (
-        HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher,
-        pytest.raises(NotInThisSlice) as stopped,
-    ):
-        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "RetireHostOnLongRetryAfter"
+    mirror = crawl_mirror(tmp_path / "run")
+    with HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher:
+        result = run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert result.run.has_tripped_host
+    assert [(event.url, event.attempts) for event in result.failed] == [(SEED, 1)]
+    assert retired_sync(tmp_path / "sync", answer) is ExitCode.blocked
+
+
+def retired_sync(out_dir: Path, answer: Callable[[httpx.Request], httpx.Response]) -> ExitCode:
+    """Rovo init then rovo sync through HttpxFetcher answering with `answer`."""
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    with HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher:
+        return _commands.sync(out_dir, fetcher=fetcher, clock=FixedClock())
 
 
 @pytest.mark.parametrize("status", MOVED_STATUSES)
@@ -812,23 +830,26 @@ def test_a_huge_crawl_delay_retires_the_host_instead_of_overflowing(
     """Weed T12-4 code-bug 1, answered at 71b5b0f: a huge Crawl-delay never overflows.
 
     Through HttpxFetcher and the driver, a Crawl-delay past retry_after_cap is compared as
-    written (robots_crawl_delay_exceeds), never adopted, and retires the host: the run
-    stops at RetireHostOnLongCrawlDelay, the breaker slice's, not at an OverflowError in
-    timedelta or the limiter, and not stalled waiting it out.
+    written (robots_crawl_delay_exceeds), never adopted, and retires the host
+    (RetireHostOnLongCrawlDelay), not an OverflowError in timedelta or the limiter, and
+    not stalled waiting it out: nothing after robots.txt is requested and the sync exits
+    blocked (3). Re-propagated by T18 (origin T12), which expected
+    NotInThisSlice("RetireHostOnLongCrawlDelay").
     """
+    paths: list[str] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
         if request.url.path == "/robots.txt":
             return httpx.Response(200, text=f"User-agent: *\nCrawl-delay: {delay}\n")
         return httpx.Response(NOT_FOUND)
 
-    mirror = crawl_mirror(tmp_path)
-    with (
-        HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher,
-        pytest.raises(NotInThisSlice) as stopped,
-    ):
-        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+    mirror = crawl_mirror(tmp_path / "run")
+    with HttpxFetcher(transport=httpx.MockTransport(answer)) as fetcher:
+        result = run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert result.run.has_tripped_host
+    assert paths == ["/robots.txt"]
+    assert retired_sync(tmp_path / "sync", answer) is ExitCode.blocked
 
 
 def crawl_delay_fetcher(delay: str) -> HttpxFetcher:
@@ -864,15 +885,20 @@ def test_a_crawl_delay_is_compared_with_the_cap_as_written(tmp_path: Path, delay
     protego reads a Crawl-delay as a float, so 1e309 and 1e400 were no delay and the cap
     plus one sub-ULP step was the cap; an exponent past Decimal's own limit raised or was
     dropped. Each is past retry_after_cap as written (crawl.allium AdoptRobotsRules'
-    guidance, 837 to 843), so the run stops at RetireHostOnLongCrawlDelay after robots.txt.
+    guidance, 837 to 843 at fa096c4), so the host retires right after robots.txt
+    (RetireHostOnLongCrawlDelay): the seed is skipped, and the sync exits blocked (3).
+    Re-propagated by T18 (origin T12), which expected
+    NotInThisSlice("RetireHostOnLongCrawlDelay").
     """
-    mirror = crawl_mirror(tmp_path)
-    with (
-        crawl_delay_fetcher(delay) as fetcher,
-        pytest.raises(NotInThisSlice) as stopped,
-    ):
-        run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+    mirror = crawl_mirror(tmp_path / "run")
+    with crawl_delay_fetcher(delay) as fetcher:
+        result = run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+    assert result.run.has_tripped_host
+    assert [event.url for event in result.skipped] == [SEED]
+    assert _commands.init(SEED, tmp_path / "sync") is ExitCode.ok
+    with crawl_delay_fetcher(delay) as fetcher:
+        code = _commands.sync(tmp_path / "sync", fetcher=fetcher, clock=FixedClock())
+    assert code is ExitCode.blocked
 
 
 @pytest.mark.parametrize(

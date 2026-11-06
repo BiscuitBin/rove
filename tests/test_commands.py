@@ -61,7 +61,7 @@ from rovo._report import (
 )
 from rovo._unfinished import NotInThisSlice
 from test_crawl import started
-from test_report import opened
+from test_report import BLOCKED_PAGES, blocks_fetcher, opened
 
 SITE = "http://docs.example"
 SEED = f"{SITE}/guide/start.html"
@@ -2210,3 +2210,43 @@ def test_rule_failure_RefuseShowReport_1(tmp_path: Path) -> None:
     set_key(out_dir, "max_depth", '"deep"')
     assert synced(out_dir, site()) is ExitCode.usage
     assert _commands.report(out_dir) is ExitCode.ok
+
+
+# --- T18: a sync whose host trips ------------------------------------------------------
+
+
+def test_a_sync_whose_host_trips_exits_3_with_its_report(tmp_path: Path) -> None:
+    """A sync whose host's breaker trips exits blocked (3) and writes its report.
+
+    The blocks fixture site, three of its pages answering 401, 403 and 429: the report
+    lists them as blocked, the pages after the trip as skipped, breaker_tripped true and
+    exit_code blocked. The progress sink gets one breaker_tripped event naming the host,
+    live (before the page event of the walk that tripped it) and before done.
+    """
+    out_dir = initialised(tmp_path / "out")
+    events: list[ProgressEvent] = []
+    code = _commands.sync(
+        out_dir,
+        fetcher=blocks_fetcher(),
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        json_events=True,
+        progress=events.append,
+    )
+    assert code is ExitCode.blocked
+    data = report(out_dir)
+    assert data["exit_code"] == "blocked"
+    assert data["breaker_tripped"] is True
+    blocked = data["blocked_urls"]
+    assert isinstance(blocked, list)
+    assert {row["url"] for row in blocked} == {
+        f"{SITE}/guide/{name}.html" for name in BLOCKED_PAGES
+    }
+    assert data["skipped_urls"]
+    trips = [event for event in events if event.event == "breaker_tripped"]
+    assert trips == [ProgressEvent(event="breaker_tripped", host="docs.example", until=None)]
+    names = [event.event for event in events]
+    assert names.index("breaker_tripped") < names.index("done")
+    assert names.index("breaker_tripped") < max(
+        index for index, name in enumerate(names) if name == "page"
+    )

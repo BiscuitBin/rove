@@ -166,6 +166,12 @@ content; `tests/e2e/test_mslearn_sync.py` writes its robots.txt and sitemaps onc
 is known and syncs it under `mslearn` to check the sitemap filter's placeholders, a page
 stored at `<name>@<label>.md` and a page the fallback extractor, trafilatura, takes.
 `tests/test_version_label.py` pins the version label in a page path and `Page.version`.
+`blocks` is a start page linking twelve pages and `soft` one linking five prose pages, a
+thin page and a login wall; `tests/e2e/test_blocks_sync.py` serves them, scripting the
+blocks, a long `Retry-After` and a long `Crawl-delay` with `always=`, to check blocked
+pages, the breaker's trip and exit 3, host retirement with no further request, and soft
+verdicts. `tests/test_blocks.py` holds the block, breaker and retirement obligations,
+and `tests/test_blocks_regressions.py` the regressions review finds.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

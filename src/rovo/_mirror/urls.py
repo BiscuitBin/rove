@@ -117,7 +117,7 @@ def digest(text: str) -> str:
 
 
 def version_label(profile: "Profile", identity: str) -> str | None:
-    """Page.version for the identity (StoreNewPage guidance, mirror.allium 827 to 832).
+    """Page.version for the identity (StoreNewPage guidance, mirror.allium 829 to 834).
 
     Null when the profile has no version_param; the path's label (`_path_label`) when the
     identity carries it; otherwise the profile's version_default.
@@ -129,12 +129,12 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def _path_label(profile: "Profile", identity: str) -> str | None:
-    """The label assign_path appends (MovePage guidance, mirror.allium 688 to 702).
+    """The label assign_path appends (MovePage guidance, mirror.allium 688 to 704).
 
     Only an identity carrying the profile's version_param has one: the value mapped
     through version_map, else the raw value, either one with every character outside
-    [A-Za-z0-9._-] replaced with "-". The raw value is read decoded, as parse_qsl gives
-    it (the T17 follow-up batched question).
+    [A-Za-z0-9._-] replaced with "-". The raw value is form-decoded first ("+" a space,
+    %XX decoded), as parse_qsl gives it.
     """
     if profile.version_param is None:
         return None

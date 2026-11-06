@@ -179,3 +179,15 @@ policy.
   dependency trafilatura (`trafilatura>=2.3.1,<3`, imported only then), flagged
   `extractor_fallback` with method `fallback`, before the whole body is taken.
   `rovo verify` prints the gate tallies whether or not there is a finding.
+- Blocks and the breaker: a page answering 401, 403, or 429 once its retries are spent
+  is blocked and listed under `blocked_urls`, where it stopped the sync with exit 1; a
+  thin page under its host's text baseline or a login wall is converted and flagged
+  `soft_block_suspected`. A host whose block rate breaches the threshold trips its
+  breaker, and a `Retry-After` or `Crawl-delay` past `retry_after_cap` on robots.txt, a
+  declared sitemap or a page retires the host: it gets no further request of any kind,
+  redirect hops onto it included (`redirect to a retired host`); a page whose own
+  robots.txt read retired its host, and a page mid-fetch that would need another try
+  or hop on it, are skipped while an answer already held still settles; its remaining
+  pages are listed under `skipped_urls`, `--json` prints a `breaker_tripped` event and the sync
+  exits 3. A version label's value is form-decoded (`+` is a space) before it is mapped
+  and sanitised.

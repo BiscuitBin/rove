@@ -35,6 +35,7 @@ from rovo._crawl.model import (
     BlockKind,
     BlockVerdict,
     BreakerStatus,
+    DiscoveryProblem,
     FrontierStatus,
     RenderMode,
     RenderReason,
@@ -156,11 +157,16 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
 
 
 @pytest.mark.parametrize(
-    "responses",
+    ("responses", "status"),
     [
-        pytest.param({SEED: html_response(SEED, "", status=FORBIDDEN)}, id="blocked-page"),
+        pytest.param(
+            {SEED: html_response(SEED, "", status=FORBIDDEN)},
+            FrontierStatus.blocked,
+            id="blocked-page",
+        ),
         pytest.param(
             {SEED: html_response(SEED, PAGE.replace("</main>", '<input type="password"></main>'))},
+            FrontierStatus.done,
             id="login-wall",
         ),
         pytest.param(
@@ -173,70 +179,82 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
                     retry_after=standard_policy().retry_after_cap + timedelta(seconds=1),
                 )
             },
+            FrontierStatus.blocked,
             id="long-retry-after",
         ),
     ],
 )
-def test_a_later_slices_answer_stops_the_run(
-    tmp_path: Path, responses: dict[str, SiteResponse]
+def test_a_blocked_page_a_login_wall_and_a_long_retry_after_settle(
+    tmp_path: Path, responses: dict[str, SiteResponse], status: FrontierStatus
 ) -> None:
-    """Disposal, block and retry branches a later slice implements stop the run.
+    """A 403, a login wall and a Retry-After past the cap each settle the row (T18).
 
-    A refused robots.txt and a retryable answer are no longer here: T12 realises them.
-    T15 realises redirects and absent pages, so its re-propagation drops the
-    robots-redirect, absent-page and page-redirect cases. T16 realises a non-HTML answer
-    (skipped_not_html), so its re-propagation drops the not-html case; a soft verdict
-    (the login wall) still stops.
+    Re-propagated by T18 from test_a_later_slices_answer_stops_the_run (T09, re-propagated
+    by T12, T15 and T16), whose three remaining cases stopped with NotInThisSlice and saved
+    no frontier: the 403 and the long 429 are blocked, the login wall is a soft verdict
+    converted and stored, and the run ends with its frontier saved.
     """
-    with pytest.raises(NotInThisSlice):
-        crawl(tmp_path, responses)
-    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+    crawl(tmp_path, responses)
+    assert (tmp_path / ".rovo" / "frontier.json").exists()
+    mirror = load_mirror(tmp_path)
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    entry = frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is status
 
 
-def test_a_429_that_survives_its_retries_stops_at_classify_block(tmp_path: Path) -> None:
-    """A page answering 429 on every try is retried, then needs a hard verdict (T12).
+def test_a_429_that_survives_its_retries_is_blocked(tmp_path: Path) -> None:
+    """A page answering 429 on every try is retried, then blocked with a hard verdict (T18).
 
-    The verdict is the blocks slice's, so the run stops at classify_block, after
-    http_attempts tries.
+    Re-propagated by T18 from test_a_429_that_survives_its_retries_stops_at_classify_block
+    (T12): after http_attempts tries, the standing 429 is hard (AttemptTier guidance 1606
+    to 1611), its row blocked with a UrlBlocked naming status 429, and the frontier saved.
     """
     fetcher = FakeFetcher(
         {SEED: SiteResponse(status=TOO_MANY, source_url=SEED, markup="", size=0)}
     )
     mirror = new_mirror(tmp_path)
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "classify_block"
+    result = run_crawl(request(mirror), None, fetcher, FixedClock())
     assert fetcher.requests.count(SEED) == CRAWL.http_attempts
-    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+    assert [(event.url, event.status) for event in result.blocked] == [(SEED, TOO_MANY)]
+    entry = result.frontier.entry(SEED)
+    assert entry is not None
+    assert entry.status is FrontierStatus.blocked
+    assert (tmp_path / ".rovo" / "frontier.json").exists()
 
 
 @pytest.mark.parametrize("written", PAST_CAP_DELAYS, ids=PAST_CAP_IDS)
-def test_a_crawl_delay_past_the_cap_stops_at_retire_host_on_long_crawl_delay(
-    tmp_path: Path, written: str
-) -> None:
-    """An honoured Crawl-delay past retry_after_cap retires the host (spec 71b5b0f).
+def test_a_crawl_delay_past_the_cap_retires_the_host(tmp_path: Path, written: str) -> None:
+    """An honoured Crawl-delay past retry_after_cap retires the host (spec 71b5b0f, T18).
 
-    The trip is the breaker slice's, as for a long Retry-After, so the run stops at
-    RetireHostOnLongCrawlDelay right after robots.txt, however large the number: never
-    an overflow, and no page is requested. The number is read as written, so 1e309 and
-    1e400 (too large for a float), the cap plus one sub-ULP step and an exponent past
-    Decimal's limit retire it too (reviews T12-2-r2 C1/B1 and T12-3-r2 C1/B1).
+    Re-propagated by T18 from
+    test_a_crawl_delay_past_the_cap_stops_at_retire_host_on_long_crawl_delay (T12):
+    RetireHostOnLongCrawlDelay trips the breaker right after robots.txt, however large
+    the number: never an overflow, and nothing more is requested (spec 86e2ec5: no
+    sitemap, llms.txt or page). The number is read as written, so 1e309 and 1e400 (too
+    large for a float), the cap plus one sub-ULP step and an exponent past Decimal's
+    limit retire it too (reviews T12-2-r2 C1/B1 and T12-3-r2 C1/B1). The seed is skipped
+    and the frontier saved.
     """
     robots = text_response(ROBOTS, f"User-agent: *\nCrawl-delay: {written}\n")
     fetcher = FakeFetcher({ROBOTS: robots, SEED: html_response(SEED, PAGE)})
     mirror = new_mirror(tmp_path)
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "RetireHostOnLongCrawlDelay"
+    result = run_crawl(request(mirror), None, fetcher, FixedClock())
     assert fetcher.requests == [ROBOTS]
-    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+    assert result.run.has_tripped_host
+    assert [event.url for event in result.skipped] == [SEED]
+    assert (tmp_path / ".rovo" / "frontier.json").exists()
 
 
-def test_a_breaker_breach_stops_the_run(tmp_path: Path) -> None:
-    """The moment a host's breaker should act, the run stops at BreakerTrips (T12).
+def test_a_breaker_breach_trips_the_host(tmp_path: Path) -> None:
+    """The moment a host's breaker should act, BreakerTrips trips it (T18).
 
-    Ten seeds, three of which never answer: once breaker_min_outcomes walks have settled,
-    the share of failures is past block_rate_threshold. The trip is the breaker slice's.
+    Re-propagated by T18 from test_a_breaker_breach_stops_the_run (T12), which expected
+    NotInThisSlice("BreakerTrips") and no frontier. Ten seeds, three of which never
+    answer: once breaker_min_outcomes walks have settled, the share of failures is past
+    block_rate_threshold, so the host trips, BreakerTripped is returned and the frontier
+    is saved.
     """
     count = min(CRAWL.breaker_window, CRAWL.breaker_min_outcomes)
     failing = int(count * CRAWL.block_rate_threshold) + 1
@@ -254,10 +272,12 @@ def test_a_breaker_breach_stops_the_run(tmp_path: Path) -> None:
                 PAGE.replace("<h1>Getting started</h1>", f"<h1>Page {number}</h1><p>{prose}</p>"),
             )
     mirror = new_mirror(tmp_path, start_urls=seeds)
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(request(mirror), None, FakeFetcher(responses), FixedClock())
-    assert stopped.value.rule == "BreakerTrips"
-    assert not (tmp_path / ".rovo" / "frontier.json").exists()
+    result = run_crawl(request(mirror), None, FakeFetcher(responses), FixedClock())
+    host = result.run.host(HOST)
+    assert host is not None
+    assert host.breaker_tripped
+    assert [event.host for event in result.tripped] == [host]
+    assert (tmp_path / ".rovo" / "frontier.json").exists()
 
 
 def test_escalation_to_the_browser_stops_the_run(tmp_path: Path) -> None:
@@ -322,14 +342,17 @@ def test_a_sitemap_filter_placeholder_is_filled(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("declared_by", ["robots-txt", "declared-index"])
-def test_a_declared_sitemap_past_the_cap_stops_at_retire_host(
+def test_a_declared_sitemap_past_the_cap_retires_the_host(
     tmp_path: Path, declared_by: str
 ) -> None:
     """T13 follow-up (crawl.allium ecfa257 FetchSitemap): retires_host = declared and past_cap.
 
     A Retry-After past retry_after_cap on a declared sitemap, one robots.txt names or a
-    declared index's child, retires the host; the trip is the breaker slice's (T18), so
-    the run stops there. The long answer ends the tries: the sitemap is asked once.
+    declared index's child, retires the host. Re-propagated by T18 from
+    test_a_declared_sitemap_past_the_cap_stops_at_retire_host (T13), which expected
+    NotInThisSlice("RetireHostOnLongRetryAfter"): the host trips, the answer stands as
+    sitemap_unavailable, and nothing is requested after it (spec 86e2ec5). The long
+    answer ends the tries: the sitemap is asked once, and the seed is skipped.
     """
     named = MAPS if declared_by == "robots-txt" else MAPS_INDEX
     responses = {
@@ -339,12 +362,15 @@ def test_a_declared_sitemap_past_the_cap_stops_at_retire_host(
         MAPS: past_cap(MAPS),
     }
     fetcher = FakeFetcher(responses)
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
-    assert stopped.value.rule == "RetireHostOnLongRetryAfter"
+    result = run_crawl(request(new_mirror(tmp_path)), None, fetcher, FixedClock())
+    assert result.run.has_tripped_host
     assert fetcher.requests[-1] == MAPS
     assert fetcher.requests.count(MAPS) == 1
     assert SEED not in fetcher.requests
+    assert [event.url for event in result.skipped] == [SEED]
+    assert (MAPS, DiscoveryProblem.sitemap_unavailable) in [
+        (event.url, event.problem) for event in result.discovery_failed
+    ]
 
 
 def test_owner_testing_runs_stop(tmp_path: Path) -> None:
@@ -365,8 +391,13 @@ def test_owner_testing_runs_stop(tmp_path: Path) -> None:
         discover(run, frontier, FakeFetcher({}))
 
 
-def test_a_tripped_host_and_a_browser_attempt_stop(tmp_path: Path) -> None:
-    """Rows only on a tripped host, and a try at the browser tier, are later slices'."""
+def test_a_browser_attempt_stops_and_a_tripped_hosts_rows_are_skipped(tmp_path: Path) -> None:
+    """A try at the browser tier is a later slice's; rows only on a tripped host are skipped.
+
+    Re-propagated by T18 from test_a_tripped_host_and_a_browser_attempt_stop (T12): the
+    tripped half is SelectBatch's all-tripped branch, so the row is skipped_blocked and
+    the frontier exhausted, where it stopped at NotInThisSlice("SelectBatch").
+    """
     mirror = new_mirror(tmp_path)
     fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
     run = start_run(request(mirror), FixedClock())
@@ -385,8 +416,8 @@ def test_a_tripped_host_and_a_browser_attempt_stop(tmp_path: Path) -> None:
     assert host is not None
     assert host.breaker is not None
     host.breaker.status = BreakerStatus.tripped
-    with pytest.raises(NotInThisSlice):
-        select_batch(run, frontier)
+    assert select_batch(run, frontier) == []
+    assert entry.status is FrontierStatus.skipped_blocked
 
 
 def test_a_second_sync_of_a_known_page_keeps_it(tmp_path: Path) -> None:
@@ -646,12 +677,17 @@ def test_render_reasons(markup: str, reason: RenderReason) -> None:
 
 
 def test_classify_block_gives_none_otherwise() -> None:
-    """An answer that is no block has verdict none, and none counts against the host."""
+    """An answer that is no block has verdict none, and none counts against the host.
+
+    Re-propagated by T18 (origin T09): a 403, which stopped at NotInThisSlice, is hard
+    and counts against the host.
+    """
     verdict = classify_block(html_response(SEED, PAGE), None)
     assert verdict == BlockVerdict(kind=BlockKind.none, signature="")
     assert not verdict.counts_against_host
-    with pytest.raises(NotInThisSlice):
-        classify_block(html_response(SEED, "", status=FORBIDDEN), None)
+    forbidden = classify_block(html_response(SEED, "", status=FORBIDDEN), None)
+    assert forbidden == BlockVerdict(kind=BlockKind.hard, signature="403 Forbidden")
+    assert forbidden.counts_against_host
 
 
 def test_prepare_run_rechecks_written_and_removed_pages(tmp_path: Path) -> None:

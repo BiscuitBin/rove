@@ -33,6 +33,9 @@ from rovo._crawl.model import (
     Run,
     SiteResponse,
 )
+from rovo._crawl.model import (
+    RETIRED_HOP as RETIRED_HOP,  # noqa: PLC0414  Re-exported: FetchAttempt.hop_refused reads it.
+)
 from rovo._crawl.sitemaps import resolve_url
 from rovo._mirror.urls import hostname_of
 
@@ -207,11 +210,20 @@ def follow(  # noqa: PLR0913  One request's URL, its limiter and validators, and
 
     A hop's target that loops back (by identity), passes discovery_max_redirects or
     `admits` refuses is not requested: the last answer comes back with redirect_location
-    and its redirect_stop. `ready(target)` gives the host name whose limiter the hop
-    waits at, or None when robots.txt disallows the hop, which ends as an error answer.
+    and its redirect_stop. A hop onto a host whose breaker has tripped is not requested
+    and `ready` is not asked (its robots.txt is not read): it ends as the error answer
+    RETIRED_HOP, as does a hop whose host the robots.txt read `ready` makes retires
+    (crawl.allium 834-838, 1636-1640). `ready(target)` gives the host name whose limiter
+    the hop waits at, or None when robots.txt disallows the hop, which ends as the error
+    answer DISALLOWED_HOP.
     The final answer's redirect_hops are the URLs left behind, the requested one first.
     """
     identity_of = host.run.target.scope.identity_of
+
+    def tripped(target: str) -> bool:
+        known = host.run.host(hostname_of(target))
+        return known is not None and known.breaker_tripped
+
     wait_turn(host)
     response = fetcher.fetch(url, validators=validators)
     received = response.size
@@ -225,15 +237,17 @@ def follow(  # noqa: PLR0913  One request's URL, its limiter and validators, and
             stop = RedirectStop.hop_limit
         elif not admits(target):
             stop = RedirectStop.out_of_scope
-        destination = None if stop is not None else ready(target)
-        if destination is None:
+        destination = None if stop is not None or tripped(target) else ready(target)
+        retired = stop is None and tripped(target)  # Also when ready's robots.txt read retired it.
+        if destination is None or retired:
+            error = RETIRED_HOP if retired else DISALLOWED_HOP
             return dataclasses.replace(
                 response,
                 size=received,
                 redirect_hops=tuple(hops),
                 redirect_location=target,
                 redirect_stop=stop,
-                error=None if stop is not None else DISALLOWED_HOP,
+                error=None if stop is not None else error,
             )
         hops.append(response.source_url)
         visited.add(identity_of(target))
@@ -282,12 +296,14 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
     whether it retires or pauses the host is the caller's to say. Every try sends the
     validators given, which only a sitemap with a snapshot has, on its first request.
     Redirects within the allowed hosts are followed (`follow`); each try starts again at
-    `url`. A redirect not followed, a 3xx with no usable Location included, ends the
-    tries as an error answer. `ready` gives a hop's host, or None when robots.txt
-    disallows it; by default the hop's open host, else its host name's pending limiter
-    (`pending_limiter`), with no robots.txt read (robots.txt itself is not governed by
-    robots.txt). The size covers every try's and
-    every hop's bytes; no try counts as a fetch attempt.
+    `url`. A redirect stopped (a loop, the hop limit, out of scope) or a 3xx with no
+    usable Location ends the tries as an error answer; a hop `follow` refuses as an error
+    answer (a retired host, or robots.txt disallowing it) is retried as any error answer
+    is (crawl.allium 834 to 845, 1742 to 1743). `ready` gives a hop's host, or None when
+    robots.txt disallows it; by default the hop's open host, else its host name's pending
+    limiter (`pending_limiter`), with no robots.txt read (robots.txt itself is not
+    governed by robots.txt). The size covers every try's and every hop's bytes; no try
+    counts as a fetch attempt.
     """
     policy = run.policy
     scope = run.target.scope
@@ -302,7 +318,9 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
         )
         received += response.size
         unfollowed = response.status in _REDIRECTS and not response.not_modified
-        if response.unfollowed_redirect or unfollowed:
+        # A hop refused as an error answer (RETIRED_HOP, DISALLOWED_HOP) is retried below.
+        refused = response.unfollowed_redirect and response.redirect_stop is None
+        if (response.unfollowed_redirect or unfollowed) and not refused:
             error = response.error or (
                 _NO_LOCATION
                 if response.redirect_stop is None

@@ -105,3 +105,22 @@ def test_an_unlabelled_path_never_meets_a_labelled_one(tmp_path: Path) -> None:
     unlabelled = assign_path(mirror, f"{SITE}/guide/foo@beta")
     assert unlabelled == f"{ROOT}foo-beta.md"
     assert assign_path(mirror, f"{SITE}/guide/foo?view=graph-rest-beta") != unlabelled
+
+
+def test_the_version_value_is_form_decoded(tmp_path: Path) -> None:
+    """The value is form-decoded before it is mapped or sanitised (mirror.allium at 86e2ec5).
+
+    MovePage's guidance (688 to 704) and StoreNewPage's (829 to 834): "+" is a space and
+    %XX is decoded, so a version_map raw value holding a space matches ?view=a+b and
+    ?view=a%20b alike, and unmapped, ?view=a%2Fb is a/b, labelled a-b. Re-propagated by
+    T18 (origin T17), the maintainer's answer to T18's batched question, item 3.
+    """
+    spaced = dataclasses.replace(
+        profiles.MSLEARN, version_map=(VersionMapping(raw="graph rest", label="gr"),)
+    )
+    mirror = dataclasses.replace(learn_mirror(tmp_path), profile=spaced)
+    for query in ("graph+rest", "graph%20rest"):
+        assert version_label(spaced, f"{SITE}/guide/foo?view={query}") == "gr", query
+        assert assign_path(mirror, f"{SITE}/guide/foo?view={query}") == f"{ROOT}foo@gr.md"
+    assert version_label(profiles.MSLEARN, f"{SITE}/guide/foo?view=a%2Fb") == "a-b"
+    assert version_label(profiles.MSLEARN, f"{SITE}/guide/foo?view=a+b") == "a-b"

@@ -25,6 +25,7 @@ from rovo._crawl import model
 from rovo._crawl.model import (
     Breaker,
     BreakerStatus,
+    BreakerTripped,
     DiscoveryFailed,
     DiscoveryProblem,
     HostBackedOff,
@@ -37,6 +38,7 @@ from rovo._crawl.model import (
     RunRequest,
     RunStatus,
     StealthMode,
+    UrlBlocked,
     UrlSkippedBlocked,
     standard_policy,
 )
@@ -72,6 +74,7 @@ from rovo._report import (
     QualitySummary,
     ReportStatus,
     announce_backoff,
+    announce_trip,
     close_run,
     event_line,
     finalise_run_report,
@@ -83,6 +86,7 @@ from rovo._report import (
     report_refusal,
     summarise,
     take_broken_links,
+    tally_blocked_url,
     tally_discovery_problem,
     tally_failed_url,
     tally_finalised_page,
@@ -1432,3 +1436,198 @@ def test_SyncExitCodes_the_most_severe_ranking_input_wins(
     assert rank_and_write_report(report, run, FixedClock()) is expected
     assert written(tmp_path)["exit_code"] == expected.value
     assert expected is not ExitCode.usage
+
+
+# --- T18: blocked URLs, the trip and exit 3 -------------------------------------------
+
+BLOCKS_SITE = "blocks"
+# The blocks fixture site's pages that answer 401, 403 and 429 on every request in these
+# tests: enough blocked outcomes, after start.html and the pages before them, to trip the
+# breaker (tests/e2e/test_blocks_sync.py derives the same from CONFIG).
+BLOCKED_PAGES = {"p02": 403, "p04": 401, "p06": 429}
+
+
+def blocks_fetcher(blocked: dict[str, int] | None = None) -> FakeFetcher:
+    """The blocks fixture site from SITE, the named pages answering their block status."""
+    responses = fixture_site(BLOCKS_SITE, f"{SITE}/")
+    for name, status in (BLOCKED_PAGES if blocked is None else blocked).items():
+        url = f"{SITE}/guide/{name}.html"
+        responses[url] = html_response(url, "<p>Access denied.</p>", status=status)
+    return FakeFetcher(responses)
+
+
+def one_block(out_dir: Path) -> CrawlResult:
+    """A run of the blocks site whose p02.html alone answers 403: blocked, no trip."""
+    return crawled(out_dir, fetcher=blocks_fetcher({"p02": FORBIDDEN}))
+
+
+def test_value_equality_BlockedUrl(tmp_path: Path) -> None:
+    """Verify value type BlockedUrl has structural equality.
+
+    Equal fields, equal rows and hashes; each field differing, unequal; the row a
+    tallied UrlBlocked gives equals one built from its fields.
+    """
+    row = BlockedUrl(url=SEED, status=FORBIDDEN, signature="403 Forbidden", tier=Tier.http)
+    again = BlockedUrl(url=SEED, status=FORBIDDEN, signature="403 Forbidden", tier=Tier.http)
+    assert row == again
+    assert hash(row) == hash(again)
+    assert row != dataclasses.replace(row, url=OTHER)
+    assert row != dataclasses.replace(row, status=401)
+    assert row != dataclasses.replace(row, signature="401 Unauthorized")
+    assert row != dataclasses.replace(row, tier=Tier.browser)
+    result = one_block(tmp_path)
+    (blocked,) = result.blocked
+    report = opened(result.run)
+    assert tally_blocked_url(report, blocked)
+    assert report.blocked_urls == [
+        BlockedUrl(
+            url=f"{SITE}/guide/p02.html",
+            status=FORBIDDEN,
+            signature="403 Forbidden",
+            tier=Tier.http,
+        )
+    ]
+
+
+def test_entity_fields_BlockedUrl(tmp_path: Path) -> None:
+    """Verify all declared fields on BlockedUrl are present with correct types.
+
+    url, status, signature and tier, on the row a run's UrlBlocked is tallied into.
+    """
+    result = one_block(tmp_path)
+    report = opened(result.run)
+    for blocked in result.blocked:
+        assert tally_blocked_url(report, blocked)
+    (row,) = report.blocked_urls
+    assert isinstance(row, BlockedUrl)
+    assert isinstance(row.url, str)
+    assert isinstance(row.status, int)
+    assert isinstance(row.signature, str)
+    assert row.signature
+    assert isinstance(row.tier, Tier)
+
+
+def test_rule_success_TallyBlockedUrl(tmp_path: Path) -> None:
+    """Verify rule TallyBlockedUrl succeeds when all preconditions are met.
+
+    The open report of the run gains the URL, status, signature and tier in
+    blocked_urls; the run has failures, so with no tripped host the exit is partial and
+    crawl-report.json lists the row.
+    """
+    result = one_block(tmp_path)
+    (blocked,) = result.blocked
+    report = opened(result.run)
+    assert tally_blocked_url(report, blocked)
+    assert report.has_failures
+    assert close_run(report, result.run, result.frontier)
+    assert rank_and_write_report(report, result.run, FixedClock()) is ExitCode.partial
+    assert written(tmp_path)["blocked_urls"] == [
+        {
+            "url": f"{SITE}/guide/p02.html",
+            "status": FORBIDDEN,
+            "signature": "403 Forbidden",
+            "tier": "http",
+        }
+    ]
+
+
+def test_rule_failure_TallyBlockedUrl_1(tmp_path: Path) -> None:
+    """Verify rule TallyBlockedUrl is rejected when requires clause fails.
+
+    requires: exists report and report.status = open: another run's report, or a
+    written one.
+    """
+    report, run, _ = tallied(tmp_path)
+    blocked = UrlBlocked(
+        run=run, url=SEED, status=FORBIDDEN, signature="403 Forbidden", tier=Tier.http
+    )
+    other = opened(run)
+    other.run_id = run.id + 1
+    assert not tally_blocked_url(other, blocked)
+    assert other.blocked_urls == []
+    report.status = CrawlReportStatus.written
+    assert not tally_blocked_url(report, blocked)
+    assert report.blocked_urls == []
+
+
+def test_rule_success_AnnounceTrip(tmp_path: Path) -> None:
+    """Verify rule AnnounceTrip succeeds when all preconditions are met.
+
+    BreakerTripped sets the open report's breaker_tripped and becomes the
+    breaker_tripped progress event naming the host, its until and url null. A run whose
+    host trips returns the event.
+    """
+    result = crawled(tmp_path, fetcher=blocks_fetcher())
+    (tripped,) = result.tripped
+    assert tripped.host.name == HOST
+    report = opened(result.run)
+    assert report.breaker_tripped is False
+    event = announce_trip(report, tripped)
+    assert event == ProgressEvent(event="breaker_tripped", host=HOST, until=None, url=None)
+    assert report.breaker_tripped
+
+
+def test_rule_failure_AnnounceTrip_1(tmp_path: Path) -> None:
+    """Verify rule AnnounceTrip is rejected when requires clause fails.
+
+    requires: exists report and report.status = open: another run's report, or a
+    written one, is not marked and no event is raised.
+    """
+    report, run, _ = tallied(tmp_path)
+    host = run.host(HOST)
+    assert host is not None
+    tripped = BreakerTripped(host=host)
+    other = opened(run)
+    other.run_id = run.id + 1
+    assert announce_trip(other, tripped) is None
+    assert other.breaker_tripped is False
+    report.status = CrawlReportStatus.written
+    assert announce_trip(report, tripped) is None
+    assert report.breaker_tripped is False
+
+
+def tallied_run(out_dir: Path, result: CrawlResult) -> CrawlReport:
+    """The run's report with every blocked, skipped and tripped event of the run tallied."""
+    report = opened(result.run)
+    for blocked in result.blocked:
+        assert tally_blocked_url(report, blocked)
+    for skipped in result.skipped:
+        assert tally_skipped_url(report, skipped)
+    for tripped in result.tripped:
+        assert announce_trip(report, tripped) is not None
+    assert close_run(report, result.run, result.frontier)
+    assert report.mirror.out_dir == out_dir
+    return report
+
+
+def test_a_tripped_host_exits_3_over_a_blocked_urls_1(tmp_path: Path) -> None:
+    """A run whose host trips ranks blocked (3) above its blocked URLs' partial (1).
+
+    crawl-report.json holds the three blocked URLs, the skipped pages, breaker_tripped
+    and the host's row with its blocked count, block rate and trip.
+    """
+    result = crawled(tmp_path, fetcher=blocks_fetcher())
+    report = tallied_run(tmp_path, result)
+    assert report.has_failures
+    assert rank_and_write_report(report, result.run, FixedClock()) is ExitCode.blocked
+    data = written(tmp_path)
+    assert data["exit_code"] == "blocked"
+    assert data["breaker_tripped"] is True
+    blocked = data["blocked_urls"]
+    assert isinstance(blocked, list)
+    assert sorted((row["url"], row["status"]) for row in blocked) == sorted(
+        (f"{SITE}/guide/{name}.html", status) for name, status in BLOCKED_PAGES.items()
+    )
+    assert data["skipped_urls"]
+    (host,) = host_reports(result.run.hosts, result.run.policy)
+    assert host.breaker_tripped
+    assert host.blocked == len(BLOCKED_PAGES)
+
+
+def test_a_skipped_target_on_a_tripped_host_exits_3(tmp_path: Path) -> None:
+    """A skipped target ranks partial, but its host's trip ranks blocked: 3 wins."""
+    result = crawled(tmp_path, fetcher=blocks_fetcher())
+    report = tallied_run(tmp_path, result)
+    skipped = report.skipped_urls[0]
+    result.run.targets = frozenset({skipped})
+    assert rank_and_write_report(report, result.run, FixedClock()) is ExitCode.blocked

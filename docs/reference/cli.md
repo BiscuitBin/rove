@@ -236,7 +236,10 @@ everything. A robots.txt, a sitemap or `llms.txt` that redirects is followed wit
 allowed hosts, at most `discovery_max_redirects` (5) hops and never back to a URL already
 visited; a robots.txt redirect is followed with no further robots.txt read. A redirect
 that is not followed, or a 3xx with no `Location`, counts as unreachable: for robots.txt
-it disallows the origin (`robots_unreachable`). Requests to one host name are spaced, with no burst, by at least
+it disallows the origin (`robots_unreachable`). A redirect hop onto a retired host is
+never requested: the try is the error `redirect to a retired host`, retried as any error
+is, so robots.txt, its tries spent, is unreachable and a page fails with that error,
+unless the retired host is the page's own (below). Requests to one host name are spaced, with no burst, by at least
 `1 / rate_per_host` (2 per second) and by the longest `Crawl-delay` any of its origins
 declares for `rovo`, read as decimal seconds; `Crawl-delay: 0` adds no delay, and one
 past `retry_after_cap` (120 s), however large, is never adopted. A
@@ -263,12 +266,35 @@ and its row is still `skipped_not_html`. A page whose tries run out, or
 that answers an error, is listed under `failed_urls` and as a `failed` change, and every
 later sync requests it again.
 
+A page that answers 401 or 403, or 429 once its retries are spent, is blocked: no page
+is written (a page already in the mirror is kept as it is), it is listed under
+`blocked_urls` with its status, the status text as its signature and its tier, and the
+sync exits 1. A page answering 200 whose main text falls under `soft_block_ratio` (0.1) of the median
+of its host's recent pages, once `median_min_pages` (5) of them are known, or that holds
+a password form (a login wall), is converted and flagged `soft_block_suspected` and low
+confidence; it never counts against the host. Each host has a breaker: once
+`min(breaker_window, breaker_min_outcomes)` (10) pages have settled and more than
+`block_rate_threshold` (0.2) of them were blocked or failed outright, the breaker trips.
+A `Retry-After` past `retry_after_cap` (120 s), however large, on a page, robots.txt or a
+declared sitemap, or an honoured `Crawl-delay` past it, retires the host the same way:
+the answer stands (a page answering 429 is blocked, a 503 fails; robots.txt is refused;
+a declared sitemap is `sitemap_unavailable`). A tripped host gets no further request of
+any kind for the rest of the sync, robots.txt, sitemaps, `llms.txt` and redirect hops
+included; a declared sitemap left unread is not reported. A page whose own robots.txt
+read retired its host is never requested, and a page being fetched when its host trips
+(a redirect hop's robots.txt retiring it included) makes no further try, retry or
+redirect hop; an answer it already holds settles as usual, so a good page is still
+written. These and the host's remaining pages are listed under `skipped_urls` (in a
+`--url` or `--path` sync, only the targets), the report has
+`breaker_tripped: true` and the host's `per_host` row its `blocked`, `block_rate` and
+`breaker_tripped`, and the sync exits 3. Another host's pages are still fetched.
+
 With `--json`, progress goes to standard output as one JSON object a line,
 `{"event": ..., "host": ..., "until": ..., "url": ...}`, keys sorted, `until` an ISO
 8601 UTC timestamp or `null`, `url` `null` on every event but `page`: `start` once, when
 the run is created, `page` once for each row a fetch settles (naming its host and its
 URL), `host_backoff` as a host is paused for a retry (naming the host and when the pause
-ends), and one `done`, last, once the report is written. A dry
+ends), `breaker_tripped` as a host's breaker trips (naming the host), and one `done`, last, once the report is written. A dry
 run's listing stays plain text, ahead of its `done`. Without `--json` nothing is printed
 for progress, and a refused sync prints no event.
 
@@ -300,11 +326,7 @@ standard error, and `crawl-report.json` is replaced by a refused report:
 quoted above, the resolved `configuration` (with its `problems`), the `options` asked
 for, `effective_policy: null` and every count and list empty; it exits 2. A refused
 sync saves no manifest, frontier or run. When a run reaches a branch a later slice
-implements (a block, a
-429 that survives its retries, a `Retry-After`
-past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
-the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-login form), the sync stops, names the rule on
+implements (the browser tier, owner testing), the sync stops, names the rule on
 standard error, exits 1 and leaves the previous report in place.
 
 ## `rovo verify`
@@ -378,7 +400,7 @@ JSON. It makes no request and writes nothing.
 | 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, a verify found nothing, the indexes were rebuilt, or the report was printed. |
 | 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements. |
 | 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync`, `verify` or `index`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
-| 3 | Blocked: a host's breaker tripped (reached by a later slice). |
+| 3 | Blocked: a host's breaker tripped, by its block rate or a host retirement. |
 | 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken; or `rovo verify` found anything. |
 
 The exit code of a sync is the most severe that applies, in the order of the table.

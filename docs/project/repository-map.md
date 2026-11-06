@@ -32,8 +32,10 @@ follows [Python packaging](../explanation/packaging.md).
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
 │   ├── fakes.py  spec_values.py  The seams' doubles; config defaults read from the specs
 │   ├── test_sitemaps.py       The sitemap and llms.txt black boxes
+│   ├── test_blocks.py  test_blocks_regressions.py  Block verdicts, the breaker, retirement
 │   ├── test_verify.py         rovo verify's findings, one per reason
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
+│   │   ├── test_blocks_sync.py     Blocked pages, the breaker, host retirement, soft blocks
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
 │   │   ├── test_errors_report_sync.py  Refusals, interrupts, crashes, progress, rovo report
 │   │   ├── test_lifecycle_sync.py  Removal, archive, moves, duplicates and redirects
@@ -43,6 +45,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
 │       └── sites/             Static sites the end-to-end tests serve
+│           ├── blocks/ soft/  Twelve linked pages; prose, a thin page, a login wall
 │           ├── mslearn/       Learn-shaped pages (test_mslearn_sync.py)
 │           ├── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
 │           └── quality/ devsite/  Islands and gates; a DevSite tab page (test_quality_sync.py)

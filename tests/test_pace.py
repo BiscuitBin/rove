@@ -64,8 +64,9 @@ from rovo._crawl.run import (
 from rovo._mirror.model import CrawlScope, Mirror, Operator, Tier
 from rovo._mirror.state import save_mirror
 from rovo._report import ExitCode, report_path
-from rovo._unfinished import NotInThisSlice
 from test_crawl import NULL_DELAYS, PAST_CAP_DELAYS, PAST_CAP_IDS, TINY_DELAY, urlset
+from test_crawl import new_mirror as crawl_mirror
+from test_crawl import request as crawl_request
 
 SITE = "http://docs.example"
 HOST = "docs.example"
@@ -588,19 +589,89 @@ def test_a_robots_txt_retry_backs_off_and_counts_its_retry_after(tmp_path: Path)
     assert result.run.bytes_fetched == busy.size + responses[ROBOTS].size + page_bytes
 
 
-def test_a_robots_retry_after_past_the_cap_stops_the_run(tmp_path: Path) -> None:
-    """A Retry-After past retry_after_cap on a robots.txt try stops the run.
+def test_a_robots_retry_after_past_the_cap_retires_the_host(tmp_path: Path) -> None:
+    """A Retry-After past retry_after_cap on a robots.txt try retires the host.
 
-    It retires the host, which is the breaker slice's trip, so the run stops there
-    (RetireHostOnLongRetryAfter).
+    Re-propagated by T18 from test_a_robots_retry_after_past_the_cap_stops_the_run (T12),
+    which expected NotInThisSlice("RetireHostOnLongRetryAfter"): the breaker trips, the
+    429 stands as robots_refused, robots.txt is the one request (spec 86e2ec5: no
+    sitemap, llms.txt or page follows), and the seed is skipped.
     """
     past = standard_policy().retry_after_cap + timedelta(seconds=1)
     busy = dataclasses.replace(text_response(ROBOTS, "", status=TOO_MANY), retry_after=past)
     fetcher = ScriptedFetcher(polite(), {ROBOTS: [busy]})
-    with pytest.raises(NotInThisSlice) as stopped:
-        paced(tmp_path, fetcher)
-    assert stopped.value.rule == "RetireHostOnLongRetryAfter"
+    result, _, _ = paced(tmp_path, fetcher)
     assert fetcher.requests == [ROBOTS]
+    assert result.run.has_tripped_host
+    assert problems(result) == {(ROBOTS, DiscoveryProblem.robots_refused)}
+    assert [event.url for event in result.skipped] == [SEED]
+
+
+# --- T18: a redirect hop onto a retired host (spec 86e2ec5) -------------------------------
+
+RETIRED = "api.example"
+# The origin Discover opens a host by when no seed names it (https, crawl.allium Discover).
+RETIRED_SITE = f"https://{RETIRED}"
+RETIRED_ROBOTS = f"{RETIRED_SITE}/robots.txt"
+RETIRED_PAGE = f"{RETIRED_SITE}/guide/moved.html"
+RETIRED_HOP_ERROR = "redirect to a retired host"
+
+
+def with_retired_host(responses: dict[str, SiteResponse]) -> FakeFetcher:
+    """`responses`, and a second allowed host whose robots.txt retires it on a long Crawl-delay.
+
+    Discover opens api.example before docs.example (allowed hosts in name order), so it is
+    retired before any docs.example request.
+    """
+    cap = standard_policy().retry_after_cap.total_seconds()
+    retiring = text_response(RETIRED_ROBOTS, f"User-agent: *\nCrawl-delay: {cap + 1}\n")
+    return FakeFetcher({**responses, RETIRED_ROBOTS: retiring})
+
+
+def two_hosts(out_dir: Path, fetcher: FakeFetcher) -> CrawlResult:
+    """One standard run whose scope allows docs.example and api.example."""
+    mirror = crawl_mirror(out_dir, allowed_hosts=frozenset({HOST, RETIRED}))
+    return run_crawl(crawl_request(mirror), None, fetcher, FixedClock())
+
+
+def test_a_page_redirect_onto_a_retired_host_is_never_requested(tmp_path: Path) -> None:
+    """A page's hop onto a tripped host is not made: the page fails, "redirect to a retired host".
+
+    AttemptTier guidance (crawl.allium 1636 to 1640 at 86e2ec5): the hop is not
+    requested and its robots.txt is not read again; the error answer is retried as any
+    error answer is, so the seed is tried http_attempts times, then fails with it.
+    """
+    fetcher = with_retired_host(redirect_site(seed=redirect_response(SEED, RETIRED_PAGE)))
+    result = two_hosts(tmp_path, fetcher)
+    retired = result.run.host(RETIRED)
+    assert retired is not None
+    assert retired.breaker_tripped
+    assert RETIRED_PAGE not in fetcher.requests
+    assert fetcher.requests.count(RETIRED_ROBOTS) == 1
+    assert fetcher.requests.count(SEED) == CONFIG.http_attempts
+    assert failed_errors(result) == {SEED: RETIRED_HOP_ERROR}
+
+
+def test_a_robots_redirect_onto_a_retired_host_is_never_requested(tmp_path: Path) -> None:
+    """A robots.txt hop onto a tripped host is not made; the robots.txt answer is an error.
+
+    FetchRobots guidance (crawl.allium 834 to 838 at 86e2ec5): on any fetch_resource
+    redirect, robots.txt's own included, a hop onto a tripped host is not requested;
+    the fetch comes back as the error "redirect to a retired host", which disallows the
+    origin as an unreachable robots.txt does, so the seed is never requested.
+    """
+    moved = f"{RETIRED_SITE}/elsewhere/robots.txt"
+    fetcher = with_retired_host(
+        {
+            ROBOTS: redirect_response(ROBOTS, moved),
+            SEED: html_response(SEED, PAGE_HTML.format(title="Start", prose="The start.")),
+        }
+    )
+    result = two_hosts(tmp_path, fetcher)
+    assert moved not in fetcher.requests
+    assert fetcher.requests.count(RETIRED_ROBOTS) == 1
+    assert SEED not in fetcher.requests
+    assert (ROBOTS, DiscoveryProblem.robots_unreachable) in problems(result)
 
 
 # --- SyncExitCodes: what makes a sync partial --------------------------------------------

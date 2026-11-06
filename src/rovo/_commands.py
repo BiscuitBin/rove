@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from rovo._config import Configuration, SyncOptions
     from rovo._convert.model import Profile
     from rovo._crawl.fetch import Fetcher
-    from rovo._crawl.model import ProgressEvent, Run
+    from rovo._crawl.model import BreakerTripped, ProgressEvent, Run
     from rovo._crawl.pace import Timer
     from rovo._crawl.run import CrawlResult
     from rovo._report import CrawlReport
@@ -266,6 +266,7 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         CrawlReportStatus,
         ReportStatus,
         announce_backoff,
+        announce_trip,
         rank_and_write_report,
         record_crash_after_run,
     )
@@ -319,6 +320,12 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         refollow_unchanged_links=settings.refollow_unchanged_links,
         targets=targets,
     )
+
+    def trip(tripped: "BreakerTripped") -> None:  # AnnounceTrip, live.
+        event = announce_trip(report, tripped)
+        if event is not None and progress is not None:
+            progress(event)
+
     result = drive_run(
         request,
         load_frontier(mirror),
@@ -327,6 +334,7 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         progress=progress,
         on_backoff=None if progress is None else lambda event: progress(announce_backoff(event)),
         on_failure=_failure_handler(mirror),
+        on_trip=trip,
     )
     saved = False
     try:
@@ -357,19 +365,12 @@ def _after_run(report: "CrawlReport", result: "CrawlResult", clock: "Timer") -> 
         close_run,
         finalise_run_report,
         take_broken_links,
-        tally_discovery_problem,
-        tally_failed_url,
         tally_finalised_page,
         tally_removal,
     )
 
     mirror = report.mirror
-    for problem in result.discovery_failed:
-        tally_discovery_problem(report, problem)
-    for failed in result.failed:
-        tally_failed_url(report, failed)
-    for removed in result.removed:
-        tally_removal(report, removed)
+    _tally_run(report, result)
     close_run(report, result.run, result.frontier)
     if report.options.dry_run:  # CloseRun raised ReportReady at once; the listing is printed.
         sys.stdout.writelines(
@@ -390,6 +391,31 @@ def _after_run(report: "CrawlReport", result: "CrawlResult", clock: "Timer") -> 
     save_mirror(mirror)
     save_run(result)  # Only now: a done frontier row must have its page saved.
     return True
+
+
+def _tally_run(report: "CrawlReport", result: "CrawlResult") -> None:
+    """The run's events tallied into its open report, as each Tally rule does.
+
+    BreakerTripped is not among them: AnnounceTrip ran live, through drive_run's on_trip.
+    """
+    from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        tally_blocked_url,
+        tally_discovery_problem,
+        tally_failed_url,
+        tally_removal,
+        tally_skipped_url,
+    )
+
+    for problem in result.discovery_failed:
+        tally_discovery_problem(report, problem)
+    for failed in result.failed:
+        tally_failed_url(report, failed)
+    for blocked in result.blocked:
+        tally_blocked_url(report, blocked)
+    for skipped in result.skipped:
+        tally_skipped_url(report, skipped)
+    for removed in result.removed:
+        tally_removal(report, removed)
 
 
 def _failure_handler(mirror: Mirror) -> "Callable[[Run, BaseException], None]":

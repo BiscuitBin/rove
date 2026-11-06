@@ -37,7 +37,7 @@ from fakes import (
 from rovo import _commands
 from rovo._convert import profiles
 from rovo._convert.model import QualityFlag
-from rovo._crawl import model, sitemaps
+from rovo._crawl import model, pace, sitemaps
 from rovo._crawl import run as run_module
 from rovo._crawl.fetch import HttpxFetcher, Validators
 from rovo._crawl.model import (
@@ -966,7 +966,9 @@ def test_rule_failure_FetchRobots_1(tmp_path: Path) -> None:
 def test_rule_failure_FetchRobots_2(tmp_path: Path) -> None:
     """Verify rule FetchRobots is rejected when requires clause fails.
 
-    requires: exists host.
+    requires: exists host and not host.breaker_tripped. Re-propagated by T18 (origin
+    T12, spec 86e2ec5): no host, or a host whose breaker has tripped: another origin's
+    robots.txt of a tripped host is not requested either.
     """
     fetcher = site()
     run, _ = started(tmp_path)
@@ -975,6 +977,13 @@ def test_rule_failure_FetchRobots_2(tmp_path: Path) -> None:
     assert fetcher.requests == []
     assert run.bytes_fetched == 0
     assert run.robots_policies == []
+    tripped_run, _, host = host_open(tmp_path / "tripped", fetcher)
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    before = (list(fetcher.requests), tripped_run.bytes_fetched)
+    assert fetch_robots(tripped_run, HOST, PORTED, fetcher) is None
+    assert (fetcher.requests, tripped_run.bytes_fetched) == before
+    assert tripped_run.robots_policy(PORTED) is None
 
 
 def test_rule_failure_FetchRobots_3(tmp_path: Path) -> None:
@@ -1710,11 +1719,19 @@ def test_rule_failure_AttemptTier_1(tmp_path: Path) -> None:
 def test_rule_failure_AttemptTier_2(tmp_path: Path) -> None:
     """Verify rule AttemptTier is rejected when requires clause fails.
 
-    requires: walk.host.run.status = running.
+    requires: walk.host.run.status = running and not walk.host.breaker_tripped
+    (crawl.allium 1604 at 7d01367): a run no longer running, or a walk whose host has
+    tripped, makes no further request.
     """
     fetcher = site()
     run, _, walk = walked(tmp_path, fetcher)
     run.status = RunStatus.interrupted
+    assert attempt_tier(walk, Tier.http, SECOND_RUN, fetcher) is None
+    assert fetcher.requests == [*DISCOVERY, SEED]
+    assert len(walk.attempts) == 1
+    run.status = RunStatus.running
+    assert walk.host.breaker is not None
+    walk.host.breaker.status = BreakerStatus.tripped
     assert attempt_tier(walk, Tier.http, SECOND_RUN, fetcher) is None
     assert fetcher.requests == [*DISCOVERY, SEED]
     assert len(walk.attempts) == 1
@@ -1773,7 +1790,11 @@ def test_rule_success_SettleWalk(tmp_path: Path) -> None:
 def test_rule_failure_SettleWalk_1(tmp_path: Path) -> None:
     """Verify rule SettleWalk is rejected when requires clause fails.
 
-    requires: walk.status = walking and walk.host.run.status = running.
+    requires: walk.status = walking and walk.host.run.status = running and not
+    (walk.host.breaker_tripped and attempt.hop_refused) (crawl.allium 1823 at 7d01367):
+    a run no longer running settles nothing, nor does a hop refused on the walk's own
+    tripped host (StopWalkOnTrippedHost stops it); a tripped host alone does not stop an
+    answer the walk already holds.
     """
     run, _, walk = walked(tmp_path, site())
     (attempt,) = walk.attempts
@@ -1781,6 +1802,18 @@ def test_rule_failure_SettleWalk_1(tmp_path: Path) -> None:
     assert not settle_walk(attempt)
     assert walk.status is WalkStatus.walking
     assert walk.standing is None
+    run.status = RunStatus.running
+    refused = dataclasses.replace(redirect_response(SEED, PORTED_PAGE), error=pace.RETIRED_HOP)
+    hop = attempt_on(walk, refused, try_=model.CONFIG.http_attempts)
+    assert hop.hop_refused
+    assert not hop.retryable
+    assert walk.host.breaker is not None
+    walk.host.breaker.status = BreakerStatus.tripped
+    assert not settle_walk(hop)
+    assert walk.status is WalkStatus.walking
+    assert walk.standing is None
+    assert settle_walk(attempt)
+    assert walk.standing is attempt
 
 
 def test_rule_failure_SettleWalk_2(tmp_path: Path) -> None:
@@ -2925,6 +2958,7 @@ def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
             "challenges",
             "unsuccessful_challenge",
             "failed_outright",
+            "hop_refused",
             "wants_escalation",
         ),
     )
@@ -2936,6 +2970,7 @@ def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
     assert attempt.retires_host is False
     assert attempt.retryable is False
     assert attempt.failed_outright is False
+    assert attempt.hop_refused is False
     assert attempt.wants_escalation is False
     assert list(getattr(attempt, "challenges", ["missing"])) == []
     assert getattr(attempt, "unsuccessful_challenge", None) is False
@@ -3573,7 +3608,9 @@ def test_rule_failure_HttpRetry_1(tmp_path: Path) -> None:
 def test_rule_failure_HttpRetry_2(tmp_path: Path) -> None:
     """Verify rule HttpRetry is rejected when requires clause fails.
 
-    requires: attempt.walk.status = walking and attempt.walk.host.run.status = running.
+    requires: attempt.walk.status = walking and attempt.walk.host.run.status = running
+    and not attempt.walk.host.breaker_tripped (crawl.allium 1749 at 7d01367): a settled
+    walk, a run no longer running, or a walk whose host has tripped is not retried.
     """
     fetcher = scripted(robots=None)
     fetcher.responses[SEED] = answered(SEED, SERVICE_UNAVAILABLE)
@@ -3584,6 +3621,10 @@ def test_rule_failure_HttpRetry_2(tmp_path: Path) -> None:
     assert http_retry(attempt, fetcher) is None
     walk.status = WalkStatus.walking
     run.status = RunStatus.interrupted
+    assert http_retry(attempt, fetcher) is None
+    run.status = RunStatus.running
+    assert walk.host.breaker is not None
+    walk.host.breaker.status = BreakerStatus.tripped
     assert http_retry(attempt, fetcher) is None
     assert walk.host.paused_until is None
     assert walk.attempts == [attempt]
@@ -4220,10 +4261,15 @@ def test_rule_failure_QueueSitemaps_1(tmp_path: Path) -> None:
 def test_rule_failure_QueueSitemaps_2(tmp_path: Path) -> None:
     """Verify rule QueueSitemaps is rejected when requires clause fails.
 
-    requires: exists host.
+    requires: exists host and not host.breaker_tripped. Re-propagated by T18 (origin
+    T13, spec 86e2ec5): a tripped host's declared and well-known sitemaps are not queued.
     """
     run, _ = started(tmp_path)
     assert queue_sitemaps(run, HOST) is None
+    tripped_run, _, host = host_open(tmp_path / "tripped", site(robots=declaring(MAPS)))
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    assert queue_sitemaps(tripped_run, HOST) is None
 
 
 def test_rule_success_ReadRobotsBeforeSitemap(tmp_path: Path) -> None:
@@ -4260,12 +4306,22 @@ def test_rule_failure_ReadRobotsBeforeSitemap_1(tmp_path: Path) -> None:
 def test_rule_failure_ReadRobotsBeforeSitemap_2(tmp_path: Path) -> None:
     """Verify rule ReadRobotsBeforeSitemap is rejected when requires clause fails.
 
-    requires: exists host.
+    requires: exists host and not host.breaker_tripped. Re-propagated by T18 (origin
+    T13, spec 86e2ec5): a tripped host's other origin's robots.txt is not read for a
+    sitemap.
     """
     fetcher = site()
     run, _ = started(tmp_path)
     assert not read_robots_before_sitemap(run, HOST, PORTED_MAP, fetcher)
     assert fetcher.requests == []
+    tripped = site(robots=declaring(PORTED_MAP))
+    tripped.responses[PORTED_ROBOTS] = text_response(PORTED_ROBOTS, "User-agent: *\nAllow: /\n")
+    tripped_run, _, host = host_open(tmp_path / "tripped", tripped)
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    assert not read_robots_before_sitemap(tripped_run, HOST, PORTED_MAP, tripped)
+    assert tripped.requests == [ROBOTS]
+    assert tripped_run.robots_policy(PORTED) is None
 
 
 def test_rule_failure_ReadRobotsBeforeSitemap_3(tmp_path: Path) -> None:
@@ -4369,12 +4425,22 @@ def test_rule_failure_FetchSitemap_1(tmp_path: Path) -> None:
 def test_rule_failure_FetchSitemap_2(tmp_path: Path) -> None:
     """Verify rule FetchSitemap is rejected when requires clause fails.
 
-    requires: exists host.
+    requires: exists host and not host.breaker_tripped. Re-propagated by T18 (origin
+    T13, spec 86e2ec5): a tripped host's sitemap, declared or not, is not requested.
     """
     fetcher = site()
     run, _ = started(tmp_path)
     assert fetch_sitemap(run, HOST, MAPS, fetcher) is None
     assert fetcher.requests == []
+    tripped = site(robots=declaring(MAPS))
+    tripped.responses[MAPS] = xml_response(MAPS, urlset((SEED, None)))
+    tripped_run, _, host = host_open(tmp_path / "tripped", tripped)
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    assert fetch_sitemap(tripped_run, HOST, MAPS, tripped, declared=True) is None
+    assert fetch_sitemap(tripped_run, HOST, SITEMAP, tripped) is None
+    assert tripped.requests == [ROBOTS]
+    assert tripped_run.discovery_failures == []
 
 
 def test_rule_failure_FetchSitemap_3(tmp_path: Path) -> None:
@@ -4696,13 +4762,20 @@ def test_rule_failure_ReadLlmsTxt_1(tmp_path: Path) -> None:
 def test_rule_failure_ReadLlmsTxt_2(tmp_path: Path) -> None:
     """Verify rule ReadLlmsTxt is rejected when requires clause fails.
 
-    requires: exists host.
+    requires: exists host and not host.breaker_tripped. Re-propagated by T18 (origin
+    T13, spec 86e2ec5): a tripped host's llms.txt is not requested.
     """
     fetcher = site()
     fetcher.responses[LLMS_TXT] = llms(FROM_LLMS)
     run, frontier = started(tmp_path)
     assert read_llms_txt(run, HOST, frontier, fetcher) is None
     assert fetcher.requests == []
+    tripped_run, tripped_frontier, host = host_open(tmp_path / "tripped", fetcher)
+    assert host.breaker is not None
+    host.breaker.status = BreakerStatus.tripped
+    assert read_llms_txt(tripped_run, HOST, tripped_frontier, fetcher) is None
+    assert fetcher.requests == [ROBOTS]
+    assert tripped_frontier.observed_urls == []
 
 
 def test_rule_failure_ReadLlmsTxt_3(tmp_path: Path) -> None:

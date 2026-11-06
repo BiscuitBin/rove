@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from rovo._config import CONFIG, Configuration, SyncOptions, encode_configuration
 from rovo._convert.model import QualityFlag, QualityGate
 from rovo._crawl.model import (
+    BreakerTripped,
     CrawlPolicy,
     DiscoveryFailed,
     DiscoveryProblem,
@@ -28,6 +29,7 @@ from rovo._crawl.model import (
     RunKind,
     RunMode,
     RunStatus,
+    UrlBlocked,
     UrlFailed,
     UrlSkippedBlocked,
 )
@@ -300,6 +302,30 @@ def tally_skipped_url(report: CrawlReport, skipped: UrlSkippedBlocked) -> bool:
         return False
     report.skipped_urls.append(skipped.url)
     return True
+
+
+def tally_blocked_url(report: CrawlReport, blocked: UrlBlocked) -> bool:
+    """Realises rovo.allium TallyBlockedUrl: a blocked_urls row; False when its guard fails."""
+    if not report.is_open_for(blocked.run.target, blocked.run.id):
+        return False
+    report.blocked_urls.append(
+        BlockedUrl(
+            url=blocked.url, status=blocked.status, signature=blocked.signature, tier=blocked.tier
+        )
+    )
+    return True
+
+
+def announce_trip(report: CrawlReport, tripped: BreakerTripped) -> ProgressEvent | None:
+    """Realises rovo.allium AnnounceTrip: report.breaker_tripped, and the breaker_tripped event.
+
+    The event names the host; None when the guard fails.
+    """
+    run = tripped.host.run
+    if not report.is_open_for(run.target, run.id):
+        return None
+    report.breaker_tripped = True
+    return ProgressEvent(event="breaker_tripped", host=tripped.host.name, until=None, url=None)
 
 
 def announce_backoff(backed_off: HostBackedOff) -> ProgressEvent:

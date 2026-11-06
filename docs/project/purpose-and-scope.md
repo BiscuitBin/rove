@@ -25,8 +25,10 @@ scope, converts each to Markdown with its profile, publishes it as a page file
 whose links to other mirrored pages are relative, writes the mirror's indexes and writes
 `crawl-report.json`; `rovo verify` checks the mirror on disk offline, `rovo index`
 rebuilds the indexes offline, and `rovo report` prints the last report; a sync naming
-`--url` or `--path` targets syncs those pages alone. A branch a later slice implements
-(blocks, owner testing) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
+`--url` or `--path` targets syncs those pages alone. A blocked page is reported, and a
+host whose breaker trips or that is retired gets no further request and makes the sync
+exit 3. A branch a later slice implements (the browser tier, owner testing) stops the
+sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
 product the repository runs everything a change needs: lint and type gates with
 positive controls, a coverage floor, a wheel built and smoke-installed offline on every
 `just check`, the documentation and agent contracts, and CI. Each implementation ticket

@@ -41,6 +41,7 @@ snapshot.
 | T15 | Page lifecycle: rovo sync removes and archives absent pages, follows redirects within the scope, moves and merges pages with their aliases, revives returning pages, settles duplicates and retires pages a narrowed scope no longer admits | `T15-lifecycle.md` | T14 | none | open |
 | T16 | Errors and the report: rovo sync skips non-HTML answers, refuses in the specified order with a refused report, survives an interrupt or a crash with a report, ranks every exit code, prints --json progress, reads ROVO_ variables and --set flags, and rovo report shows the last report | `T16-errors-report.md` | T15 | none | open |
 | T17 | Conversion quality: every quality gate and flag, islands for what Markdown cannot carry, every tab panel, the mslearn and devsite profiles, fail_on_low_quality and rovo verify | `T17-quality-gates.md` | T16 | none | open |
+| T18 | Blocks and the breaker: block verdicts, blocked and skipped rows, the per-host breaker, host retirement on a long Crawl-delay or Retry-After, and exit 3 | `T18-blocks-breaker.md` | T17 | none | open |
 
 ## Dependency graph
 
@@ -48,7 +49,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -119,6 +120,13 @@ T00 ─┬─ T01 ─┐
   end and `mslearn`'s selection is unit-tested while its sitemap filter and version
   label wait on the maintainer; every gate and normalisation flag is raised;
   `fail_on_low_quality` exits 4; and `rovo verify` reports drift on disk offline.
+- **T18** is slice 10: blocks and the breaker. A 401, 403 or 429 page is classified
+  hard and reported in `blocked_urls` instead of stopping the sync; a host whose blocks
+  breach the threshold trips its breaker, its remaining rows are skipped and listed in
+  `skipped_urls`, `--json` prints a `breaker_tripped` event, and the sync exits 3; a
+  Crawl-delay or a Retry-After past `retry_after_cap` on robots.txt, a declared sitemap
+  or a page retires the host the same way; a page whose main text falls under the
+  host's baseline, or a login wall, is converted with `soft_block_suspected`.
 
 ## How to pick up a ticket
 

@@ -10,6 +10,7 @@ each redirect hop included, waits its turn at its host name's limiter (rovo._cra
 on the run's timer.
 """
 
+import dataclasses
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from rovo._convert.fidelity import (
     convert,
     converted_content,
     extract,
+    main_text_length,
     measure,
     normalize,
     restore,
@@ -40,6 +42,7 @@ from rovo._crawl.model import (
     BlockVerdict,
     Breaker,
     BreakerStatus,
+    BreakerTripped,
     DiscoveryFailed,
     DiscoveryProblem,
     DiscoverySource,
@@ -67,7 +70,9 @@ from rovo._crawl.model import (
     SitemapEntry,
     SitemapSnapshot,
     SiteResponse,
+    UrlBlocked,
     UrlFailed,
+    UrlSkippedBlocked,
     WalkStatus,
 )
 from rovo._crawl.pace import (
@@ -109,6 +114,8 @@ _MICROSECONDS = 6
 # kept as the largest power of ten Decimal holds, past every cap.
 _PAST_EVERY_CAP = Decimal(f"1e{MAX_EMAX}")
 _TOO_MANY_REQUESTS = 429
+# The one status classify_block's soft checks run on (AttemptTier guidance: "on a 200").
+_OK_STATUS = 200
 _SPA_ROOTS = ("root", "app", "__next", "__nuxt")
 # The rows a full run notes for a recheck when its discovery names them again (PrepareRun).
 _RECHECKABLE = frozenset(
@@ -158,6 +165,9 @@ class CrawlResult:
     backed_off: tuple[HostBackedOff, ...] = ()
     # The intake's PageRemoved events (RemoveAbsentPage, RemoveRedirectedOutPage, a merge).
     removed: tuple[PageRemoved, ...] = ()
+    blocked: tuple[UrlBlocked, ...] = ()
+    skipped: tuple[UrlSkippedBlocked, ...] = ()
+    tripped: tuple[BreakerTripped, ...] = ()
 
 
 # --- Starting a run -------------------------------------------------------------------
@@ -383,24 +393,24 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
     retries; the answer ends in exactly one of AdoptRobotsRules, DenyAllWhenRobotsRefused,
     DenyAllWhenRobotsUnreachable or AllowAllWhenRobotsAbsent. Redirects within the
     allowed hosts are followed with no robots.txt read for a hop; one not followed comes
-    back as an error, which disallows the origin. Retiring the host (retires_host: a
-    Retry-After past the cap, which ends fetch_resource's tries) or on an honoured
-    Crawl-delay past it (RetireHostOnLongCrawlDelay), which stops once the rules are
-    adopted, is a later slice's branch.
+    back as an error, which disallows the origin. A host whose breaker has tripped gets
+    no request. A Retry-After past the cap (retires_host, which ends fetch_resource's
+    tries) trips the host's breaker and the answer stands, a 429 or 5xx refused; an
+    honoured Crawl-delay past the cap trips it once the rules are adopted
+    (RetireHostOnLongCrawlDelay).
     """
     host = run.host(name)
-    if run.status is not RunStatus.running or host is None:
+    if run.status is not RunStatus.running or host is None or host.breaker_tripped:
         return None
     if run.robots_policy(origin) is not None:
         return None
     response = fetch_resource(robots_url(origin), run, host, fetcher)
     run.bytes_fetched += response.size
     if past_cap(response, run.policy):
-        raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
+        _trip(host)
     adopted = adopt_robots_rules(run, host, response, origin=origin)
     if adopted is not None:
-        if retires_host_on_long_crawl_delay(run, adopted):
-            raise NotInThisSlice(rule="RetireHostOnLongCrawlDelay")
+        retire_host_on_long_crawl_delay(run, host, response)
         return response
     failed = deny_all_when_robots_refused(
         run, host, response, origin=origin
@@ -562,12 +572,28 @@ def retires_host_on_long_crawl_delay(run: Run, adopted: RobotsPolicy) -> bool:
     """Whether crawl.allium RetireHostOnLongCrawlDelay's guards hold for an adopted policy.
 
     The robots.txt answered ok (AdoptRobotsRules created `adopted`), Crawl-delay is
-    honoured, and its Crawl-delay is past retry_after_cap. The trip itself is the breaker
-    slice's, so the caller stops there.
+    honoured, and its Crawl-delay is past retry_after_cap.
     """
     if adopted.rules is None or not run.policy.honor_crawl_delay:
         return False
     return robots_crawl_delay_exceeds(adopted.declared_delay, run.policy.retry_after_cap)
+
+
+def retire_host_on_long_crawl_delay(
+    run: Run, host: Host, response: SiteResponse
+) -> BreakerTripped | None:
+    """Realises crawl.allium RetireHostOnLongCrawlDelay: the BreakerTripped, else None.
+
+    An ok robots.txt whose Crawl-delay, honoured, is past retry_after_cap trips the
+    host's watching breaker; any origin of the host retires the whole host. None when a
+    guard fails or the breaker is not watching.
+    """
+    if not response.ok or not run.policy.honor_crawl_delay:
+        return None
+    _, declared = parse_robots(response.markup)
+    if not robots_crawl_delay_exceeds(declared, run.policy.retry_after_cap):
+        return None
+    return _trip(host)
 
 
 def allow_all_when_robots_absent(
@@ -780,7 +806,7 @@ def queue_sitemaps(run: Run, name: str) -> list[tuple[str, bool]] | None:
     well_known_sitemaps(host.origin) not declared; None when the rule does not fire.
     """
     host = run.host(name)
-    if run.status is not RunStatus.running or host is None:
+    if run.status is not RunStatus.running or host is None or host.breaker_tripped:
         return None
     policy = run.robots_policy(host.origin)
     declared = policy.declared_sitemaps if policy is not None else ()
@@ -814,9 +840,10 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
 
     Each sitemap is read at most once per run, through fetch_resource, its bytes counted.
     A snapshot the frontier holds for the URL sends its validators and is stamped with
-    the run (last_requested_run), whatever the answer. A Retry-After
-    past the cap retires the host of a declared sitemap (the breaker slice's trip) and
-    pauses it for retry_after_cap after a speculative probe, whose answer then stands.
+    the run (last_requested_run), whatever the answer. A Retry-After past the cap
+    retires the host of a declared sitemap (its breaker trips) and pauses it for
+    retry_after_cap after a speculative probe; either way the answer then stands. A host
+    whose breaker has tripped gets no request.
     Redirects within the allowed hosts are followed, each hop's origin's robots.txt read
     first; one not followed comes back as an error.
     """
@@ -840,8 +867,9 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
         snapshot.last_requested_run = run.id
     if past_cap(response, run.policy):
         if declared:
-            raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
-        pause_for_cap(host)
+            _trip(host)
+        else:
+            pause_for_cap(host)
     return response
 
 
@@ -1012,12 +1040,13 @@ def read_llms_txt(
     """Realises crawl.allium ReadLlmsTxt: the answer, else None when the rule does not fire.
 
     Never conditional, and silent when absent or unreachable; a Retry-After past the cap
-    pauses the host for retry_after_cap and the probe ends unavailable. A target with no
+    pauses the host for retry_after_cap and the probe ends unavailable; a host whose
+    breaker has tripped gets no request. A target with no
     identity is skipped, and a target is resolved against llms_txt_url, the URL requested.
     Redirects are followed as a sitemap's are.
     """
     host = run.host(name)
-    if run.status is not RunStatus.running or host is None:
+    if run.status is not RunStatus.running or host is None or host.breaker_tripped:
         return None
     url = sitemaps.llms_txt_url(host.origin)
     if not robots_allows(run, url):
@@ -1134,10 +1163,12 @@ def _read_sitemaps(
 
 
 def _sitemap_wanted(run: Run, name: str, url: str) -> bool:
-    """The guards ReadRobotsBeforeSitemap and FetchSitemap share."""
+    """The guards ReadRobotsBeforeSitemap and FetchSitemap share: an untripped host."""
+    host = run.host(name)
     return (
         run.status is RunStatus.running
-        and run.host(name) is not None
+        and host is not None
+        and not host.breaker_tripped
         and _normalisable(url)
         and hostname_of(url) == name
         and sitemaps.sitemap_admitted(url, run.target.profile, run.target.scope)
@@ -1184,7 +1215,8 @@ def select_batch(run: Run, frontier: Frontier) -> list[FrontierEntry] | None:
     """Realises crawl.allium SelectBatch.
 
     None when the rule does not fire; an empty list when it raised FrontierExhausted;
-    otherwise the chosen rows, now in progress.
+    otherwise the chosen rows, now in progress. Rows on a tripped host are set aside, and
+    skipped (skipped_blocked, UrlSkippedBlocked) only when no other row is open.
     """
     if run.status is not RunStatus.running or not run.crawling:
         return None
@@ -1195,7 +1227,9 @@ def select_batch(run: Run, frontier: Frontier) -> list[FrontierEntry] | None:
     if not pending:
         return []
     if not open_rows:
-        raise NotInThisSlice(rule="SelectBatch")
+        for entry in pending:
+            _skip(run, entry)
+        return []
     hosts = max(1, len(run.target.scope.allowed_hosts))
     concurrency = (run.policy.concurrency_per_host or max(1, len(open_rows))) * hosts
     lookahead = _next_pending(open_rows, concurrency * CONFIG.batch_lookahead)
@@ -1218,6 +1252,14 @@ def next_batch(run: Run, frontier: Frontier) -> bool:
 
 
 # --- Handling one frontier entry ----------------------------------------------------
+
+
+def skip_tripped_host(run: Run | None, entry: FrontierEntry) -> UrlSkippedBlocked | None:
+    """Realises crawl.allium SkipTrippedHost: a row in progress on a tripped host is skipped."""
+    host = _entry_host(run, entry)
+    if run is None or host is None or not host.breaker_tripped:
+        return None
+    return _skip(run, entry)
 
 
 def skip_robots_disallowed(run: Run | None, entry: FrontierEntry) -> bool:
@@ -1263,10 +1305,21 @@ def skip_robots_disallowed_on_new_host(run: Run, entry: FrontierEntry) -> bool:
     """Realises crawl.allium SkipRobotsDisallowedOnNewHost."""
     if run.status is not RunStatus.running or entry.status is not FrontierStatus.in_progress:
         return False
-    if robots_allows(run, entry.identity):
+    host = _entry_host(run, entry)
+    if robots_allows(run, entry.identity) or host is None or host.breaker_tripped:
         return False
     entry.status = FrontierStatus.skipped_robots
     return True
+
+
+def skip_tripped_host_after_ready(run: Run, entry: FrontierEntry) -> UrlSkippedBlocked | None:
+    """Realises crawl.allium SkipTrippedHostAfterReady; None when its guards do not hold.
+
+    A row whose own readiness (its host's or origin's robots.txt) retired its host.
+    """
+    if run.status is not RunStatus.running or entry.status is not FrontierStatus.in_progress:
+        return None
+    return _skip(run, entry) if _host_tripped(run, entry) else None
 
 
 def fetch_entry(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> LadderWalk | None:
@@ -1307,10 +1360,14 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
     """Realises crawl.allium AttemptTier (the http tier, one try).
 
     fetch_or_render follows in-scope redirects (`pace.follow`): a hop's origin's
-    robots.txt is read first when the run has not, and a hop it disallows is not made.
+    robots.txt is read first when the run has not, and a hop it disallows, or onto a
+    tripped host, is not made. An ok HTML answer carries its main_text (the extracted
+    text length, `main_text_length` under the mirror's profile) before classify_block.
     """
     run = walk.host.run
     if walk.status is not WalkStatus.walking or run.status is not RunStatus.running:
+        return None
+    if walk.host.breaker_tripped:
         return None
     if tier is not Tier.http:
         raise NotInThisSlice(rule="AttemptTier")
@@ -1326,6 +1383,10 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
     if try_ > 1 or tier is not walk.tiers[0]:
         run.fetch_attempts += 1
     run.bytes_fetched += response.size
+    if response.ok and response.is_html:
+        response = dataclasses.replace(
+            response, main_text=main_text_length(response.markup, run.target.profile)
+        )
     verdict = classify_block(response, host.median_text if host.has_text_baseline else None)
     unblocked = response.ok and verdict.kind is BlockKind.none
     attempt = FetchAttempt(
@@ -1338,10 +1399,6 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
     )
     walk.attempts.append(attempt)
     count_retry_after(attempt)
-    survived = not attempt.retryable and not attempt.retires_host
-    if response.status == _TOO_MANY_REQUESTS and survived:
-        # classify_block: a 429 that survived its retries is a hard verdict.
-        raise NotInThisSlice(rule="classify_block")
     return attempt
 
 
@@ -1366,9 +1423,30 @@ def http_retry(attempt: FetchAttempt, fetcher: Fetcher) -> HostBackedOff | None:
         return None
     if walk.status is not WalkStatus.walking or walk.host.run.status is not RunStatus.running:
         return None
+    if walk.host.breaker_tripped:
+        return None
     backed_off = back_off(walk.host, attempt.try_, attempt.response.retry_after)
     attempt_tier(walk, Tier.http, attempt.try_ + 1, fetcher)
     return backed_off
+
+
+def retire_host_on_long_retry_after(attempt: FetchAttempt) -> BreakerTripped | bool:
+    """Realises crawl.allium RetireHostOnLongRetryAfter; False when its guards do not hold.
+
+    The host's watching breaker trips (the BreakerTripped is returned; True when it had
+    already tripped), and the walk settles with the attempt standing, its tier used.
+    """
+    walk = attempt.walk
+    host = walk.host
+    if not attempt.retires_host:
+        return False
+    if walk.status is not WalkStatus.walking or host.run.status is not RunStatus.running:
+        return False
+    tripped = _trip(host)
+    walk.status = WalkStatus.settled
+    walk.standing = attempt
+    host.tiers_used = host.tiers_used | {attempt.tier}
+    return True if tripped is None else tripped
 
 
 def count_retry_after(attempt: FetchAttempt) -> bool:
@@ -1386,12 +1464,15 @@ def count_retry_after(attempt: FetchAttempt) -> bool:
 
 
 def settle_walk(attempt: FetchAttempt) -> bool:
-    """Realises crawl.allium SettleWalk (the no-escalation case).
+    """Realises crawl.allium SettleWalk (the no-escalation case): the attempt stands.
 
-    No attempt is soft-suspected in this slice, so the attempt itself stands.
+    A blocked or soft attempt wants no escalation in a standard run, whose
+    protection_escalation is off, so it stands too.
     """
     walk = attempt.walk
     if walk.status is not WalkStatus.walking or walk.host.run.status is not RunStatus.running:
+        return False
+    if walk.host.breaker_tripped and attempt.hop_refused:
         return False
     if attempt.retryable or attempt.retires_host:
         return False
@@ -1403,6 +1484,26 @@ def settle_walk(attempt: FetchAttempt) -> bool:
     if walk.escalated:
         walk.host.render_escalations += 1
     return True
+
+
+def stop_walk_on_tripped_host(attempt: FetchAttempt) -> UrlSkippedBlocked | None:
+    """Realises crawl.allium StopWalkOnTrippedHost; None when its guards do not hold.
+
+    A walk on a tripped host that needs another request (a retry, a refused hop, an
+    escalation) settles with the attempt standing, its row skipped_blocked.
+    """
+    walk = attempt.walk
+    run = walk.host.run
+    if walk.status is not WalkStatus.walking or run.status is not RunStatus.running:
+        return None
+    if not walk.host.breaker_tripped or attempt.retires_host:
+        return None
+    escalates = attempt.wants_escalation and _next_tier(walk.tiers, attempt.tier) is not None
+    if not (attempt.retryable or attempt.hop_refused or escalates):
+        return None
+    walk.status = WalkStatus.settled
+    walk.standing = attempt
+    return _skip(run, walk.entry)
 
 
 def feed_breaker(walk: LadderWalk) -> bool:
@@ -1431,10 +1532,36 @@ def feed_breaker(walk: LadderWalk) -> bool:
     return True
 
 
+def breaker_trips(breaker: Breaker, frontier: Frontier) -> BreakerTripped | None:
+    """Realises crawl.allium BreakerTrips: the BreakerTripped; None when its guards fail.
+
+    The breaker trips, and each pending row of its host the run may sweep is skipped
+    (skipped_blocked, UrlSkippedBlocked): in a standard run every one when the run is
+    not targeted, else only its targets; in an owner-testing run its active URLs.
+    """
+    host = breaker.host
+    run = host.run
+    policy = run.policy
+    if not breaker.should_act or not policy.breaker_enabled:
+        return None
+    if breaker.tier is not breaker.highest_tier and policy.protection_escalation:
+        return None
+    for entry in frontier.pending_entries:
+        if entry.host_name != host.name:
+            continue
+        owner_swept = run.is_owner_testing and entry.identity in run.active_urls
+        standard_swept = run.mode is RunMode.standard and (
+            not run.targeted or entry.identity in run.targets
+        )
+        if owner_swept or standard_swept:
+            _skip(run, entry)
+    return _trip(host)
+
+
 # --- What a settled fetch becomes ---------------------------------------------------
 
 
-def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
+def dispose_fetch(walk: LadderWalk) -> EntryFailed | UrlBlocked | CandidateDelivered | bool:
     """Realises crawl.allium DisposeFetch, in its branch order: what the settled fetch is.
 
     The EntryFailed for a walk that failed outright (its error), for an unfollowed
@@ -1442,11 +1569,12 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     CandidateDelivered, its row settled, for a 304 on a known page or an unchanged raw
     document (unchanged), a 404 or 410 (absent, no validators) or a known page redirected
     out of scope (redirected_out, done, the target carried) or a known page that now
-    answers non-HTML (absent, its row skipped_not_html: retired as absent); True when
-    any other ok, unblocked HTML answer counts as fetched and raises PageFetched; False
-    when the guards do not hold, or when an ok answer that is not HTML, for a URL with
-    no page, counts as fetched and settles its row skipped_not_html. A block verdict and
-    a soft verdict are later slices'.
+    answers non-HTML (absent, its row skipped_not_html: retired as absent); the
+    UrlBlocked for a hard or challenge verdict (blocked, counted blocked and fetched,
+    after absent and before redirected out); True when any other ok HTML answer, a soft
+    verdict included, counts as fetched and raises PageFetched; False when the guards do
+    not hold, or when an ok answer that is not HTML, for a URL with no page, counts as
+    fetched and settles its row skipped_not_html.
     """
     attempt = walk.standing
     entry = walk.entry
@@ -1481,9 +1609,6 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     unchanged = (
         raw_unchanged and entry.identity not in run.forced_refetch and run.mode is RunMode.standard
     )
-    # A soft verdict is a later slice's (classify_block, T18).
-    if attempt.verdict.kind is not BlockKind.none:
-        raise NotInThisSlice(rule="DisposeFetch")
     walk.host.fetched += 1
     if unchanged:
         return _unchanged(walk, attempt, response.raw_digest)
@@ -1500,11 +1625,11 @@ def _not_html(
 
 def _settled_answer(
     walk: LadderWalk, attempt: FetchAttempt, known: Page | None
-) -> CandidateDelivered | None:
-    """DisposeFetch's branches that settle the row: not modified, absent, redirected out.
+) -> CandidateDelivered | UrlBlocked | None:
+    """DisposeFetch's branches that settle the row: not modified, absent, blocked, redirected out.
 
-    A hard or challenge verdict, whose branch sits between absent and redirected out, is
-    never given in this slice: classify_block stops the run instead (T18).
+    A hard or challenge verdict blocks the row, counts against the host and raises
+    UrlBlocked, recorded on the run; it delivers no candidate.
     """
     response = attempt.response
     if response.not_modified and known is not None:
@@ -1512,6 +1637,19 @@ def _settled_answer(
     if response.absent:
         walk.entry.status = FrontierStatus.absent
         return _delivered(walk, attempt, CandidateOutcome.absent)
+    if attempt.verdict.counts_against_host:
+        walk.entry.status = FrontierStatus.blocked
+        walk.host.blocked += 1
+        walk.host.fetched += 1
+        blocked = UrlBlocked(
+            run=walk.host.run,
+            url=walk.entry.identity,
+            status=response.status,
+            signature=attempt.verdict.signature,
+            tier=attempt.tier,
+        )
+        walk.host.run.blocks.append(blocked)
+        return blocked
     if response.redirected_out and known is not None:
         walk.entry.status = FrontierStatus.done
         return _delivered(walk, attempt, CandidateOutcome.redirected_out)
@@ -1696,17 +1834,26 @@ def status_text(response: SiteResponse) -> str:
 
 
 def classify_block(response: SiteResponse, median_text: float | None) -> BlockVerdict:
-    """crawl.allium classify_block: none for an ok HTML answer in this slice.
+    """crawl.allium classify_block, in AttemptTier's guidance order.
 
-    An answer the specification calls a block (a 401 or 403, a login wall) needs a
-    verdict this slice does not give; soft verdicts need a text baseline, which no host
-    has before the breaker slice feeds it.
+    A 401 or 403 is hard, and so is every 429 (classify_block cannot see the try); on a
+    200 HTML answer with no error, a main_text under soft_block_ratio of `median_text` (the host's
+    median, None before the host has a text baseline) is soft, then a login wall (a
+    password input) is soft; anything else is none. No challenge recogniser is specified
+    yet, so none is recognised. The signature is the status text, "login wall", or a
+    sentence naming both lengths; empty for none.
     """
-    del median_text  # No host has a text baseline in this slice.
-    if response.status in _ACCESS_DENIED:
-        raise NotInThisSlice(rule="classify_block")
-    if response.ok and response.is_html and _has_password_input(response.markup):
-        raise NotInThisSlice(rule="classify_block")
+    if response.status in _ACCESS_DENIED or response.status == _TOO_MANY_REQUESTS:
+        return BlockVerdict(kind=BlockKind.hard, signature=status_text(response))
+    if response.error is None and response.status == _OK_STATUS and response.is_html:
+        if median_text is not None and response.main_text < CONFIG.soft_block_ratio * median_text:
+            signature = (
+                f"main text of {response.main_text} characters, under {CONFIG.soft_block_ratio}"
+                f" of the host's median of {median_text:.0f}"
+            )
+            return BlockVerdict(kind=BlockKind.soft, signature=signature)
+        if _has_password_input(response.markup):
+            return BlockVerdict(kind=BlockKind.soft, signature="login wall")
     return BlockVerdict(kind=BlockKind.none, signature="")
 
 
@@ -1764,6 +1911,7 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     progress: Callable[[ProgressEvent], None] | None = None,
     on_backoff: Callable[[HostBackedOff], None] | None = None,
     on_failure: Callable[[Run, BaseException], None] | None = None,
+    on_trip: Callable[[BreakerTripped], None] | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, saving nothing.
 
@@ -1774,12 +1922,14 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     exists, an operator interrupt or any other error but NotInThisSlice goes to
     `on_failure` (the root's InterruptSync or RecordCrash); when that requested the
     interrupt, InterruptRun and EndRun end the run interrupted, else the error escapes.
+    `on_trip` receives each BreakerTripped as it is raised (the root's AnnounceTrip).
     """
     run = start_run(request, clock)
     if run is None:
         raise NotInThisSlice(rule="StartRun")
     run.progress = progress
     run.on_backoff = on_backoff
+    run.on_trip = on_trip
     frontier = (
         create_frontier(run, persisted) if persisted is None else attach_frontier(run, persisted)
     )
@@ -1804,6 +1954,9 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
         discovery_failed=tuple(run.discovery_failures),
         backed_off=tuple(run.backoffs),
         removed=tuple(run.target.removals[removals:]),
+        blocked=tuple(run.blocks),
+        skipped=tuple(run.skips),
+        tripped=tuple(run.trips),
     )
 
 
@@ -1850,15 +2003,12 @@ def _handle_entry(
 
     UrlFailed when the entry failed (its fetch, or the mirror discarded it), else None.
     """
-    if open_host_for_entry(run, entry, fetcher) or read_robots_for_new_origin(run, entry, fetcher):
-        if skip_robots_disallowed_on_new_host(run, entry):
-            return None
-    elif skip_robots_disallowed(run, entry) or not proceed_with_known_host(run, entry):
+    if not _entry_ready(run, entry, fetcher):
         return None
     walk = fetch_entry(run, entry, fetcher)
     if walk is None:  # EntryHostReady was raised, so FetchEntry's guards hold.
         return None
-    _settle(walk, fetcher)
+    _settle(walk, frontier, fetcher)
     if run.progress is not None:  # rovo.allium AnnouncePage: the walk has settled.
         run.progress(
             ProgressEvent(event="page", host=walk.host.name, until=None, url=walk.entry.identity)
@@ -1866,6 +2016,8 @@ def _handle_entry(
     disposed = dispose_fetch(walk)
     if isinstance(disposed, EntryFailed):
         return entry_fails(disposed)
+    if isinstance(disposed, UrlBlocked):  # Recorded on the run; no candidate.
+        return None
     if isinstance(disposed, CandidateDelivered):
         # An unchanged, absent, redirected-out or non-HTML row is settled already. An unchanged
         # page raises no LinksFound (RecordUnchanged); its stored links are queued again.
@@ -1879,25 +2031,48 @@ def _handle_entry(
     return _store(run, frontier, walk, clock) if disposed else None
 
 
-def _settle(walk: LadderWalk, fetcher: Fetcher) -> None:
+def _entry_ready(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> bool:
+    """True when EntryHostReady was raised for the row and no skip settled it.
+
+    SkipTrippedHost first; then OpenHostForEntry or ReadRobotsForNewOrigin, then
+    SkipTrippedHostAfterReady (that read retired the host) or SkipRobotsDisallowedOnNewHost;
+    else SkipRobotsDisallowed or ProceedWithKnownHost.
+    """
+    if skip_tripped_host(run, entry) is not None:
+        return False
+    if open_host_for_entry(run, entry, fetcher) or read_robots_for_new_origin(run, entry, fetcher):
+        if skip_tripped_host_after_ready(run, entry) is not None:
+            return False
+        return not skip_robots_disallowed_on_new_host(run, entry)
+    return not skip_robots_disallowed(run, entry) and proceed_with_known_host(run, entry)
+
+
+def _settle(walk: LadderWalk, frontier: Frontier, fetcher: Fetcher) -> None:
     """The walk's tries to settlement: each attempt ready, retried while it may be.
 
-    HttpRetry while the attempt is retryable, then SettleWalk and FeedBreaker; the
-    breaker acting, a host retired and an escalation are later slices' branches.
+    RetireHostOnLongRetryAfter settles the walk on a Retry-After past the cap, and
+    StopWalkOnTrippedHost when the host has tripped and the walk needs another request;
+    else HttpRetry while the attempt is retryable, then SettleWalk. Then FeedBreaker, and
+    BreakerTrips when the breaker should act. An escalation, and BreakerEscalates (a
+    breaker that should act below the highest tier under protection_escalation, owner
+    testing only), are later slices' branches.
     """
     attempt = walk.attempts[-1]
     while True:
         prepare_attempt(attempt)
-        if attempt.retires_host:
-            raise NotInThisSlice(rule="RetireHostOnLongRetryAfter")
+        if retire_host_on_long_retry_after(attempt) or stop_walk_on_tripped_host(attempt):
+            break
         if http_retry(attempt, fetcher) is None:
+            if not settle_walk(attempt):
+                raise NotInThisSlice(rule="Escalate")
             break
         attempt = walk.attempts[-1]
-    if not settle_walk(attempt):
-        raise NotInThisSlice(rule="Escalate")
     feed_breaker(walk)
-    if walk.host.breaker is not None and walk.host.breaker.should_act:
-        raise NotInThisSlice(rule="BreakerTrips")
+    breaker = walk.host.breaker
+    # A run feeds its breaker only while breaker_enabled holds, so a breaker that should
+    # act and does not trip is one BreakerTrips leaves to BreakerEscalates.
+    if breaker is not None and breaker.should_act and breaker_trips(breaker, frontier) is None:
+        raise NotInThisSlice(rule="BreakerEscalates")
 
 
 def _store(run: Run, frontier: Frontier, walk: LadderWalk, clock: Clock) -> UrlFailed | None:
@@ -2141,6 +2316,31 @@ def _selectable(run: Run, entry: FrontierEntry) -> bool:
         return entry.identity in run.targets
     scope = run.target.scope
     return scope.within_bounds(entry.identity) or run.target.known_page(entry.identity) is not None
+
+
+def _trip(host: Host) -> BreakerTripped | None:
+    """A watching breaker trips: the BreakerTripped, recorded and handed to the root's sink.
+
+    None when the host has no breaker or it is not watching (`if exists breaker and
+    breaker.status = watching`).
+    """
+    breaker = host.breaker
+    if breaker is None or breaker.status is not BreakerStatus.watching:
+        return None
+    breaker.status = BreakerStatus.tripped
+    tripped = BreakerTripped(host=host)
+    host.run.trips.append(tripped)
+    if host.run.on_trip is not None:  # The root's AnnounceTrip, live.
+        host.run.on_trip(tripped)
+    return tripped
+
+
+def _skip(run: Run, entry: FrontierEntry) -> UrlSkippedBlocked:
+    """A row skipped on a tripped host: skipped_blocked, and its UrlSkippedBlocked recorded."""
+    entry.status = FrontierStatus.skipped_blocked
+    skipped = UrlSkippedBlocked(run=run, url=entry.identity)
+    run.skips.append(skipped)
+    return skipped
 
 
 def _host_tripped(run: Run, entry: FrontierEntry) -> bool:

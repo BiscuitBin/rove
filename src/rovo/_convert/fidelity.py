@@ -214,6 +214,20 @@ def extract(html: str, url: str, profile: Profile) -> ExtractedContent:
     )
 
 
+def main_text_length(html: str, profile: Profile) -> int:
+    """fetch_or_render's extracted text length (crawl.allium SiteResponse.main_text).
+
+    The whitespace-collapsed length of the visible text of the profile's content
+    selection, else of the whole body; never the fallback extractor, whose cost per page
+    is not worth a heuristic.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    body = soup.body or soup
+    selected = _select(body, selection_of(profile))
+    content = body if selected is None else selected
+    return len(" ".join(content.get_text(" ").split()))
+
+
 def normalize(content: ExtractedContent, profile: Profile) -> NormalizedContent:
     """Realises convert.allium Fidelity.normalize.
 

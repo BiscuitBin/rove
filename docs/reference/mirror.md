@@ -199,8 +199,9 @@ the layout `pages/{host}/{path}`.
 
 Under a profile with a version parameter (`mslearn`'s `view`), a page whose URL carries
 that parameter gets `@` and its version label at the end of its last segment, after the
-rewrites above and before `.md`: the label is the value the profile maps it to, else the
-value itself, each character outside `[A-Za-z0-9._-]` replaced with `-`. So
+rewrites above and before `.md`: the value is form-decoded first (`+` is a space, `%XX`
+decoded), then the label is the value the profile maps it to, else the value itself,
+each character outside `[A-Za-z0-9._-]` replaced with `-` (so `?view=a+b` gives `a-b`). So
 `/guide/foo?view=graph-rest-beta` gives `foo@beta.md`, the scope root with `?view=x`
 gives `index@x.md`, `/guide/README.md?view=x` gives `README@x.md` and `?view=` with no
 value gives `foo@.md`. No other path holds `@`, since every segment replaces it. A page
@@ -433,7 +434,10 @@ the operator and the open or written status. It names the run (`run_id`, `kind`,
 options it used, the tallies (`discovered`, the frontier's rows when discovery ended, `fetched`, `converted`, `bytes_fetched`
 and the rest), one row per host, the quality summary and scores, the low-confidence
 pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` then
-`href`) and one row per change (`kind`, `url`, `path`, `moved_from`): `added`,
+`href`), the blocked URLs (`blocked_urls`: `url`, `status`, `signature`, `tier`),
+the URLs skipped on a tripped host (`skipped_urls`), whether a host's breaker tripped
+(`breaker_tripped`; each host's row carries its own `blocked`, `block_rate` and
+`breaker_tripped`) and one row per change (`kind`, `url`, `path`, `moved_from`): `added`,
 `changed`, `unchanged`, `moved` (with the old path in `moved_from`), `removed` (once per
 removal, with the path the record keeps) or `failed`. Every list is
 sorted by URL or path, durations are seconds, and `started_at` and `finished_at` are
