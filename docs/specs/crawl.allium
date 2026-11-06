@@ -677,7 +677,7 @@ rule PrepareRun {
                         priority: config.start_priority, attempts: 0, status: pending
                     )
         else:
-            run.recheckable_urls = (frontier.entries where status in {absent, duplicate, done}) -> identity
+            run.recheckable_urls = (frontier.entries where status in {absent, duplicate, done, skipped_not_html}) -> identity
             for p in run.target.written_pages where run.target.scope.within_bounds(source_url):
                 let recheck = FrontierEntry{frontier: frontier, identity: p.identity}
                 if exists recheck:
@@ -1289,8 +1289,9 @@ rule RecordObservation {
 -- that an owner-testing run re-pends a newly admitted unresolved row once,
 -- and a full run re-pends once a row settled before it that PrepareRun
 -- leaves alone. Decided by the maintainer: such a row (an absent row with
--- no page, a duplicate row, or a done row whose identity is no page's
--- own, such as the requested identity of a moved page) is rechecked when
+-- no page, a duplicate row, a done row whose identity is no page's own,
+-- such as the requested identity of a moved page, or a row with no page
+-- that answered non-HTML, skipped_not_html) is rechecked when
 -- the full run's discovery names its URL again, by a page link, a sitemap
 -- entry or llms.txt; a row nothing names stays settled. A row settled in
 -- this run is not re-pended by its rediscovery. Removed pages are
@@ -1302,7 +1303,7 @@ rule Enqueue {
     let newly_admitted = run.is_owner_testing and url not in run.active_urls
     let rediscovered =
         url in run.recheckable_urls
-        and exists existing and existing.status in {absent, duplicate, done}
+        and exists existing and existing.status in {absent, duplicate, done, skipped_not_html}
         and not exists mirror/Page{mirror: run.target, identity: url}
     ensures:
         run.active_urls = run.active_urls + { url }
@@ -1961,6 +1962,13 @@ rule DisposeFetch {
                 )
             else if not response.is_html:
                 entry.status = skipped_not_html
+                if exists known:
+                    mirror/CandidateDelivered(
+                        run: run, mirror: run.target, requested_identity: entry.identity,
+                        source_url: response.source_url, redirect_hops: response.redirect_hops,
+                        depth: entry.depth, outcome: absent, tier: attempt.tier,
+                        sitemap_lastmod: entry.sitemap_lastmod, raw_digest: response.raw_digest
+                    )
             else:
                 PageFetched(run: run, entry: entry, walk: walk)
 
@@ -1974,10 +1982,13 @@ rule DisposeFetch {
         -- so a move is never mistaken for an unchanged page; the mirror
         -- still leaves the file alone when the body comes out the same. A
         -- render's source URL goes through the same identity and alias
-        -- rules as an http one. An unchanged, absent or redirected-out
-        -- entry settles here; a converted one stays in progress until the
-        -- mirror answers with PageStored, CandidateDuplicate or, when no
-        -- path is free for it, CandidateDiscarded.
+        -- rules as an http one. Decided: a written page whose URL now
+        -- answers non-HTML is retired as absent, archived like a 404, and
+        -- its row settles skipped_not_html. An unchanged, absent,
+        -- redirected-out or non-HTML entry settles here; a converted one
+        -- stays in progress until the mirror answers with PageStored,
+        -- CandidateDuplicate or, when no path is free for it,
+        -- CandidateDiscarded.
 }
 
 rule EntryFails {

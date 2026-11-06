@@ -261,9 +261,9 @@ enum VerificationReason {
     | quality_drift | broken_link | index_stale
 }
 
--- Why a page was removed: it answered 404 or 410 (absent), it redirected
--- out of scope, it fell outside a narrowed scope, or its URL now resolves
--- to another page (merged).
+-- Why a page was removed: it answered 404 or 410, or no longer answers
+-- HTML (absent), it redirected out of scope, it fell outside a narrowed
+-- scope, or its URL now resolves to another page (merged).
 enum RemovalReason { absent | redirected_out | out_of_scope | merged }
 
 -- What one settled fetch delivers.
@@ -304,7 +304,7 @@ entity Mirror {
 entity Page {
     mirror: Mirror
     identity: String
-    path: String                        -- mirror-relative .md path under pages/<host>/; changes only when the identity moves
+    path: String                        -- mirror-relative .md path under pages/<host>/; changes when the identity moves, at a revival and back at its retirement
     canonical_url: String?              -- what the page declared, when it did
     source_url: String                  -- the URL whose response was converted
     title: String
@@ -324,6 +324,7 @@ entity Page {
     content_digest: String              -- of the published body; serves change detection and the frontmatter
     previous_digest: String?            -- content_digest before this run touched the page; null when new or revived
     moved_from: String?                 -- the old path while a move awaits finalisation
+    revived_from: String?               -- a revived page's removed path, where its archived copy is, until finalisation
     etag: String?
     last_modified: String?
     sitemap_lastmod: String?
@@ -762,6 +763,7 @@ rule ReviveRemovedPage {
         target.removal_reason = null
         target.redirect_target = null
         target.path = new_path
+        target.revived_from = archived_path
         target.previous_digest = null
         target.first_seen = now
         ArchivedCopyDeleted(mirror: candidate.mirror, path: archived_path)
@@ -794,7 +796,7 @@ rule StoreNewPage {
             locale: candidate.mirror.scope.locale ?? content.declared_locale,
             version: version_label(candidate.mirror.profile, identity),
             raw_digest: candidate.raw_digest,
-            content_digest: digest(content.body), previous_digest: null, moved_from: null,
+            content_digest: digest(content.body), previous_digest: null, moved_from: null, revived_from: null,
             etag: candidate.etag, last_modified: candidate.last_modified,
             sitemap_lastmod: candidate.sitemap_lastmod,
             processing_signature: candidate.mirror.processing_signature,
@@ -999,27 +1001,37 @@ rule AcceptRedirectedOutWithoutPage {
 
 -- Every removal goes through here: the page keeps its record and path,
 -- its aliases and links go, and its file is archived, or deleted when
--- prune is set. The archive mirrors pages/: the file at
--- pages/<host>/<relative path> is archived at _removed/<host>/<relative
--- path>, and that is the archived copy ArchivedCopyDeleted names by the
--- page's path.
+-- prune is set. A page revived in this run is retired at the path it was
+-- revived from, where its archived copy is, unless another page now holds
+-- that path; then the copy moves to the page's new path. The archive mirrors pages/:
+-- the file at pages/<host>/<relative path> is archived at
+-- _removed/<host>/<relative path>, and that is the archived copy
+-- ArchivedCopyDeleted names by the page's path.
 rule RetirePage {
     when: PageRetired(page, reason, redirect_target?, candidate?)
     requires: page.status = written
+    let old_path_held =
+        page.revived_from != null
+        and page.mirror.pages.any(p => p != page and casefold(p.path) = casefold(page.revived_from))
+    let retired_path = if page.revived_from = null or old_path_held: page.path else: page.revived_from
     ensures:
         page.status = removed
         page.removed_at = now
         page.removal_reason = reason
         page.redirect_target = redirect_target
         page.moved_from = null
+        page.revived_from = null
+        page.path = retired_path
         for a in page.aliases:
             not exists a
         for l in page.outbound_links:
             not exists l
         if config.prune:
-            PageFileDeleted(mirror: page.mirror, path: page.path)
+            PageFileDeleted(mirror: page.mirror, path: retired_path)
         else:
-            PageFileArchived(mirror: page.mirror, path: page.path)
+            if old_path_held:
+                ArchivedCopyMoved(mirror: page.mirror, from_path: page.revived_from, to_path: retired_path)
+            PageFileArchived(mirror: page.mirror, path: retired_path)
         PageRemoved(mirror: page.mirror, page: page, reason: reason, candidate: candidate)
 
     @guidance
@@ -1028,9 +1040,10 @@ rule RetirePage {
         -- kept: a removed page is never reported removed again.
         --
         -- Decided: the file effects (PageFileMoved, PageFileArchived,
-        -- PageFileDeleted, ArchivedCopyDeleted) are recorded when their
-        -- rule fires at intake and applied in the finalise pass, in the
-        -- order raised and idempotently, before any PublishPage. Pending
+        -- PageFileDeleted, ArchivedCopyDeleted, ArchivedCopyMoved) are
+        -- recorded when their rule fires at intake and applied in the
+        -- finalise pass, in the order raised and idempotently, before any
+        -- PublishPage. Pending
         -- effects compose per page path: a page moved, once or more, and
         -- then retired in the same run is archived from the path it was
         -- last published at to _removed/<host>/<the path it was retired
@@ -1040,11 +1053,21 @@ rule RetirePage {
         -- that path and archiving nothing. Decided: a removed page revived
         -- at a new path (its old one no longer free) and retired again in
         -- the same run likewise keeps its existing _removed/ copy, its
-        -- last published bytes: the pending ArchivedCopyDeleted is
-        -- cancelled and the never-published new path is not archived, so
-        -- nothing is lost. A directory under pages/ or
-        -- _removed/ that an effect leaves empty is removed, the namespace
-        -- root (pages/ or _removed/) included.
+        -- last published bytes: its record returns to the old path, the
+        -- path that copy is at (revived_from), so the PageFileArchived of
+        -- that path cancels the pending ArchivedCopyDeleted, the
+        -- never-published new path is not archived, nothing moves on disk
+        -- and the record and its copy agree (RemovedAreaKeepsPath).
+        -- Decided: when another page has taken that old path in the same
+        -- run, the record keeps its new path and the kept copy moves from
+        -- _removed/<host>/<old path> to _removed/<host>/<new path>
+        -- (ArchivedCopyMoved), which cancels the pending ArchivedCopyDeleted
+        -- of the old path; the PageFileArchived of the never-published new
+        -- path archives nothing, so record and copy still agree and
+        -- UniquePagePathIgnoringCase holds. Under prune nothing moves: the
+        -- pending ArchivedCopyDeleted deletes the copy. A directory under
+        -- pages/ or _removed/ that an effect leaves empty is removed, the
+        -- namespace root (pages/ or _removed/) included.
 }
 
 ------------------------------------------------------------
@@ -1202,6 +1225,7 @@ rule PublishPage {
             page.last_changed = now
         page.previous_digest = page.content_digest
         page.moved_from = null
+        page.revived_from = null
         if not page_file_current(page):
             PageFileWritten(mirror: page.mirror, page: page)
         PageFinalised(

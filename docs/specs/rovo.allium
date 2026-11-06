@@ -346,13 +346,18 @@ rule RefuseOffHostTarget {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.any(u => not is_http_url(u) or hostname_of(u) not in settings.allowed_hosts)
+    requires: options.urls.any(u => not is_http_url(u) or hostname_of(u) not in scope.allowed_hosts)
     ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "invalid or off-host target")
 
     @guidance
-        -- A named URL must be http(s) on an allowed host. Path prefixes
-        -- and include and exclude patterns are waived for it.
+        -- A named URL must be http(s) on an allowed host. Decided: the
+        -- allowed hosts are the resolved scope's (scope_of), the first
+        -- seed's host when the configuration leaves allowed_hosts empty,
+        -- never the raw configuration value; every later refusal and
+        -- StartSync test the same hosts. Path prefixes and include and
+        -- exclude patterns are waived for it.
 }
 
 rule RefuseUnknownTargetPath {
@@ -361,8 +366,9 @@ rule RefuseUnknownTargetPath {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.any(p => p not in target.page_paths)
     ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "unknown target path")
 
@@ -377,8 +383,9 @@ rule RefuseMissingEngine {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (settings.needs_browser and not tier_installed(browser))
@@ -410,8 +417,9 @@ rule RefuseInvalidOwnerRequest {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (not settings.needs_browser or tier_installed(browser))
@@ -466,8 +474,10 @@ rule StartSync {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let profile = profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name)
+    let scope = scope_of(settings, profile)
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (not settings.needs_browser or tier_installed(browser))
@@ -483,8 +493,6 @@ rule StartSync {
     let owned = options.owner_test?.hosts ?? {}
     let run_id = next_run_id(target)
     let kind = if target.is_populated: update else: initial
-    let profile = profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name)
-    let scope = scope_of(settings, profile)
     let targets = resolve_targets(target, scope, options.urls, options.paths)
     ensures:
         target.profile = profile
@@ -575,7 +583,7 @@ rule TallyDiscoveryProblem {
 
 rule AnnounceBackoff {
     when: crawl/HostBackedOff(host, until)
-    ensures: ProgressReported(operator: host.run.operator, event: host_backoff, host: host.name, until: until)
+    ensures: ProgressReported(operator: host.run.operator, event: host_backoff, host: host.name, until: until, url: null)
 }
 
 rule AnnounceTrip {
@@ -584,12 +592,25 @@ rule AnnounceTrip {
     requires: exists report and report.status = open
     ensures:
         report.breaker_tripped = true
-        ProgressReported(operator: host.run.operator, event: breaker_tripped, host: host.name, until: null)
+        ProgressReported(operator: host.run.operator, event: breaker_tripped, host: host.name, until: null, url: null)
 }
 
 rule AnnounceOwnerWarning {
     when: crawl/OwnerTestingWarningIssued(operator, hosts, policy)
-    ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null)
+    ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null, url: null)
+}
+
+-- Decided: start is raised once, when the run is created.
+rule AnnounceStart {
+    when: run: crawl/Run.created
+    ensures: ProgressReported(operator: run.operator, event: start, host: null, until: null, url: null)
+}
+
+-- Decided: page is raised once per frontier row a fetch settles, naming
+-- the row's host and its URL.
+rule AnnouncePage {
+    when: walk: crawl/LadderWalk.status transitions_to settled
+    ensures: ProgressReported(operator: walk.host.run.operator, event: page, host: walk.host.name, until: null, url: walk.entry.identity)
 }
 
 rule TallyRemoval {
@@ -688,7 +709,7 @@ rule RankAndWriteReport {
         report.status = written
         report.finished_at = now
         ReportWritten(report: report)
-        ProgressReported(operator: run.operator, event: done, host: null, until: null)
+        ProgressReported(operator: run.operator, event: done, host: null, until: null, url: null)
         CommandExited(operator: run.operator, code: code)
 
     @guidance
@@ -713,6 +734,12 @@ rule InterruptSync {
     let run = crawl/Run{target: target, status: running}
     requires: exists run and run.status = running
     ensures: run.interrupt_requested = true
+
+    @guidance
+        -- Decided: an interrupt after the run has ended, in finalisation or
+        -- while the report is assembled, finds no running run; the runtime
+        -- takes it as RuntimeFails with the error "KeyboardInterrupt: ",
+        -- and RecordCrashAfterRun writes the report and exits partial.
 }
 
 -- The runtime raises this on the operator's behalf when an uncaught error
@@ -746,6 +773,13 @@ rule RecordCrashAfterRun {
         report.error = error
         report.report_status = interrupted
         ReportReady(run: run)
+
+    @guidance
+        -- Decided: a crash after the run saves neither the manifest nor
+        -- the frontier, so the disk keeps the last finalisation's state.
+        -- The run's record still joins the mirror's run history with the
+        -- run's own status, so next_run_id moves past it and the next sync
+        -- takes the next id (crawl's RunIdentityIsUnique).
 }
 
 ------------------------------------------------------------
@@ -942,7 +976,14 @@ surface MirrorCommands {
     @guarantee ProgressOnRequest
         -- With json_events, progress arrives as one JSON event per line on
         -- stdout: start, page, host_backoff, breaker_tripped,
-        -- owner_testing_warning and done. Without json_events
+        -- owner_testing_warning and done, each with its host, until and
+        -- url, null where the rule raising it gives none. start comes once
+        -- when the run is created (AnnounceStart); page once per frontier
+        -- row a fetch settles, with the row's host and URL (AnnouncePage);
+        -- host_backoff (AnnounceBackoff), breaker_tripped (AnnounceTrip)
+        -- and owner_testing_warning (AnnounceOwnerWarning) as crawl raises
+        -- them; done last, as the report is written (RankAndWriteReport).
+        -- url is null on every event but page. Without json_events
         -- ProgressReported has no sink: nothing is printed for it. A dry
         -- run still prints its frontier as plain text, as crawl's DryRun
         -- lists it: one identity per line, in next_pending order.
