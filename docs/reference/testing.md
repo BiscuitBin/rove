@@ -106,7 +106,7 @@ download, and installs the wheel with `--offline --no-index --no-deps`. Then
 `scripts/wheel_smoke.py api`, under `python -I`, imports `rovo` with a recording import
 finder in place and fails on any import outside `rovo` and the standard library. It
 also checks that typer is not importable, that the version matches the metadata, that
-the wheel installed exactly the twenty-seven package files (`py.typed` among them) and the
+the wheel installed exactly the twenty-eight package files (`py.typed` among them) and the
 console script, and that the metadata has `Requires-Python: >=3.13`, the upload-guard
 classifier, no licence field and exactly the one entry point. Next it installs the
 runtime closure `uv.lock` pins, with `uv sync` aimed at the smoke environment, offline
@@ -155,7 +155,13 @@ through redirects. `tests/e2e/test_errors_report_sync.py` generates its sites li
 and checks the error paths: the refusals in order with their refused reports, a
 non-HTML answer skipped and a failing URL reported on every sync, `rovo report`, an
 interrupted and a crashed sync, `--json` progress and `ROVO_MIRROR__PRUNE` from the
-environment.
+environment. `quality` is a generic-profile site whose pages hold the constructs
+Markdown cannot carry, a lossy page (a code sample naming no language, an embed), a page
+linking to an anchor island and a page with no `main`; `devsite` is a DevSite-shaped
+page of tab groups and a callout around DevSite chrome. `tests/e2e/test_quality_sync.py`
+syncs both to check islands, the gates and flags, `fail_on_low_quality`, every tab
+panel under `devsite` and `rovo verify`; `tests/test_verify.py` holds one unit test per
+verify finding.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

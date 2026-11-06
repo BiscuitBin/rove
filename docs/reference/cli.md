@@ -12,9 +12,9 @@ The `rovo` command is the Typer application `rovo.cli:app`. `python -m rovo` run
 same application under the same program name. The implementation of the specification
 under `docs/specs/` is under way: `rovo init` creates a mirror, `rovo sync` mirrors
 its seed pages, the pages its sitemaps and `llms.txt` name and the pages they link to
-over HTTP and writes the mirror's indexes,
-`rovo index` rebuilds the indexes offline and `rovo report` prints the last report; the
-later commands (`verify`, `fetch`) arrive with their slices. Every example on this page was run from a checkout as
+over HTTP and writes the mirror's indexes, `rovo verify` checks the mirror on disk
+offline, `rovo index` rebuilds the indexes offline and `rovo report` prints the last
+report; the later command (`fetch`) arrives with its slice. Every example on this page was run from a checkout as
 `uv run --frozen rovo ...`; an installed command behaves the same.
 
 ## `rovo`
@@ -58,7 +58,7 @@ Create a mirror: write rovo.toml and an empty manifest. Nothing is fetched.
 | --- | --- |
 | `SITE_URL` | The documentation page the mirror starts from: an `http` or `https` URL. |
 | `OUT_DIR` | The directory the mirror is made in; created when absent. |
-| `--profile NAME` | A catalogue profile (`generic`, `mslearn`, `devsite`). By default the URL's host picks one, else `generic`. |
+| `--profile NAME` | A catalogue profile (`generic`, `mslearn`, `devsite`). By default the URL's host picks one, else `generic`. `generic` takes the content from `main`, else `article`; `devsite` from the DevSite article body, with its breadcrumbs, its `devsite-selector` tab groups and its note, caution and warning callouts; `mslearn` from the Learn article content, with its `tabGroup` tab groups and its alert callouts. A sync under `mslearn` stops: its sitemap filter's `{section}` and `{locale}` placeholders and the version label in a page path are not yet specified. |
 
 `rovo init` writes `OUT_DIR/rovo.toml`, every key with its default (the sections
 `site`, `scope`, `conversion`, `crawl`, `quality`, `mirror` and `unblocking`), and an
@@ -304,10 +304,39 @@ implements (a block, a
 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-profile other
-than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
-a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
-previous report in place.
+profile whose sitemap filter holds a `{section}` or `{locale}` placeholder, a page whose
+path would carry a version label, a login form), the sync stops, names the rule on
+standard error, exits 1 and leaves the previous report in place.
+
+## `rovo verify`
+
+```text
+Usage: rovo verify [OPTIONS] OUT_DIR
+
+Check the mirror on disk offline: print each finding and the gate tallies.
+```
+
+`rovo verify OUT_DIR` checks the mirror's files against its manifest, offline: it makes
+no request and writes nothing, neither the manifest, the state files, the report nor a
+page. Each finding is one line on standard output, `<reason> <path> <detail>`, sorted
+by path, reason and detail, every path relative to `OUT_DIR`:
+
+| Reason | Finding |
+| --- | --- |
+| `missing_file` | A written page's file is gone. |
+| `unmanaged_file` | A Markdown file under `pages/` the manifest does not know, or under `_indexes/` the indexes would not write. Anything else at the root (`.git/`, a `README.md`) is the operator's and never reported. |
+| `invalid_page_file` | A page file that is not UTF-8, has no frontmatter, a frontmatter that does not parse, or one missing a required key. |
+| `digest_mismatch` | A body whose digest differs from the frontmatter's or the manifest's `content_digest`; the detail is the body's digest. |
+| `quality_drift` | A gate that fails when the file's body is measured against the stored expected counts but did not fail when the page was measured; the detail is the gate. |
+| `broken_link` | A relative link in a page file or a generated index that leaves the mirror, reaches no file or names a fragment the target file does not hold; the detail is the link. |
+| `index_stale` | An index file whose text differs from what `rovo index` would write. |
+
+After the findings, one `<gate> <pages>` line per gate that failed on any written page
+when it was measured, sorted by gate, for example `code_lang_rate 1`. It exits 0 with no
+finding and 4 with any; the tallies never move the exit code. It exits 2, printing the
+problem on standard error and nothing on standard output, when `OUT_DIR` is not a
+directory, holds no manifest or holds one that does not parse; an unreadable page file
+is a finding, not a usage error.
 
 ## `rovo index`
 
@@ -347,11 +376,11 @@ JSON. It makes no request and writes nothing.
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, the indexes were rebuilt, or the report was printed. |
+| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, a verify found nothing, the indexes were rebuilt, or the report was printed. |
 | 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements. |
-| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync` or `index`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
+| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync`, `verify` or `index`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
 | 3 | Blocked: a host's breaker tripped (reached by a later slice). |
-| 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken. |
+| 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken; or `rovo verify` found anything. |
 
 The exit code of a sync is the most severe that applies, in the order of the table.
 

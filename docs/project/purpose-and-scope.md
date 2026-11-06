@@ -21,12 +21,13 @@ re-syncs with one command and reports how well every page converted
 ([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). What works
 today is a thin path: `rovo init` creates a mirror, and `rovo sync` fetches the
 seed pages robots.txt allows over HTTP, then the pages they link to within the crawl
-scope, converts each to Markdown with the generic profile, publishes it as a page file
+scope, converts each to Markdown with its profile, publishes it as a page file
 whose links to other mirrored pages are relative, writes the mirror's indexes and writes
-`crawl-report.json`; `rovo index` rebuilds the indexes offline, and `rovo report`
-prints the last report; a sync naming `--url` or `--path` targets syncs those pages
-alone. A branch a later slice implements (blocks, owner testing, a profile other than
-generic) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
+`crawl-report.json`; `rovo verify` checks the mirror on disk offline, `rovo index`
+rebuilds the indexes offline, and `rovo report` prints the last report; a sync naming
+`--url` or `--path` targets syncs those pages alone. A branch a later slice implements
+(blocks, owner testing) or the specification leaves open (the `mslearn` profile's
+sitemap filter and version label) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
 product the repository runs everything a change needs: lint and type gates with
 positive controls, a coverage floor, a wheel built and smoke-installed offline on every
 `just check`, the documentation and agent contracts, and CI. Each implementation ticket

@@ -82,6 +82,18 @@ class BrokenLinkReason(enum.Enum):
     fragment_not_found = "fragment_not_found"
 
 
+class VerificationReason(enum.Enum):
+    """Why verify reports a finding (mirror.allium VerificationReason)."""
+
+    missing_file = "missing_file"
+    unmanaged_file = "unmanaged_file"
+    invalid_page_file = "invalid_page_file"
+    digest_mismatch = "digest_mismatch"
+    quality_drift = "quality_drift"
+    broken_link = "broken_link"
+    index_stale = "index_stale"
+
+
 class PassKind(enum.Enum):
     """The kinds of job over the mirror."""
 
@@ -265,6 +277,15 @@ class BrokenLink:
     from_path: str
     href: str
     reason: BrokenLinkReason
+
+
+@dataclass(frozen=True, kw_only=True)
+class VerificationFailure:
+    """One finding of verify: the gate, link or digest concerned is its detail."""
+
+    path: str
+    reason: VerificationReason
+    detail: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -600,7 +621,7 @@ class MirrorPass:
     operator: Operator
     kind: PassKind
     run_id: int | None
-    failures: list[object]
+    failures: list[VerificationFailure]
     broken_links: list[BrokenLink]
     status: PassStatus
 
@@ -669,3 +690,13 @@ class PageFinalised:
     outcome: StoreOutcome
     previous_path: str | None
     seen_this_run: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class VerificationFinished:
+    """The trigger VerifyPages raises (mirror.allium VerifyPages)."""
+
+    mirror: Mirror
+    pass_: MirrorPass
+    operator: Operator
+    failures: tuple[VerificationFailure, ...]

@@ -8,7 +8,8 @@ a local, self-linking Markdown mirror that re-syncs with one command. Today
 pages and the pages they link to within the scope over HTTP, publishes each as a
 Markdown page file with relative links between mirrored pages, writes the mirror's
 indexes (`index.md`, `llms.txt` and the rest, which `rovo index OUT_DIR` rebuilds) and
-writes `crawl-report.json`, which `rovo report OUT_DIR` prints; the other branches
+writes `crawl-report.json`, which `rovo report OUT_DIR` prints; `rovo verify OUT_DIR`
+checks the mirror on disk offline; the other branches
 arrive slice by slice. The public API
 is still only `rovo.__version__`, and the command also answers `rovo --version` and
 `rovo version`. The repository runs the whole quality gate on every change, so each

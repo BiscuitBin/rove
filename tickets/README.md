@@ -40,6 +40,7 @@ snapshot.
 | T14 | Incremental sync: a second rovo sync fetches known pages conditionally, keeps what did not change, reuses unchanged sitemaps, honours max_age and rewrites nothing on an unchanged site | `T14-incremental.md` | T13 | none | open |
 | T15 | Page lifecycle: rovo sync removes and archives absent pages, follows redirects within the scope, moves and merges pages with their aliases, revives returning pages, settles duplicates and retires pages a narrowed scope no longer admits | `T15-lifecycle.md` | T14 | none | open |
 | T16 | Errors and the report: rovo sync skips non-HTML answers, refuses in the specified order with a refused report, survives an interrupt or a crash with a report, ranks every exit code, prints --json progress, reads ROVO_ variables and --set flags, and rovo report shows the last report | `T16-errors-report.md` | T15 | none | open |
+| T17 | Conversion quality: every quality gate and flag, islands for what Markdown cannot carry, every tab panel, the mslearn and devsite profiles, fail_on_low_quality and rovo verify | `T17-quality-gates.md` | T16 | none | open |
 
 ## Dependency graph
 
@@ -47,7 +48,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -111,6 +112,13 @@ T00 ─┬─ T01 ─┐
   every exit code is ranked; `--json` prints progress events; `ROVO_<SECTION>__<FIELD>`
   variables and `--set` flags layer over `rovo.toml`; and `rovo report` prints the last
   report.
+- **T17** is slice 9: conversion quality. A page holding a complex table, a block
+  definition list, `details`, math or a non-heading `id` anchor converts with each
+  carried as a sanitised island instead of stopping the sync; every tab panel reaches
+  the body under a profile with a tab selection; the `devsite` profile converts end to
+  end and `mslearn`'s selection is unit-tested while its sitemap filter and version
+  label wait on the maintainer; every gate and normalisation flag is raised;
+  `fail_on_low_quality` exits 4; and `rovo verify` reports drift on disk offline.
 
 ## How to pick up a ticket
 

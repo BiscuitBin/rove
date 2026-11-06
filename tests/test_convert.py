@@ -2,13 +2,23 @@
 
 Each test is named after the obligation id `just plan-spec convert` emits, dots and
 hyphens as underscores, and its docstring quotes the obligation. Everything here is
-pure: no network, no file but the fixture page, no clock.
+pure: no network, no file but the fixture pages, no clock.
+
+Re-propagated by T17 (origin T09): the Fidelity contract tests, test_body_shape and
+test_surface_exposure_PageConversion are extended with islands, tab panels, the declared
+reductions, the normalisation flags and the devsite and mslearn selections; the
+guarantees without an obligation id follow them, named after the guarantee. The devsite
+markup is tests/fixtures/sites/devsite/; the mslearn markup is a unit input here, since
+no mslearn sync can complete while its sitemap filter and version label are unspecified.
 """
 
 import dataclasses
 import inspect
+import re
 from collections.abc import Iterable
 from pathlib import Path
+
+import pytest
 
 from rovo._convert import profiles
 from rovo._convert.fidelity import (
@@ -92,6 +102,105 @@ NO_MAIN = """<!doctype html>
 </html>
 """
 
+# T17: the fixture sites' pages, and the Learn-shaped markup the mslearn profile selects.
+QUALITY = SITES / "quality" / "guide"
+ISLANDS_PAGE = (QUALITY / "islands.html").read_text(encoding="utf-8")
+GATES_PAGE = (QUALITY / "gates.html").read_text(encoding="utf-8")
+TABS_PAGE = (SITES / "devsite" / "guide" / "tabs.html").read_text(encoding="utf-8")
+DEVSITE_CHROME = (
+    "Example developers header",
+    "Left navigation start",
+    "Example developers footer",
+)
+GOOGLE_URL = "https://developers.google.com/example/guide/tabs"
+LEARN_URL = "https://learn.microsoft.com/en-us/graph/api/user-post-users"
+LEARN_CHROME = ("Microsoft Learn header", "Learn table of contents", "Microsoft Learn footer")
+MSLEARN_PAGE = """<!doctype html>
+<html lang="en-us">
+    <head><title>Create user | Microsoft Learn</title></head>
+    <body>
+        <header id="ms--site-header">Microsoft Learn header</header>
+        <nav id="left-container">Learn table of contents</nav>
+        <main id="main" class="layout-body-main">
+            <div class="content">
+                <h1>Create user</h1>
+                <p>Create a new user object in the directory of the organisation.</p>
+                <div class="alert is-info">
+                    <p class="alert-title">Note</p>
+                    <p>Only an administrator can create a user.</p>
+                </div>
+                <h2>Request</h2>
+                <div class="tabGroup" id="tabgroup_1">
+                    <ul role="tablist">
+                        <li role="presentation">
+                            <a href="#tabpanel_1_http" role="tab" data-tab="http">HTTP</a>
+                        </li>
+                        <li role="presentation">
+                            <a href="#tabpanel_1_csharp" role="tab" data-tab="csharp">C#</a>
+                        </li>
+                    </ul>
+                    <section id="tabpanel_1_http" role="tabpanel" data-tab="http">
+                        <pre><code class="lang-http">POST https://graph.microsoft.com/v1.0/users</code></pre>
+                    </section>
+                    <section
+                        id="tabpanel_1_csharp" role="tabpanel" data-tab="csharp" hidden="hidden"
+                    >
+                        <pre><code class="lang-csharp">var user = new User();</code></pre>
+                    </section>
+                </div>
+            </div>
+        </main>
+        <footer id="ms--site-footer">Microsoft Learn footer</footer>
+    </body>
+</html>
+"""
+# A page holding one construct in its main, between a heading and a sentence of prose.
+CONSTRUCT_PAGE = """<!doctype html>
+<html lang="en">
+    <head><title>One construct</title></head>
+    <body>
+        <main>
+            <h1>One construct</h1>
+            <p>The construct below is what this page is about.</p>
+            {construct}
+        </main>
+    </body>
+</html>
+"""
+COMPLEX_TABLE = (
+    "<table><thead><tr><th>Region</th><th>Zone</th></tr></thead><tbody>"
+    '<tr><td rowspan="2">North</td><td>north-one</td></tr>'
+    "<tr><td>north-two</td></tr></tbody></table>"
+)
+HEADERLESS_TABLE = (
+    "<table><tr><td>alpha</td><td>one</td></tr><tr><td>beta</td><td>two</td></tr></table>"
+)
+ROW_HEADER_TABLE = (
+    "<table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>"
+    '<tr><th scope="row">alpha</th><td>one</td></tr></tbody></table>'
+)
+BLOCK_DL = (
+    "<dl><dt>Mirror</dt><dd><p>A local copy of a site.</p>"
+    "<ul><li>pages</li><li>indexes</li></ul></dd></dl>"
+)
+DETAILS = (
+    "<details><summary>Advanced options</summary>"
+    "<ul><li>first option</li><li>second option</li></ul></details>"
+)
+MATH_WITHOUT_TEX = "<math><mi>x</mi><mo>=</mo><mn>2</mn></math>"
+ID_ANCHOR = '<p>Keep the <span id="here">note about mirrors</span> in mind.</p>'
+# The construct and what its island leaves in the body (UncarryableBecomesIsland).
+UNCARRYABLE = {
+    "complex-table": (COMPLEX_TABLE, ("<table", 'rowspan="2"')),
+    "header-less-table": (HEADERLESS_TABLE, ("<table", "<td>alpha</td>")),
+    "row-header-table": (ROW_HEADER_TABLE, ("<table", 'scope="row"')),
+    "block-definition-list": (BLOCK_DL, ("<dl>", "<dd>")),
+    "details": (DETAILS, ("<details", "\n\n- first option\n- second option\n\n")),
+    "math-without-tex": (MATH_WITHOUT_TEX, ("<math",)),
+    "id-only-anchor": (ID_ANCHOR, ('<a id="here"></a>',)),
+}
+FENCE_OPENING = re.compile(r"^`{3,}(?P<info>\S[^\n]*)$", re.MULTILINE)
+
 WEIGHTS = {
     QualityGate.text_coverage: "weight_text_coverage",
     QualityGate.code_blocks: "weight_code_blocks",
@@ -115,6 +224,37 @@ def run_pipeline(
     normalized = normalize(extracted, profiles.GENERIC)
     body = restore(convert(normalized.fragment), normalized.islands)
     return extracted, normalized, body, measure(extracted, normalized, body)
+
+
+def pipeline(
+    html: str, profile: Profile, url: str = SEED
+) -> tuple[ExtractedContent, NormalizedContent, str, QualityResult]:
+    """extract, normalize, convert, restore and measure under `profile`."""
+    extracted = extract(html, url, profile)
+    normalized = normalize(extracted, profile)
+    body = restore(convert(normalized.fragment), normalized.islands)
+    return extracted, normalized, body, measure(extracted, normalized, body)
+
+
+def converted_by(html: str, profile: Profile, url: str = SEED) -> ConvertedContent:
+    """The whole conversion under `profile`."""
+    return converted_content(*pipeline(html, profile, url))
+
+
+def construct_page(construct: str) -> str:
+    """CONSTRUCT_PAGE holding `construct`."""
+    return CONSTRUCT_PAGE.format(construct=construct)
+
+
+def fence_languages(body: str) -> list[str]:
+    """The first word of each opening fence's info string, in order."""
+    return [match["info"].split()[0] for match in FENCE_OPENING.finditer(body)]
+
+
+def in_order(text: str, parts: Iterable[str]) -> bool:
+    """Every part occurs in `text`, each after the one before."""
+    positions = [text.find(part) for part in parts]
+    return -1 not in positions and positions == sorted(positions)
 
 
 def converted(html: str, url: str = SEED) -> ConvertedContent:
@@ -343,6 +483,9 @@ def test_contract_signature_Fidelity_extract() -> None:
     extract: (html: String, url: String, profile: Profile) -> ExtractedContent, and
     ExtractNeverEmptyHanded's profile and whole-body branches (the fallback extractor is
     not chosen yet): the generic selection finds `main`, else `article`, else the body.
+    Re-propagated by T17: devsite selects the DevSite article body and its breadcrumbs,
+    mslearn the Learn article content, each without its chrome; markup a profile's
+    selection does not match is extracted whole.
     """
     assert list(inspect.signature(extract).parameters) == ["html", "url", "profile"]
     by_profile = extract(PAGE, SEED, profiles.GENERIC)
@@ -367,12 +510,35 @@ def test_contract_signature_Fidelity_extract() -> None:
     assert page.canonical_url == "http://docs.example/guide/topic.html"
     assert page.navigation_targets == ("http://docs.example/guide/a.html",)
 
+    devsite = extract(TABS_PAGE, SEED, profiles.DEVSITE)
+    assert devsite.method is ExtractionMethod.profile
+    assert devsite.title == "Tabs"
+    assert devsite.breadcrumbs == ("Guides", "Tabs")
+    for chrome in (*DEVSITE_CHROME, "Guides"):
+        assert chrome not in devsite.html, chrome
+    assert "pip install example-client" in devsite.html
+
+    learn = extract(MSLEARN_PAGE, LEARN_URL, profiles.MSLEARN)
+    assert learn.method is ExtractionMethod.profile
+    assert learn.title == "Create user"
+    assert learn.declared_locale == "en-us"
+    for chrome in LEARN_CHROME:
+        assert chrome not in learn.html, chrome
+    assert "var user = new User();" in learn.html
+
+    assert extract(PAGE, SEED, profiles.DEVSITE).method is ExtractionMethod.whole_body
+    assert extract(PAGE, SEED, profiles.MSLEARN).method is ExtractionMethod.whole_body
+
 
 def test_contract_signature_Fidelity_normalize() -> None:
     """Verify implementation satisfies contract Fidelity.normalize.
 
     normalize: (content: ExtractedContent, profile: Profile) -> NormalizedContent, with
-    ExpectedCounts over the normalised tree (ExpectedAgainstSurvived).
+    ExpectedCounts over the normalised tree (ExpectedAgainstSurvived). Re-propagated by
+    T17: each uncarryable construct becomes an island and a token in the fragment, its
+    elements counted in the expected counts; a table kept as HTML is flagged; under a
+    profile with a tab selection every panel is counted and emitted, and the generic
+    profile, which has none, counts no panel.
     """
     assert list(inspect.signature(normalize).parameters) == ["content", "profile"]
     normalized = normalize(extract(PAGE, SEED, profiles.GENERIC), profiles.GENERIC)
@@ -383,6 +549,37 @@ def test_contract_signature_Fidelity_normalize() -> None:
     assert normalized.expected.headings == len(PAGE_HEADINGS)
     assert normalized.expected.links == 0
     assert "offline" in normalized.expected.prose_words
+
+    islanded = normalize(extract(ISLANDS_PAGE, SEED, profiles.GENERIC), profiles.GENERIC)
+    payloads = [island.payload for island in islanded.islands]
+    assert sum("<table" in payload for payload in payloads) == len(("spanning", "header-less"))
+    assert any('rowspan="2"' in payload for payload in payloads)
+    assert any("<dl" in payload for payload in payloads)
+    assert any("<math" in payload for payload in payloads)
+    assert any('<a id="note"></a>' in payload for payload in payloads)
+    (details,) = [island for island in islanded.islands if "<details" in island.payload]
+    assert details.carries_markdown
+    for construct in ("<table", "<dl", "<math", "<details"):
+        assert construct not in islanded.fragment, construct
+    assert QualityFlag.html_table_kept in islanded.flags
+    assert "note" in islanded.anchors
+    # Counted over the tree plus every island: 5 and 4 table cells, the list items of the
+    # definition and of details, the h1 and the six h2.
+    assert islanded.expected.tables == 2  # noqa: PLR2004  The islands page's two tables.
+    assert islanded.expected.table_cells == 9  # noqa: PLR2004  Its 5 + 4 cells.
+    assert islanded.expected.list_items == 4  # noqa: PLR2004  Two in dd, two in details.
+    assert islanded.expected.headings == 7  # noqa: PLR2004  The h1 and six h2.
+    assert islanded.expected.tab_panels == 0
+
+    tabs = normalize(extract(TABS_PAGE, SEED, profiles.DEVSITE), profiles.DEVSITE)
+    assert tabs.expected.tab_panels == 5  # noqa: PLR2004  Three code panels, two prose.
+    assert tabs.tab_panels_emitted == tabs.expected.tab_panels
+    learn = normalize(extract(MSLEARN_PAGE, LEARN_URL, profiles.MSLEARN), profiles.MSLEARN)
+    assert learn.expected.tab_panels == 2  # noqa: PLR2004  HTTP and C#.
+    assert learn.tab_panels_emitted == learn.expected.tab_panels
+    plain = normalize(extract(TABS_PAGE, SEED, profiles.GENERIC), profiles.GENERIC)
+    assert plain.expected.tab_panels == 0
+    assert plain.tab_panels_emitted == 0
 
 
 def test_contract_signature_Fidelity_convert() -> None:
@@ -401,7 +598,8 @@ def test_contract_signature_Fidelity_restore() -> None:
     """Verify implementation satisfies contract Fidelity.restore.
 
     restore: (markdown: String, islands: List<Island>) -> String; with no island it is
-    the identity.
+    the identity. Re-propagated by T17: each island's token gives way to its payload, and
+    a token the converter lost leaves its island out.
     """
     assert list(inspect.signature(restore).parameters) == ["markdown", "islands"]
     _, normalized, body, _ = run_pipeline(PAGE)
@@ -409,6 +607,25 @@ def test_contract_signature_Fidelity_restore() -> None:
     markdown = convert(normalized.fragment)
     assert restore(markdown, ()) == markdown
     assert isinstance(body, str)
+
+    _, islanded, _, _ = pipeline(ISLANDS_PAGE, profiles.GENERIC)
+    tokened = convert(islanded.fragment)
+    restored = restore(tokened, islanded.islands)
+    assert islanded.islands
+    for island in islanded.islands:
+        assert island.payload not in tokened
+        assert island.payload in restored
+
+    _, single, _, _ = pipeline(construct_page(HEADERLESS_TABLE), profiles.GENERIC)
+    (island,) = single.islands
+    tokened = convert(single.fragment)
+    (token_line,) = [
+        line
+        for line in tokened.splitlines()
+        if line and line not in restore(tokened, single.islands)
+    ]
+    lost = tokened.replace(f"{token_line}\n", "", 1)
+    assert island.payload not in restore(lost, single.islands)
 
 
 def test_contract_signature_Fidelity_measure() -> None:
@@ -441,9 +658,33 @@ def test_contract_signature_Fidelity_measure() -> None:
     assert QualityFlag.whole_body_extracted in whole.flags
     assert whole.low_confidence
 
+    # T17: the normalisation flags, and fidelity_loss for an island whose payload is not
+    # in the body or whose token survives in it. html_table_kept alone is no failure.
+    islands = pipeline(ISLANDS_PAGE, profiles.GENERIC)[3]
+    assert QualityFlag.html_table_kept in islands.flags
+    assert QualityFlag.fidelity_loss not in islands.flags
+    assert islands.failed == frozenset()
+    assert not islands.low_confidence
+    gates = pipeline(GATES_PAGE, profiles.GENERIC)[3]
+    assert QualityFlag.interactive_omitted in gates.flags
+    assert gates.failed == frozenset({QualityGate.code_lang_rate})
+
+    extracted, single, body, _ = pipeline(construct_page(HEADERLESS_TABLE), profiles.GENERIC)
+    (island,) = single.islands
+    assert QualityFlag.fidelity_loss not in measure(extracted, single, body).flags
+    without_payload = body.replace(island.payload, "", 1)
+    assert QualityFlag.fidelity_loss in measure(extracted, single, without_payload).flags
+    tokened = convert(single.fragment)
+    assert QualityFlag.fidelity_loss in measure(extracted, single, tokened).flags
+
 
 def test_body_shape() -> None:
-    """BodyShape (convert.allium 236): LF, one blank line, one h1, ids as {#id}, one final LF."""
+    """BodyShape (convert.allium 236): LF, one blank line, one h1, ids as {#id}, one final LF.
+
+    Re-propagated by T17: every source id is kept as an anchor, a non-heading id as an
+    anchor island before its element's content, and under the inline anchor style a
+    heading's id is the same anchor island before the heading.
+    """
     extra_h1 = EVERY_CONSTRUCT.replace("<h2>List</h2>", "<h1>List</h1>")
     no_h1 = PAGE.replace("<h1>Getting started</h1>", "")
     # With no h1 in the content, the title falls back to <title>, and the h1 is made from it.
@@ -456,6 +697,16 @@ def test_body_shape() -> None:
         assert body.endswith("\n")
         assert not body.endswith("\n\n")
     assert "## Code {#code}" in converted(EVERY_CONSTRUCT).body
+
+    anchored = converted(ISLANDS_PAGE)
+    assert '<a id="note"></a>' in anchored.body
+    assert "note" in anchored.anchors
+
+    inline = dataclasses.replace(profiles.GENERIC, heading_anchor_style=HeadingAnchorStyle.inline)
+    styled = converted_by(PAGE.replace("<h2>", '<h2 id="install">'), inline).body
+    assert in_order(styled, ('<a id="install"></a>', "## Install the product"))
+    assert "{#install}" not in styled
+    assert "\n\n\n" not in styled
 
 
 def test_fetch_flags_recompute_low_confidence() -> None:
@@ -681,6 +932,15 @@ def test_surface_exposure_PageConversion() -> None:
     )
     for profile in profiles.CATALOGUE:
         assert_fields(profile, exposed)
+    # T17: each catalogue profile's content selection matches the markup of its platform.
+    shaped = {
+        profiles.GENERIC: (PAGE, SEED),
+        profiles.DEVSITE: (TABS_PAGE, GOOGLE_URL),
+        profiles.MSLEARN: (MSLEARN_PAGE, LEARN_URL),
+    }
+    assert set(shaped) == set(profiles.CATALOGUE)
+    for profile, (html, url) in shaped.items():
+        assert extract(html, url, profile).method is ExtractionMethod.profile, profile.name
 
 
 def test_map_destinations_rewrites_only_destinations_outside_code() -> None:
@@ -710,3 +970,321 @@ def test_map_destinations_rewrites_only_destinations_outside_code() -> None:
         "http://docs.example/guide/b.html#x",
         "http://docs.example/guide/c.html",
     )
+
+
+# --- T17: the gates, the islands, the tab panels and the reductions -----------------------
+
+# Each gate failing alone: an edit of the EVERY_CONSTRUCT body that loses one construct
+# class and keeps every other count and every expected word.
+GATE_ALONE = {
+    QualityGate.text_coverage: ("Prose with a ", ""),
+    QualityGate.code_blocks: ('```python\nprint("hello")\n```\n\n', ""),
+    QualityGate.code_lang_rate: ("```python\n", "```\n"),
+    QualityGate.tables: (
+        "| --- | --- |\n| alpha | one |",
+        "| --- | --- |\n\n| alpha | one |\n| --- | --- |",
+    ),
+    QualityGate.table_cells: ("| alpha | one |", "| alpha | one | |"),
+    QualityGate.headings: ("## List\n", "List\n"),
+    QualityGate.links: (
+        "[link to another page](http://docs.example/guide/other.html)",
+        "link to another page",
+    ),
+    QualityGate.images: ("![A diagram](http://docs.example/img/diagram.png)\n", "A diagram\n"),
+    QualityGate.list_items: ("- second item", "second item"),
+}
+
+
+@pytest.mark.parametrize("gate", list(QualityGate), ids=lambda gate: gate.value)
+def test_each_gate_failing_alone_is_flagged(gate: QualityGate) -> None:
+    """FailedGatesAreFlagged and ScoreIsAFraction, one gate at a time.
+
+    The gate fails, its flag is raised, the score is one minus its weight and the page is
+    low confidence. tabs_expanded cannot fail by construction (convert.allium's first
+    open question, still open), so it fails here on a constructed NormalizedContent.
+    """
+    extracted, normalized, body, quality = run_pipeline(EVERY_CONSTRUCT)
+    assert quality.failed == frozenset()
+    if gate is QualityGate.tabs_expanded:
+        normalized = dataclasses.replace(normalized, tab_panels_emitted=1)
+    else:
+        old, new = GATE_ALONE[gate]
+        assert old in body, gate
+        body = body.replace(old, new, 1)
+    result = measure(extracted, normalized, body)
+    assert result.failed == frozenset({gate})
+    assert QualityFlag[gate.value] in result.flags
+    weight = getattr(profiles.CONFIG, WEIGHTS[gate])
+    assert abs(result.score - (1 - weight)) < TOLERANCE
+    assert 0 <= result.score < 1
+    assert result.low_confidence
+
+
+@pytest.mark.parametrize("name", list(UNCARRYABLE))
+def test_UncarryableBecomesIsland(name: str) -> None:
+    """Each construct Markdown cannot carry reaches the body as an island.
+
+    A complex, header-less or row-header table, a block definition list, details, math
+    without TeX and an id-only anchor: cut out as an island, restored after conversion,
+    counted on both sides, so every gate passes and nothing is lost.
+    """
+    construct, markers = UNCARRYABLE[name]
+    extracted, normalized, body, quality = pipeline(construct_page(construct), profiles.GENERIC)
+    assert normalized.islands
+    for marker in markers:
+        assert marker in body, (marker, body)
+    assert QualityFlag.fidelity_loss not in quality.flags
+    assert quality.failed == frozenset()
+    assert not quality.low_confidence
+    assert extracted.method is ExtractionMethod.profile
+
+
+def test_SanitizedMeansInert() -> None:
+    """One definition of sanitised: what an HTML island keeps and what it drops."""
+    table = (
+        "<table><thead><tr>"
+        '<th scope="col" class="c" data-x="1">Name</th>'
+        '<th colspan="2" style="color: red">Values</th>'
+        "</tr></thead><tbody><tr>"
+        '<td rowspan="2" id="cell" onclick="track()">'
+        '<a href="javascript:alert(1)">bad link</a> '
+        '<a href="vbscript:msgbox(1)">old link</a> '
+        '<a href="data:text/html,hi">data link</a> '
+        '<a href="http://docs.example/ok.html" title="Ok">good link</a></td>'
+        '<td><img src="data:image/png;base64,AAAA" alt="dot"></td>'
+        "<td>value<script>alert(2)</script><style>td { color: red }</style></td>"
+        "</tr><tr><td>two</td><td>three</td></tr></tbody></table>"
+    )
+    normalized = pipeline(construct_page(table), profiles.GENERIC)[1]
+    (island,) = normalized.islands
+    payload = island.payload
+    assert not island.carries_markdown
+    kept = (
+        'scope="col"',
+        'colspan="2"',
+        'rowspan="2"',
+        'id="cell"',
+        'href="http://docs.example/ok.html"',
+        'title="Ok"',
+        'src="data:image/png;base64,AAAA"',
+        'alt="dot"',
+    )
+    for attribute in kept:
+        assert attribute in payload, attribute
+    dropped = ("class=", "data-x", "style=", "onclick", "javascript:", "vbscript:", "data:text")
+    for attribute in dropped:
+        assert attribute not in payload, attribute
+    assert "<script" not in payload
+    assert "<style" not in payload
+    for text in ("bad link", "old link", "data link", "good link", "value", "two", "three"):
+        assert text in payload, text
+    assert "\n\n" not in payload.strip()
+
+    details = pipeline(construct_page(DETAILS), profiles.GENERIC)[1]
+    (shell,) = details.islands
+    assert shell.carries_markdown
+    assert "\n\n- first option\n- second option\n\n" in shell.payload
+
+
+def test_EveryTabPanelEmitted() -> None:
+    """Every panel of a tab group reaches the body in source order, inactive ones too.
+
+    A group whose every panel is one code sample in a named language becomes labelled
+    fences; any other group a heading one level below its context plus the panel.
+    """
+    body = converted_by(TABS_PAGE, profiles.DEVSITE).body
+    assert fence_languages(body)[:3] == ["python", "java", "shell"]
+    assert in_order(
+        body,
+        (
+            "pip install example-client",
+            'implementation "com.example:client:1.0"',
+            "curl -O https://example.invalid/client.tar.gz",
+        ),
+    )
+    for label in ("Python", "Java", "Shell"):
+        assert label in body, label
+    assert in_order(
+        body,
+        ("### Linux", "On Linux, write", "### Windows", "On Windows, write"),
+    )
+    assert in_order(body, ("## Install the client", "pip install", "## Configure the client"))
+
+    learn = converted_by(MSLEARN_PAGE, profiles.MSLEARN, LEARN_URL).body
+    assert fence_languages(learn) == ["http", "csharp"]
+    assert in_order(
+        learn, ("POST https://graph.microsoft.com/v1.0/users", "var user = new User();")
+    )
+    for label in ("HTTP", "C#"):
+        assert label in learn, label
+
+
+REDUCTIONS = {
+    "interactive-embed": (
+        '<iframe src="https://example.invalid/demo" title="Demo"></iframe>',
+        ("https://example.invalid/demo",),
+        ("<iframe",),
+    ),
+    "link-inside-code": (
+        '<pre><code class="language-text">see <a href="http://docs.example/x.html">x</a></code></pre>',
+        ("see x",),
+        ("http://docs.example/x.html",),
+    ),
+    "line-number-gutter": (
+        (
+            '<pre><code class="language-python"><span class="linenos">1</span>print("a")\n'
+            '<span class="linenos">2</span>print("b")</code></pre>'
+        ),
+        ('print("a")\nprint("b")',),
+        ('1print("a")', '2print("b")'),
+    ),
+    "form-controls": (
+        '<form><input type="text" name="q"><button type="submit">Search the docs</button></form>',
+        ("Search the docs",),
+        ("<input", "<button", "<form"),
+    ),
+    "layout-table": (
+        (
+            '<table role="presentation"><tr><td><p>Left column text.</p></td>'
+            "<td><p>Right column text.</p></td></tr></table>"
+        ),
+        ("Left column text.", "Right column text."),
+        ("<table", "| Left"),
+    ),
+    "footnote-back-links": (
+        (
+            '<p>A claim<sup id="fnref1"><a href="#fn1" class="footnote-ref">1</a></sup>.</p>'
+            '<section class="footnotes"><ol><li id="fn1"><p>The source. '
+            '<a href="#fnref1" class="footnote-backref">↩</a></p></li></ol></section>'
+        ),
+        ("[^1]", "[^1]: The source."),
+        ("↩", "#fnref1"),
+    ),
+    "image-attributes": (
+        (
+            '<table><tr><td rowspan="2"><img src="http://docs.example/p.png" alt="P" title="T" '
+            'id="pic" class="x" width="10" loading="lazy"></td><td>a</td></tr>'
+            "<tr><td>b</td></tr></table>"
+        ),
+        ('src="http://docs.example/p.png"', 'alt="P"', 'title="T"', 'id="pic"'),
+        ('class="x"', "width=", "loading="),
+    ),
+    "custom-element-attributes": (
+        (
+            '<table><tr><td rowspan="2"><my-widget id="w" data-extra="z" onclick="go()">'
+            "widget text</my-widget></td><td>a</td></tr><tr><td>b</td></tr></table>"
+        ),
+        ('id="w"', "widget text"),
+        ("data-extra", "onclick"),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REDUCTIONS))
+def test_DeclaredReductions(name: str) -> None:
+    """The reductions normalisation makes on purpose, one case each.
+
+    What the reduction keeps is in the body and what it removes is not; only the
+    interactive embed is flagged (interactive_omitted), and none is a fidelity_loss.
+    """
+    construct, present, absent = REDUCTIONS[name]
+    content = converted(construct_page(construct))
+    for text in present:
+        assert text in content.body, (text, content.body)
+    for text in absent:
+        assert text not in content.body, (text, content.body)
+    assert (QualityFlag.interactive_omitted in content.quality.flags) is (
+        name == "interactive-embed"
+    )
+    assert QualityFlag.fidelity_loss not in content.quality.flags
+
+
+def test_construct_families_reach_the_body() -> None:
+    """The guidance's families: callouts as GFM alerts, inline HTML kept, TeX, footnotes.
+
+    sup, sub, kbd and mark stay inline HTML; math with a TeX annotation becomes TeX
+    between delimiters; an inline definition list becomes bold term lines.
+    """
+    inline = converted(
+        construct_page(
+            "<p>Water is H<sub>2</sub>O, energy is mc<sup>2</sup>, press <kbd>Ctrl</kbd> "
+            "and read the <mark>marked</mark> word.</p>"
+        )
+    ).body
+    for kept in ("<sub>2</sub>", "<sup>2</sup>", "<kbd>Ctrl</kbd>", "<mark>marked</mark>"):
+        assert kept in inline, kept
+    tex = converted(
+        construct_page(
+            "<p>The value is "
+            '<math><semantics><mi>x</mi><annotation encoding="application/x-tex">x = 2'
+            "</annotation></semantics></math> here.</p>"
+        )
+    )
+    assert re.search(r"\$+\s*x = 2\s*\$+", tex.body), tex.body
+    assert "<math" not in tex.body
+    assert not tex.quality.flags & {QualityFlag.fidelity_loss}
+    terms = converted(construct_page("<dl><dt>Mirror</dt><dd>A local copy.</dd></dl>")).body
+    assert "**Mirror**" in terms
+    assert "<dl" not in terms
+
+    devsite = converted_by(TABS_PAGE, profiles.DEVSITE).body
+    assert in_order(devsite, ("> [!NOTE]", "> ", "reads the settings file once"))
+    learn = converted_by(MSLEARN_PAGE, profiles.MSLEARN, LEARN_URL).body
+    assert in_order(learn, ("> [!NOTE]", "Only an administrator can create a user."))
+
+
+def test_GatesMeasureExtractedContent_and_FlagsAreComplete() -> None:
+    """The gates read the extracted content; the flags say what extraction and normalisation did.
+
+    Chrome outside the selection is never expected; extracted_share is raised under its
+    gate; a fallback extraction raises extractor_fallback, which alone makes a page low
+    confidence; the normalisation flags reach ConvertedContent.
+    """
+    chrome = " ".join(["Chrome words fill the footer of every page."] * 10)
+    page = construct_page("").replace("</main>", f"</main><footer>{chrome}</footer>")
+    content = converted(page)
+    assert content.quality.failed == frozenset()
+    assert QualityFlag.extracted_share in content.quality.flags
+
+    extracted, normalized, body, _ = run_pipeline(PAGE)
+    fallback = dataclasses.replace(extracted, method=ExtractionMethod.fallback)
+    flagged = measure(fallback, normalized, body)
+    assert QualityFlag.extractor_fallback in flagged.flags
+    assert QualityFlag.whole_body_extracted not in flagged.flags
+    assert flagged.failed == frozenset()
+    assert flagged.low_confidence
+
+    gates = converted(GATES_PAGE).quality.flags
+    assert {QualityFlag.code_lang_rate, QualityFlag.interactive_omitted} <= gates
+    assert QualityFlag.html_table_kept in converted(ISLANDS_PAGE).quality.flags
+
+
+def test_ProfilesAreTheOnlyPlatformKnowledge() -> None:
+    """The same markup converts by the profile's selection, whatever the URL's host."""
+    on_example = converted_by(TABS_PAGE, profiles.DEVSITE, SEED)
+    on_google = converted_by(TABS_PAGE, profiles.DEVSITE, GOOGLE_URL)
+    assert on_example.body == on_google.body
+    assert on_example.quality == on_google.quality
+    assert on_example.breadcrumbs == on_google.breadcrumbs == ("Guides", "Tabs")
+
+    generic = pipeline(TABS_PAGE, profiles.GENERIC, GOOGLE_URL)[1]
+    assert generic.expected.tab_panels == 0
+    assert extract(MSLEARN_PAGE, LEARN_URL, profiles.DEVSITE).method is ExtractionMethod.whole_body
+    assert extract(TABS_PAGE, GOOGLE_URL, profiles.MSLEARN).method is ExtractionMethod.whole_body
+
+
+@pytest.mark.parametrize(
+    ("path", "profile"),
+    [
+        *((path, profiles.GENERIC) for path in sorted(QUALITY.glob("*.html"))),
+        *((path, profiles.DEVSITE) for path in sorted((SITES / "devsite").glob("**/*.html"))),
+    ],
+    ids=lambda value: value.name if isinstance(value, (Path, Profile)) else str(value),
+)
+def test_Determinism(path: Path, profile: Profile) -> None:
+    """Each fixture page converted twice under its profile is byte-identical."""
+    html = path.read_text(encoding="utf-8")
+    url = f"http://docs.example/guide/{path.name}"
+    first = converted_by(html, profile, url)
+    assert first == converted_by(html, profile, url)
+    assert first.body.encode() == converted_by(html, profile, url).body.encode()

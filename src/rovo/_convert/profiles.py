@@ -1,5 +1,12 @@
-"""The profile catalogue (convert.allium 363 to 403) and convert's config block, as data."""
+"""The profile catalogue (convert.allium 363 to 403) and convert's config block, as data.
 
+`content_selection` is opaque by specification (convert.allium 316); `SELECTIONS` says,
+keyed by that string, which elements hold a platform's content, breadcrumbs, tab groups
+and callouts, as CSS selectors. No code branches on a host name
+(ProfilesAreTheOnlyPlatformKnowledge): a profile's selection is data.
+"""
+
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from rovo._convert.model import CONFIG as CONVERT_CONFIG
@@ -67,3 +74,72 @@ def profile_for(site_url: str, profile_name: str | None) -> Profile | None:
         return profile_named(profile_name)
     host = (urlsplit(site_url).hostname or "").lower()
     return next((profile for profile in CATALOGUE if host in profile.hosts), GENERIC)
+
+
+@dataclass(frozen=True, kw_only=True)
+class TabSelection:
+    """Where a platform's tab groups are, as CSS selectors.
+
+    `panels` and `labels` are read relative to the group, in source order. With no
+    `labels`, a panel's label is its first heading, else its `title` attribute.
+    """
+
+    groups: str
+    panels: str
+    labels: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class Selection:
+    """What a content selection names: content (in order), chrome, breadcrumbs, tabs, callouts.
+
+    `chrome` is what whole-body extraction strips. Each callout pairs a selector with the
+    GFM alert kind it becomes, the first match winning.
+    """
+
+    content: tuple[str, ...]
+    chrome: str = "nav, header, footer"
+    breadcrumbs: str | None = None
+    tabs: TabSelection | None = None
+    callouts: tuple[tuple[str, str], ...] = ()
+
+
+# One entry per catalogue profile's content selection. The selectors follow each
+# platform's published markup conventions; no profile is called supported here
+# (convert.allium's third open question).
+SELECTIONS: dict[str, Selection] = {
+    GENERIC.content_selection: Selection(content=("main", "article")),
+    DEVSITE.content_selection: Selection(
+        content=(".devsite-article-body",),
+        chrome="devsite-header, devsite-book-nav, devsite-footer-utility, nav, header, footer",
+        breadcrumbs=".devsite-breadcrumb-list > li",
+        tabs=TabSelection(groups="devsite-selector", panels=":scope > section", labels=None),
+        callouts=(
+            ("aside.note", "NOTE"),
+            ("aside.caution", "CAUTION"),
+            ("aside.warning", "WARNING"),
+        ),
+    ),
+    MSLEARN.content_selection: Selection(
+        content=("main div.content",),
+        tabs=TabSelection(
+            groups="div.tabGroup",
+            panels=":scope > section[role=tabpanel]",
+            labels=":scope [role=tab]",
+        ),
+        callouts=(
+            ("div.alert.is-success", "TIP"),
+            ("div.alert.is-primary", "IMPORTANT"),
+            ("div.alert.is-warning", "WARNING"),
+            ("div.alert.is-danger", "CAUTION"),
+            ("div.alert", "NOTE"),
+        ),
+    ),
+}
+# A selection the table does not know selects nothing: extraction takes the whole body.
+_NOTHING = Selection(content=())
+
+
+def selection_of(profile: Profile) -> Selection:
+    """The selection a profile's content_selection names; nothing for an unknown one."""
+    return SELECTIONS.get(profile.content_selection, _NOTHING)

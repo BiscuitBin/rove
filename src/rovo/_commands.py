@@ -1,11 +1,12 @@
-"""The root's rules (rovo.allium): init, sync, index and report, over config, crawl, mirror.
+"""The root's rules (rovo.allium): init, sync, verify, index, report over config, crawl, mirror.
 
 Each command returns the ExitCode the process exits with and writes its problems to
 standard error. `sync` takes the Fetcher and the Timer it runs and paces with, so tests
 drive it without the network and without sleeping; `rovo.cli` builds the real ones.
-Only the mirror's modules load with this one: `index` and `report` never crawl, so `init`
-and `sync` import the configuration, the crawl and the report inside their bodies, and
-`rovo index` and `rovo report` load neither httpx nor rovo._crawl.
+Only the mirror's modules load with this one: `verify`, `index` and `report` never crawl,
+so `init` and `sync` import the configuration, the crawl and the report inside their
+bodies, and `rovo verify`, `rovo index` and `rovo report` load neither httpx nor
+rovo._crawl.
 """
 
 import importlib.metadata
@@ -13,6 +14,7 @@ import importlib.util
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -21,7 +23,15 @@ from rovo._convert.profiles import GENERIC, profile_for
 from rovo._exit import ExitCode
 from rovo._mirror.finalise import finalise
 from rovo._mirror.indexes import index_pass, unreadable_page_file
-from rovo._mirror.model import CrawlScope, IndexesWritten, Mirror, Operator, PassKind, Tier
+from rovo._mirror.model import (
+    CrawlScope,
+    IndexesWritten,
+    Mirror,
+    Operator,
+    PassKind,
+    Tier,
+    VerificationFinished,
+)
 from rovo._mirror.state import (
     ManifestError,
     load_mirror,
@@ -31,6 +41,7 @@ from rovo._mirror.state import (
     write_text,
 )
 from rovo._mirror.urls import hostname_of, is_http_url
+from rovo._mirror.verify import verify_pass
 from rovo._unfinished import NotInThisSlice
 
 if TYPE_CHECKING:
@@ -441,6 +452,42 @@ def report(out_dir: Path) -> ExitCode:
         return _refuse(f"report: no readable report at {path} ({error})")
     sys.stdout.write(text if text.endswith("\n") else f"{text}\n")
     return ExitCode.ok
+
+
+def verify(out_dir: Path) -> ExitCode:
+    """Realises rovo.allium Verify and RefuseVerify.
+
+    With no directory or no loadable manifest the problem goes to standard error and it
+    exits usage. Otherwise a verify pass with no run checks the mirror on disk offline
+    and ReportVerification prints what it found; nothing is written.
+    """
+    if not out_dir.is_dir():
+        return _refuse(f"verify: {out_dir} is not a directory")
+    try:
+        mirror = load_mirror(out_dir)
+    except ManifestError as error:
+        return _refuse(f"verify: no mirror in {out_dir} ({error})")
+    finished = verify_pass(Operator(), mirror)
+    return ExitCode.partial if finished is None else report_verification(finished)
+
+
+def report_verification(finished: VerificationFinished) -> ExitCode:
+    """Realises rovo.allium ReportVerification: the findings, the tallies, the exit code.
+
+    One `<reason> <path> <detail>` line per finding on standard output, then one
+    `<gate> <pages>` line per gate that failed on any written page when it was measured,
+    sorted by gate. It exits ok with no finding and quality with any; the tallies never
+    move the exit code.
+    """
+    for failure in finished.failures:
+        line = f"{failure.reason.value} {failure.path} {failure.detail}"
+        sys.stdout.write(f"{line.rstrip()}\n")
+    tallies = Counter(
+        gate.value for page in finished.mirror.written_pages for gate in page.quality.failed
+    )
+    for gate, pages in sorted(tallies.items()):
+        sys.stdout.write(f"{gate} {pages}\n")
+    return ExitCode.quality if finished.failures else ExitCode.ok
 
 
 def finish_index_command(written: IndexesWritten | None) -> ExitCode | None:

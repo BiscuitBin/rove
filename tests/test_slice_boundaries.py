@@ -89,6 +89,7 @@ START_PATH = f"{ROOT}start.md"
 ROBOTS = f"{SITE}/robots.txt"
 SITES = Path(__file__).resolve().parent / "fixtures" / "sites"
 PAGE = (SITES / "one-page" / "guide" / "start.html").read_text(encoding="utf-8")
+DEVSITE_TABS = (SITES / "devsite" / "guide" / "tabs.html").read_text(encoding="utf-8")
 FORBIDDEN = 403
 SERVER_ERROR = 500
 TOO_MANY = 429
@@ -266,13 +267,25 @@ def test_escalation_to_the_browser_stops_the_run(tmp_path: Path) -> None:
         crawl(tmp_path, {SEED: html_response(SEED, noscript)}, render_mode=RenderMode.auto)
 
 
-def test_a_non_generic_profile_stops_conversion(tmp_path: Path) -> None:
-    """Extraction with a profile other than generic is a later slice's."""
+def test_a_devsite_page_converts(tmp_path: Path) -> None:
+    """A run under the devsite profile converts with its selection (T17).
+
+    Re-propagated by T17 from T09's test_a_non_generic_profile_stops_conversion:
+    ConvertFetched converts under every profile, so the devsite-shaped page is stored,
+    extracted by the profile, its breadcrumbs kept and every tab panel emitted.
+    """
     mirror = new_mirror(tmp_path)
     mirror.profile = profiles.DEVSITE
-    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
-    with pytest.raises(NotInThisSlice):
-        run_crawl(request(mirror), None, fetcher, FixedClock())
+    fetcher = FakeFetcher({SEED: html_response(SEED, DEVSITE_TABS)})
+    run_crawl(request(mirror), None, fetcher, FixedClock())
+    page = mirror.page(SEED)
+    assert page is not None
+    assert page.method is ExtractionMethod.profile
+    assert page.breadcrumbs == ("Guides", "Tabs")
+    assert QualityFlag.tabs_expanded not in page.flags
+    for language in ("python", "java", "shell"):
+        assert f"```{language}" in page.converted_body, language
+    assert "Example developers footer" not in page.converted_body
 
 
 def test_owner_testing_and_dry_runs_stop(tmp_path: Path) -> None:
@@ -549,14 +562,27 @@ def test_enqueue_page_links_owner_branch_stops(tmp_path: Path) -> None:
     assert frontier.entries == []
 
 
-def test_convert_branches_of_later_slices_stop() -> None:
-    """An island to restore and the inline anchor style are later slices'."""
-    with pytest.raises(NotInThisSlice):
-        restore("# Title\n", (Island(payload="<dl></dl>", carries_markdown=False),))
+def test_an_island_restores_and_the_inline_style_anchors() -> None:
+    """An island is restored, and the inline anchor style writes an anchor island (T17).
+
+    Re-propagated by T17 from T09's test_convert_branches_of_later_slices_stop: restore
+    puts each island's payload where its token stood, and normalize under the inline
+    style writes the heading's id as an anchor island before the heading.
+    """
+    extracted = extract(
+        PAGE.replace("</main>", "<dl><dt>Term</dt><dd><p>Block.</p><p>More.</p></dd></dl></main>"),
+        SEED,
+        profiles.GENERIC,
+    )
+    normalized = normalize(extracted, profiles.GENERIC)
+    (island,) = normalized.islands
+    assert isinstance(island, Island)
+    assert island.payload in restore(convert(normalized.fragment), normalized.islands)
     inline = dataclasses.replace(profiles.GENERIC, heading_anchor_style=HeadingAnchorStyle.inline)
-    extracted = extract(PAGE.replace("<h2>", '<h2 id="install">'), SEED, inline)
-    with pytest.raises(NotInThisSlice):
-        normalize(extracted, inline)
+    styled = extract(PAGE.replace("<h2>", '<h2 id="install">'), SEED, inline)
+    body = convert(normalize(styled, inline).fragment)
+    assert '<a id="install"></a>' in body
+    assert "{#install}" not in body
 
 
 def test_a_dry_run_report_and_a_versioned_path_stop(tmp_path: Path) -> None:

@@ -227,6 +227,45 @@ inside braces, written as the page records it, and fenced code holds the code te
 unchanged, each `<br>` in it a line break. `content_digest` covers the body only. A page file is written only when its text would
 change.
 
+What Markdown cannot carry reaches the body as an island of HTML. A table with a
+`rowspan` or `colspan`, with no header row, with a header cell in a later row, or with a
+list, paragraph or code block in a cell; a definition list whose definitions hold
+blocks; and math with no TeX annotation are kept as one HTML block each, sanitised:
+only `rowspan`, `colspan`, `id`, `scope`, `href`, `src`, `alt`, `title` and `open` are
+kept (a custom element also keeps `class` and its tab language), `javascript:`,
+`vbscript:` and `data:` targets are dropped (an image's `data:image/` source is kept),
+no text is removed and the block holds no blank line. A `details` element keeps its
+`summary` as HTML and its content as Markdown between blank lines. An element with an
+`id` that is not a heading gets an anchor before its content, `<a id="note"></a>`, so a
+link to `page.md#note` resolves. A table kept as HTML raises `html_table_kept`.
+
+Under a profile with tab groups (`devsite`, `mslearn`), every panel of a group reaches
+the body in source order, the inactive ones made visible first: one fenced code block
+per panel, its label as the fence's `title`, when every panel is one code sample in a
+named language; otherwise each panel under a heading one level below the group's,
+naming its label. Other hidden content is kept as it is. A callout the profile selects
+becomes a GFM alert (`> [!NOTE]`). `sup`, `sub`, `kbd` and `mark` stay inline HTML;
+math with a TeX annotation becomes TeX between `$` (or `$$` for a block); footnotes
+become `[^n]` with their definitions, without their back-links; a definition list whose
+definitions are inline becomes bold term lines.
+
+Conversion also makes these reductions on purpose: an `iframe`, `embed` or `object`
+becomes a one-line note keeping its label and URL (`interactive_omitted`); a link inside
+code becomes its text; line-number gutters leave code; form controls go and button
+labels stay; a layout table (`role="presentation"` or `"none"`) is unwrapped; and an
+image keeps only its source, alt text and title.
+
+The quality flags say what the conversion lost. Each of the ten gates compares the body
+with what the extracted content holds, HTML islands parsed: `text_coverage`,
+`code_blocks`, `code_lang_rate`, `tables`, `table_cells`, `headings`, `links`, `images`,
+`list_items` and `tabs_expanded`; a failed gate is a flag of the same name and lowers
+`quality_score` by its weight. `whole_body_extracted` says the profile's selection
+matched nothing and the whole body was taken, `extracted_share` that the content holds
+under 30% of the page's words, `empty_content` that there is no text, `fidelity_loss`
+that an island did not reach the body. A page is low confidence (`low_confidence:
+true`) when a gate failed or it carries `whole_body_extracted`, `empty_content`,
+`extractor_fallback`, `render_needed` or `soft_block_suspected`.
+
 ## Links
 
 Every sync's finalisation resolves the links of every page in the mirror, not only the
@@ -239,7 +278,7 @@ destination `x_(y).html` is read whole, and so is link text holding balanced bra
 or an image, whose own source is no link. A link is:
 
 - `internal` when a page in the mirror holds the identity, directly or through an
-  alias; its fragment is resolved when the page records that heading anchor;
+  alias; its fragment is resolved when the page records that anchor;
 - `dangling` when the identity is a removed page's;
 - `uncrawled` when no page holds it but the scope's bounds, without regard to depth,
   include it, such as a page robots.txt disallows or one past `max_depth`;
@@ -264,8 +303,8 @@ them makes the page low confidence.
 
 After the page files are written, the pass reads each one back and lists every
 relative destination outside code that leads out of the mirror (`outside_mirror`),
-reaches no file (`missing_file`) or names an anchor that the target file has no
-heading id for and that the page's links do not already flag as unresolved
+reaches no file (`missing_file`) or names an anchor that the target file holds neither
+as a heading id nor as an HTML `id` and that the page's links do not already flag as unresolved
 (`fragment_not_found`); a missing page file is one `missing_file` row with an empty
 `href`. After a complete pass the list is empty. It becomes the report's
 `broken_links`.

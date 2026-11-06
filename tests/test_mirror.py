@@ -991,6 +991,55 @@ def test_entity_optional_Page_sitemap_lastmod(tmp_path: Path) -> None:
     assert frontmatter_of(unnamed.page).sitemap_lastmod is None
 
 
+def test_entity_optional_Page_version(tmp_path: Path) -> None:
+    """Verify optional field Page.version accepts null and non-null values.
+
+    T17: a page of a profile without versions has none. No run stores a versioned page
+    while assign_path stops for a version label (the T17 batched question, item 2), so
+    the labelled page is a constructed record: its frontmatter and the manifest carry
+    the label, and a page without one has no version key.
+    """
+    plain = stored(new_mirror(tmp_path / "plain"))
+    assert plain.version is None
+    published(plain.mirror, plain)
+    lines = frontmatter_lines((plain.mirror.out_dir / plain.path).read_text(encoding="utf-8"))
+    assert not any(line.startswith("version:") for line in lines)
+
+    labelled = stored(new_mirror(tmp_path / "labelled"))
+    labelled.version = "v1.0"
+    published(labelled.mirror, labelled)
+    path = labelled.mirror.out_dir / labelled.path
+    assert 'version: "v1.0"' in frontmatter_lines(path.read_text(encoding="utf-8"))
+    save_mirror(labelled.mirror)
+    loaded = load_mirror(labelled.mirror.out_dir).page(labelled.identity)
+    assert loaded is not None
+    assert loaded.version == "v1.0"
+
+
+def test_entity_optional_Page_locale(tmp_path: Path) -> None:
+    """Verify optional field Page.locale accepts null and non-null values.
+
+    The pinned locale wins over the declared one; without a pin the page declares its
+    own, and a page declaring none has none.
+    """
+    pinned = stored(new_mirror(tmp_path / "pinned", locale="de"))
+    assert pinned.locale == "de"
+    declared = stored(new_mirror(tmp_path / "declared"))
+    assert declared.locale == "en"
+    undeclared = stored(
+        new_mirror(tmp_path / "undeclared"),
+        converted=dataclasses.replace(content(), declared_locale=None),
+    )
+    assert undeclared.locale is None
+    published(undeclared.mirror, undeclared)
+    path = undeclared.mirror.out_dir / undeclared.path
+    lines = frontmatter_lines(path.read_text(encoding="utf-8"))
+    assert not any(line.startswith("locale:") for line in lines)
+    published(pinned.mirror, pinned)
+    path = pinned.mirror.out_dir / pinned.path
+    assert 'locale: "de"' in frontmatter_lines(path.read_text(encoding="utf-8"))
+
+
 def test_entity_optional_Mirror_recorded_root_url(tmp_path: Path) -> None:
     """Verify optional field Mirror.recorded_root_url accepts null and non-null values.
 

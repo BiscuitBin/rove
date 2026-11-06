@@ -34,6 +34,8 @@ _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"
 # A heading's anchor as the body writes it: `## Title {#id}`.
 _HEADING_ANCHOR = re.compile(r"^ {0,3}#{1,6}\s.*\{#(?P<id>[^}\s]+)\}\s*$")
+# An id in the body's HTML: an anchor island `<a id="x"></a>`, or one kept in an island.
+_HTML_ID = re.compile(r'<[A-Za-z][A-Za-z0-9-]*\s[^<>]*?(?<![\w-])id="(?P<id>[^"]+)"')
 _PARENT = ".."
 
 
@@ -153,7 +155,7 @@ def find_broken_links(mirror: Mirror) -> list[BrokenLink]:
     """Every relative destination in a page file that leaves the mirror or reaches nothing.
 
     Destinations in frontmatter and code are never verified. A fragment is broken when the
-    target file has no `{#id}` heading anchor for it and the page holds no link that
+    target file holds no anchor for it (`anchors_in`) and the page holds no link that
     already records it as unresolved (unresolved_fragment). A missing page file is one
     `missing_file` finding whose href is empty.
     """
@@ -166,7 +168,7 @@ def find_broken_links(mirror: Mirror) -> list[BrokenLink]:
             )
             continue
         for href in link_destinations(_body_of(path)):
-            reason = _broken_reason(mirror, page, href)
+            reason = broken_reason(mirror, page.path, href, page)
             if reason is not None:
                 broken.append(BrokenLink(from_path=page.path, href=href, reason=reason))
     return broken
@@ -272,24 +274,44 @@ def _body_of(path: Path) -> str:
 
 
 def _anchors_of(path: Path) -> frozenset[str]:
-    """The `{#id}` heading anchors of a file's body."""
+    """The anchors a file's body holds: `{#id}` heading suffixes and ids in its HTML.
+
+    A file that is not UTF-8 holds none.
+    """
+    try:
+        body = _body_of(path)
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    return anchors_in(body)
+
+
+def anchors_in(body: str) -> frozenset[str]:
+    """The `{#id}` heading anchors and the HTML ids of a body, outside code."""
+    lines = prose_lines(body)
+    headings = {
+        match["id"] for line in lines if (match := _HEADING_ANCHOR.match(line)) is not None
+    }
     return frozenset(
-        match["id"]
-        for line in prose_lines(_body_of(path))
-        if (match := _HEADING_ANCHOR.match(line)) is not None
+        headings | {match["id"] for line in lines for match in _HTML_ID.finditer(line)}
     )
 
 
-def _broken_reason(mirror: Mirror, page: Page, href: str) -> BrokenLinkReason | None:
-    """Why a destination of the page's file is broken; None when it is absolute or sound."""
+def broken_reason(
+    mirror: Mirror, from_path: str, href: str, page: Page | None = None
+) -> BrokenLinkReason | None:
+    """Why a destination in the file at `from_path` is broken; None when absolute or sound.
+
+    A fragment the target file does not hold is not broken when `page`, the file's page,
+    holds a link that already records it as unresolved (unresolved_fragment).
+    """
     parts = urlsplit(href)
     if not href or parts.scheme or parts.netloc:
         return None
     file_part, _, fragment = href.partition("#")
     target = (
-        page.path
+        from_path
         if not file_part
-        else posixpath.normpath(posixpath.join(posixpath.dirname(page.path), file_part))
+        else posixpath.normpath(posixpath.join(posixpath.dirname(from_path), file_part))
     )
     if target == _PARENT or target.startswith(("../", "/")):
         return BrokenLinkReason.outside_mirror
@@ -298,7 +320,7 @@ def _broken_reason(mirror: Mirror, page: Page, href: str) -> BrokenLinkReason | 
         return BrokenLinkReason.missing_file
     if not fragment or fragment in _anchors_of(path):
         return None
-    recorded = any(
+    recorded = page is not None and any(
         link.source is page
         and link.target is not None
         and link.target.path == target

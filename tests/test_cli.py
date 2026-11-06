@@ -122,6 +122,7 @@ def test_python_m_rovo_prints_the_version() -> None:
         ("sync", ("OUT_DIR", "--dry-run", "--yes", "--json", "--url", "--path", "--set")),
         ("index", ("OUT_DIR",)),
         ("report", ("OUT_DIR",)),  # T16
+        ("verify", ("OUT_DIR",)),  # T17
     ],
 )
 def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> None:
@@ -134,7 +135,7 @@ def test_mirror_commands_have_help(command: str, arguments: tuple[str, ...]) -> 
         assert argument in result.stdout
 
 
-@pytest.mark.parametrize("command", ["init", "sync", "index", "report"])
+@pytest.mark.parametrize("command", ["init", "sync", "index", "report", "verify"])
 def test_mirror_commands_without_arguments_are_usage_errors(command: str) -> None:
     """`rovo init`, `sync`, `index` and `report` with no arguments exit 2, usage on stderr."""
     result = runner().invoke(app, [command], prog_name="rovo")
@@ -341,3 +342,66 @@ def test_report_loads_neither_httpx_nor_the_crawl(tmp_path: Path) -> None:
     """`rovo report` reads the report with rovo._mirror.state alone, like `rovo index`."""
     out_dir = with_report(tmp_path / "out")
     assert probe_modules("report", str(out_dir)) == [0, False, False]
+
+
+# --- rovo verify (T17) --------------------------------------------------------------------
+
+
+def test_verify_of_a_fresh_sync_target_prints_no_finding(tmp_path: Path) -> None:
+    """`rovo verify OUT_DIR` on a mirror whose files are as written exits 0, no finding."""
+    out_dir = initialised(tmp_path / "out")
+    assert runner().invoke(app, ["index", str(out_dir)], prog_name="rovo").exit_code == 0
+    result = runner().invoke(app, ["verify", str(out_dir)], prog_name="rovo")
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_verify_reports_a_finding_and_exits_4(tmp_path: Path) -> None:
+    """A Markdown file under pages/ the manifest does not know is a finding: exit 4."""
+    out_dir = initialised(tmp_path / "out")
+    assert runner().invoke(app, ["index", str(out_dir)], prog_name="rovo").exit_code == 0
+    stray = out_dir / "pages" / "127.0.0.1_9" / "stray.md"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("# Stray\n", encoding="utf-8")
+    result = runner().invoke(app, ["verify", str(out_dir)], prog_name="rovo")
+
+    assert result.exit_code == ExitCode.quality.number, result.output
+    assert result.stdout.startswith("unmanaged_file pages/127.0.0.1_9/stray.md")
+    assert result.stderr == ""
+
+
+def test_verify_without_a_mirror_exits_2(tmp_path: Path) -> None:
+    """`rovo verify` on a directory holding no mirror exits 2, nothing on standard output."""
+    result = runner().invoke(app, ["verify", str(tmp_path)], prog_name="rovo")
+
+    assert result.exit_code == USAGE_ERROR, result.output
+    assert result.stdout == ""
+    assert result.stderr.startswith("rovo: verify: ")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_verify_runs_through_the_installed_script(tmp_path: Path) -> None:
+    """The installed `rovo` script runs `rovo verify --help` and `rovo verify OUT_DIR`."""
+    script = shutil.which("rovo", path=str(Path(sys.executable).parent))
+    assert script is not None, f"no rovo console script beside {sys.executable}"
+    helped = subprocess.run(
+        [script, "verify", "--help"], capture_output=True, text=True, check=False
+    )
+    assert helped.returncode == 0, helped.stderr
+    assert "OUT_DIR" in helped.stdout
+
+    completed = subprocess.run(
+        [script, "verify", str(tmp_path / "missing")], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == USAGE_ERROR
+    assert completed.stdout == ""
+    assert completed.stderr.startswith("rovo: verify: ")
+
+
+def test_verify_loads_neither_httpx_nor_the_crawl(tmp_path: Path) -> None:
+    """`rovo verify` reads the mirror offline, like `rovo index` and `rovo report`."""
+    out_dir = initialised(tmp_path / "out")
+    assert runner().invoke(app, ["index", str(out_dir)], prog_name="rovo").exit_code == 0
+    assert probe_modules("verify", str(out_dir)) == [0, False, False]

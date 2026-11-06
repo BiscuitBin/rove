@@ -121,6 +121,16 @@ def sync_command(  # noqa: PLR0913  One parameter per sync option.
     raise typer.Exit(code.number)
 
 
+@app.command("verify")
+def verify_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Check the mirror on disk offline: print each finding and the gate tallies."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.verify(out_dir).number)
+
+
 @app.command("index")
 def index_command(
     out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],

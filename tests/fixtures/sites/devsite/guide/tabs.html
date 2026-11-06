@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Tabs | Example developers</title>
+  </head>
+  <body>
+    <devsite-header>
+      <div class="devsite-header-upper">Example developers header</div>
+    </devsite-header>
+    <devsite-book-nav>
+      <nav class="devsite-book-nav"><a href="start.html">Left navigation start</a></nav>
+    </devsite-book-nav>
+    <main role="main" class="devsite-main-content">
+      <devsite-content>
+        <article class="devsite-article">
+          <div class="devsite-article-meta">
+            <ul class="devsite-breadcrumb-list">
+              <li class="devsite-breadcrumb-item"><a class="devsite-breadcrumb-link" href="start.html">Guides</a></li>
+              <li class="devsite-breadcrumb-item"><a class="devsite-breadcrumb-link" href="tabs.html">Tabs</a></li>
+            </ul>
+          </div>
+          <div class="devsite-article-body">
+            <h1>Tabs</h1>
+            <p>The example client library is published for several languages.</p>
+            <h2>Install the client</h2>
+            <devsite-selector>
+              <section>
+                <h3>Python</h3>
+                <pre><code class="language-python">pip install example-client</code></pre>
+              </section>
+              <section hidden>
+                <h3>Java</h3>
+                <pre><code class="language-java">implementation "com.example:client:1.0"</code></pre>
+              </section>
+              <section hidden>
+                <h3>Shell</h3>
+                <pre><code class="language-shell">curl -O https://example.invalid/client.tar.gz</code></pre>
+              </section>
+            </devsite-selector>
+            <h2>Configure the client</h2>
+            <devsite-selector>
+              <section title="Linux">
+                <p>On Linux, write the settings file under your home directory.</p>
+              </section>
+              <section title="Windows" style="display: none">
+                <p>On Windows, write the settings file under your profile folder.</p>
+              </section>
+            </devsite-selector>
+            <aside class="note"><strong>Note:</strong> The client reads the settings file once, when it starts.</aside>
+          </div>
+        </article>
+      </devsite-content>
+    </main>
+    <devsite-footer-utility>
+      <div class="devsite-footer-utility">Example developers footer</div>
+    </devsite-footer-utility>
+  </body>
+</html>

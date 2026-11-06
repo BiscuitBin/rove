@@ -32,7 +32,6 @@ from rovo._convert.fidelity import (
     with_fetch_flags,
 )
 from rovo._convert.model import QualityFlag
-from rovo._convert.profiles import GENERIC
 from rovo._crawl import sitemaps
 from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import (
@@ -1567,7 +1566,8 @@ def _unchanged(walk: LadderWalk, attempt: FetchAttempt, raw_digest: str) -> Cand
 def convert_fetched(run: Run, entry: FrontierEntry, walk: LadderWalk) -> CandidateDelivered | None:
     """Realises crawl.allium ConvertFetched: the candidate it delivers to the mirror.
 
-    Calls the Fidelity operations with the mirror's profile, then adds the fetch flags.
+    Calls the Fidelity operations with the mirror's profile, whichever it is, then adds
+    the fetch flags.
     """
     attempt = walk.standing
     if walk.status is not WalkStatus.settled or attempt is None:
@@ -1575,8 +1575,6 @@ def convert_fetched(run: Run, entry: FrontierEntry, walk: LadderWalk) -> Candida
     if entry.status is not FrontierStatus.in_progress:
         return None
     profile = run.target.profile
-    if profile != GENERIC:
-        raise NotInThisSlice(rule="ConvertFetched")
     response = attempt.response
     extracted = extract(response.markup, response.source_url, profile)
     normalized = normalize(extracted, profile)

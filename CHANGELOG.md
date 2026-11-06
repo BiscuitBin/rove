@@ -151,3 +151,24 @@ policy.
   revived at a new path and removed again in one sync returns to its old path, where
   its archived copy is; when another page took that path, the copy moves to the new
   path.
+- Conversion quality: what Markdown cannot carry (a complex, header-less or row-header
+  table, a block definition list, `details`, math without TeX, an id on an element that
+  is not a heading) reaches the page as a sanitised HTML island, where a non-heading id
+  stopped the sync; every tab panel reaches the page under a profile with tab groups;
+  callouts become GFM alerts, `sup`, `sub`, `kbd` and `mark` stay inline, TeX math gets
+  `$` delimiters and footnotes become `[^n]`; embeds, form controls, line-number gutters,
+  links in code, layout tables and footnote back-links are reduced as specified, raising
+  `interactive_omitted` and `html_table_kept`, and a lost island raises
+  `fidelity_loss`. The id of an element normalisation replaces (a tab group or panel, a
+  tab list or label, a callout, an embed, a form wrapper, a layout table, a footnote
+  section) stays an anchor, and a blank
+  line in code inside an island survives as a character reference. A sync converts under
+  the `devsite` and `mslearn` profiles' content, chrome, breadcrumb, tab and callout
+  selections, where any profile but `generic` stopped it; an
+  `mslearn` sync still stops at its sitemap filter's placeholders and its version label,
+  which the specification leaves open. `quality.fail_on_low_quality = true` makes a sync
+  with a low-confidence page or a broken link exit 4. The new `rovo verify OUT_DIR`
+  checks the mirror on disk offline (missing, unmanaged and invalid page files, digest
+  mismatches, quality drift, broken links and stale indexes; an unreadable page file is
+  an invalid one), prints the findings and
+  the gate tallies and exits 0, 4 with a finding, or 2 without a mirror.

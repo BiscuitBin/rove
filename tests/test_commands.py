@@ -37,8 +37,16 @@ from rovo._crawl.model import ProgressEvent, Run
 from rovo._crawl.run import end_run, finish_run
 from rovo._mirror.finalise import request_pass
 from rovo._mirror.indexes import index_pass
-from rovo._mirror.model import IndexesWritten, Operator, PassKind, Tier
+from rovo._mirror.model import (
+    IndexesWritten,
+    Operator,
+    PassKind,
+    Tier,
+    VerificationFailure,
+    VerificationReason,
+)
 from rovo._mirror.state import load_mirror, manifest_path
+from rovo._mirror.verify import verify_pass
 from rovo._report import (
     CrawlReport,
     CrawlReportStatus,
@@ -643,6 +651,169 @@ def test_rule_failure_FinishIndexCommand_1(tmp_path: Path) -> None:
     data = report(out_dir)
     assert data["exit_code"] == "ok"
     assert data["converted"] == len(INDEX_PAGES)
+
+
+# --- verify: Verify, RefuseVerify, ReportVerification (T17) ---------------------------
+
+# A page whose second code sample names no language: it fails code_lang_rate when the
+# sync measures it, so the mirror has a gate tally and no finding.
+UNNAMED_CODE_PAGE = PAGE.replace(
+    "</main>",
+    '<pre><code class="language-python">print("named")</code></pre>'
+    "<pre><code>echo unnamed</code></pre></main>",
+)
+REASONS = {
+    "missing_file",
+    "unmanaged_file",
+    "invalid_page_file",
+    "digest_mismatch",
+    "quality_drift",
+    "broken_link",
+    "index_stale",
+}
+
+
+def finding_lines(text: str) -> list[str]:
+    """The lines of verify's output that are findings: `<reason> <path> <detail>`."""
+    return [line for line in text.splitlines() if line.split(" ", 1)[0] in REASONS]
+
+
+def test_rule_success_Verify(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule Verify succeeds when all preconditions are met.
+
+    A mirror with a manifest gets a verify pass: a fresh mirror has no finding, so it
+    exits ok and prints no finding, and nothing on disk changes.
+    """
+    out_dir = indexes_site(tmp_path / "out")
+    before = snapshot(out_dir)
+    capsys.readouterr()
+    assert _commands.verify(out_dir) is ExitCode.ok
+    captured = capsys.readouterr()
+    assert finding_lines(captured.out) == []
+    assert captured.err == ""
+    assert snapshot(out_dir) == before
+
+
+def test_rule_failure_Verify_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule Verify is rejected when requires clause fails.
+
+    requires: exists target and manifest_exists(target): a directory holding page files
+    but no manifest gets no verify pass, so no finding is printed and nothing written.
+    """
+    out_dir = indexes_site(tmp_path / "out")
+    manifest_path(out_dir).unlink()
+    before = snapshot(out_dir)
+    capsys.readouterr()
+    assert _commands.verify(out_dir) is ExitCode.usage
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("rovo: verify: ")
+    assert snapshot(out_dir) == before
+
+
+def test_rule_success_RefuseVerify(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule RefuseVerify succeeds when all preconditions are met.
+
+    No mirror: a missing directory, an empty one or an unparsable manifest exits usage,
+    says why on standard error, prints nothing on standard output and writes nothing.
+    """
+    missing = tmp_path / "missing"
+    assert _commands.verify(missing) is ExitCode.usage
+    captured = capsys.readouterr()
+    assert captured.err.startswith("rovo: verify: ")
+    assert captured.out == ""
+    assert not missing.exists()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert _commands.verify(empty) is ExitCode.usage
+    assert capsys.readouterr().err.startswith("rovo: verify: ")
+    assert list(empty.iterdir()) == []
+
+    broken = initialised(tmp_path / "broken")
+    manifest_path(broken).write_text("{not json", encoding="utf-8")
+    before = snapshot(broken)
+    assert _commands.verify(broken) is ExitCode.usage
+    captured = capsys.readouterr()
+    assert captured.err.startswith("rovo: verify: ")
+    assert captured.out == ""
+    assert snapshot(broken) == before
+
+
+def test_rule_failure_RefuseVerify_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify rule RefuseVerify is rejected when requires clause fails.
+
+    requires: not exists target or not manifest_exists(target): a mirror with a manifest
+    is not refused, even when a page file is unreadable, which is a finding
+    (invalid_page_file, quality) rather than a usage error (VerifyIndexReportExitCodes).
+    """
+    out_dir = indexes_site(tmp_path / "out")
+    capsys.readouterr()
+    assert _commands.verify(out_dir) is ExitCode.ok
+    assert capsys.readouterr().err == ""
+
+    (out_dir / START_PATH).write_bytes(b"---\ntitle: \xff\xfe\n---\n")
+    assert _commands.verify(out_dir) is ExitCode.quality
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"invalid_page_file {START_PATH}" in "\n".join(finding_lines(captured.out))
+
+
+def test_rule_success_ReportVerification(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify rule ReportVerification succeeds when all preconditions are met.
+
+    VerificationFinished reports each finding as one `<reason> <path> <detail>` line on
+    standard output and exits ok with none, quality with any.
+    """
+    out_dir = indexes_site(tmp_path / "out")
+    mirror = load_mirror(out_dir)
+    operator = Operator()
+    clean = verify_pass(operator, mirror)
+    assert clean is not None
+    capsys.readouterr()
+    assert _commands.report_verification(clean) is ExitCode.ok
+    assert finding_lines(capsys.readouterr().out) == []
+
+    failures = (
+        VerificationFailure(
+            path=START_PATH, reason=VerificationReason.quality_drift, detail="headings"
+        ),
+        VerificationFailure(path="index.md", reason=VerificationReason.index_stale, detail=""),
+    )
+    drifted = dataclasses.replace(clean, failures=failures)
+    assert _commands.report_verification(drifted) is ExitCode.quality
+    lines = finding_lines(capsys.readouterr().out)
+    assert len(lines) == len(failures)
+    assert lines[0].split(" ")[:3] == ["quality_drift", START_PATH, "headings"]
+    assert lines[1].split(" ")[:2] == ["index_stale", "index.md"]
+
+
+def test_verify_prints_findings_and_gate_tallies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ReportVerification's output: the findings, then `<gate> <pages>` per failed gate.
+
+    The tallies are over the mirror's written pages and never move the exit code: a
+    mirror whose one page failed code_lang_rate when measured exits ok with the tally
+    alone; with a finding beside it, quality.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = FakeFetcher({SEED: html_response(SEED, UNNAMED_CODE_PAGE)})
+    assert synced(out_dir, fetcher) is ExitCode.ok
+    capsys.readouterr()
+    assert _commands.verify(out_dir) is ExitCode.ok
+    out = capsys.readouterr().out
+    assert finding_lines(out) == []
+    assert "code_lang_rate 1" in out.splitlines()
+
+    (out_dir / "index.md").write_text("# Edited\n", encoding="utf-8")
+    assert _commands.verify(out_dir) is ExitCode.quality
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("index_stale index.md")
+    assert "code_lang_rate 1" in lines
+    assert lines.index("code_lang_rate 1") > lines.index(finding_lines("\n".join(lines))[-1])
 
 
 # --- sync paces on its timer and reports what failed (T12) ------------------------------

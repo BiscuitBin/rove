@@ -21,7 +21,13 @@ target with no identity is skipped (crawl.allium ExpandSitemapEntries and ReadLl
 guidance, at ecfa257). T15 (weed 1, ai_tmp/T15/weed-1.md): a move whose natural path is
 unchanged keeps its path, and a redirected llms.txt's relative targets resolve against
 llms_txt_url. T15 (weed 2 and 3, ai_tmp/T15/weed-3.md): a case-only move leaves the page
-file in place under its new spelling.
+file in place under its new spelling. T17 (re-propagated from T09 review C2): a
+non-heading source id becomes an anchor island. T17 (weed 1, ai_tmp/T17/weed-1.md): the
+source id of an element normalisation replaces (a tab group, a tab panel, a callout, an
+interactive embed, a layout table, a footnote section) stays an anchor; whole-body
+extraction strips the profile's chrome; an unreadable page file is invalid_page_file.
+T17 (weed 2, ai_tmp/T17/weed-2.md): the source id of a tab group's tab list and labels and
+of an unwrapped form wrapper (form, fieldset, label, button) stays an anchor.
 """
 
 import json
@@ -47,6 +53,7 @@ from rovo import _commands
 from rovo._config import initial_scope, resolve_config, starter_config
 from rovo._convert import profiles
 from rovo._convert.fidelity import convert, extract, link_destinations, map_destinations, normalize
+from rovo._convert.model import ExtractionMethod, Profile
 from rovo._crawl import pace
 from rovo._crawl.fetch import HttpxFetcher
 from rovo._crawl.model import CONFIG as CRAWL_CONFIG
@@ -69,12 +76,14 @@ from rovo._mirror.model import (
     Operator,
     StoreOutcome,
     Tier,
+    VerificationReason,
 )
 from rovo._mirror.state import load_mirror, manifest_path
 from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, origin_of
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
 from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
+from test_convert import DEVSITE_CHROME, LEARN_URL, MSLEARN_PAGE, TABS_PAGE, converted_by
 from test_crawl import LLMS_TXT, declaring, host_open, settled, site, urlset
 from test_crawl import new_mirror as crawl_mirror
 from test_crawl import request as crawl_request
@@ -92,6 +101,7 @@ from test_mirror import (
 )
 from test_report import crawled, opened
 from test_unplaceable_candidate import crowded, victim_candidate
+from test_verify import B, findings, reasons_at, synced_mirror
 
 SITE = "http://docs.example"
 SEED = f"{SITE}/guide/start.html"
@@ -333,15 +343,17 @@ def test_a_text_input_is_no_login_wall() -> None:
     assert classify_block(html_response(SEED, markup), None).signature == ""
 
 
-def test_a_non_heading_source_id_stops_normalisation() -> None:
+def test_a_non_heading_source_id_becomes_an_anchor_island() -> None:
     """convert.allium BodyShape keeps every source id as an anchor (review C2).
 
-    A non-heading id needs an anchor island, which the fidelity slice owns, so the slice
-    stops rather than drop it. The extracted root's own id is not part of the content.
+    Re-propagated by T17 from T09, which stopped here: UncarryableBecomesIsland makes a
+    non-heading id an anchor island, so the id is an anchor and the body holds it. The
+    extracted root's own id is not part of the content.
     """
     page = UNLINKED.replace("<p>", '<p id="intro">')
-    with pytest.raises(NotInThisSlice):
-        normalize(extract(page, SEED, profiles.GENERIC), profiles.GENERIC)
+    islanded = converted_by(page, profiles.GENERIC)
+    assert "intro" in islanded.anchors
+    assert '<a id="intro"></a>' in islanded.body
     rooted = UNLINKED.replace("<main>", '<main id="content">')
     normalized = normalize(extract(rooted, SEED, profiles.GENERIC), profiles.GENERIC)
     assert normalized.anchors == frozenset()
@@ -999,3 +1011,151 @@ def test_a_case_only_move_leaves_the_file_under_its_new_spelling(tmp_path: Path)
     assert (tmp_path / other.path).is_file()
     assert sorted(path.name for path in (tmp_path / ROOT).iterdir()) == ["Other.md", "start.md"]
     assert not (tmp_path / "_removed").exists()
+
+
+# --- T17 weed 1 (ai_tmp/T17/weed-1.md) ---------------------------------------------------
+
+DEVSITE_PAGE = """<!doctype html>
+<html lang="en">
+    <head><title>Replaced elements</title></head>
+    <body>
+        <div class="devsite-article-body">
+            <h1>Replaced elements</h1>
+            <p>Each construct below is replaced by normalisation.</p>
+            {construct}
+            <p>A closing sentence after the construct.</p>
+        </div>
+    </body>
+</html>
+"""
+REPLACED_IDS = {
+    "tab-group-and-panels": (
+        (
+            '<devsite-selector id="grp">'
+            '<section id="py"><h3>Python</h3>'
+            '<pre><code class="language-python">print(1)</code></pre></section>'
+            '<section id="js" hidden><h3>JavaScript</h3>'
+            '<pre><code class="language-javascript">log(1)</code></pre></section>'
+            "</devsite-selector>"
+        ),
+        ("grp", "py", "js"),
+    ),
+    "callout": (
+        '<aside class="note" id="n1"><strong>Note:</strong> Read it once.</aside>',
+        ("n1",),
+    ),
+    "interactive-embed": (
+        '<iframe id="emb" src="https://example.invalid/demo" title="Demo"></iframe>',
+        ("emb",),
+    ),
+    "layout-table": (
+        (
+            '<table role="presentation" id="lay"><tr><td><p>Left column.</p></td>'
+            "<td><p>Right column.</p></td></tr></table>"
+        ),
+        ("lay",),
+    ),
+    "footnote-section": (
+        (
+            '<p>A claim<sup id="fnref1"><a href="#fn1" class="footnote-ref">1</a></sup>.</p>'
+            '<section class="footnotes" id="notes"><ol><li id="fn1"><p>The source. '
+            '<a href="#fnref1" class="footnote-backref">&#8617;</a></p></li></ol></section>'
+        ),
+        ("notes",),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REPLACED_IDS))
+def test_a_replaced_elements_source_id_stays_an_anchor(name: str) -> None:
+    """Weed T17-1, convert.allium BodyShape: the body keeps every source id as an anchor.
+
+    Tab expansion, callouts and the declared reductions replace an element; no reduction
+    declares its id lost (DeclaredReductions), so each id is an anchor and an anchor
+    island in the body, wherever implement places it.
+    """
+    construct, ids = REPLACED_IDS[name]
+    content = converted_by(DEVSITE_PAGE.format(construct=construct), profiles.DEVSITE)
+    for anchor in ids:
+        assert anchor in content.anchors, (anchor, content.anchors)
+        assert f'<a id="{anchor}"></a>' in content.body, (anchor, content.body)
+
+
+def test_whole_body_extraction_strips_the_profiles_chrome() -> None:
+    """Weed T17-1, convert.allium ExtractNeverEmptyHanded: the profile's chrome goes.
+
+    When the devsite content selection matches nothing, the whole body stands in for the
+    content and devsite's chrome (header, book navigation, footer) is stripped from it;
+    the article's text stays.
+    """
+    unselected = TABS_PAGE.replace('class="devsite-article-body"', 'class="article-body"')
+    extracted = extract(unselected, SEED, profiles.DEVSITE)
+    assert extracted.method is ExtractionMethod.whole_body
+    for chrome in DEVSITE_CHROME:
+        assert chrome not in extracted.html, chrome
+    assert "pip install example-client" in extracted.html
+
+
+def test_an_unreadable_page_file_is_invalid_page_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Weed T17-1, mirror.allium VerifyPages: an unreadable page file is a finding.
+
+    A page file that exists but cannot be read does not parse (invalid_page_file), and
+    rovo verify exits quality (rovo.allium VerifyIndexReportExitCodes: 0, 4 or 2) rather
+    than crash.
+    """
+    out_dir, _ = synced_mirror(tmp_path / "out")
+    unreadable = out_dir / B
+    read_text = Path.read_text
+
+    def refusing(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+        if path == unreadable:
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_text(path, encoding, errors)
+
+    monkeypatch.setattr(Path, "read_text", refusing)
+    assert VerificationReason.invalid_page_file in reasons_at(findings(out_dir), B)
+    assert _commands.verify(out_dir) is ExitCode.quality
+
+
+# --- T17 weed 2 (ai_tmp/T17/weed-2.md) ---------------------------------------------------
+
+LABELLED_TABS = (
+    MSLEARN_PAGE.replace('<ul role="tablist">', '<ul role="tablist" id="tablist_1">')
+    .replace('role="tab" data-tab="http"', 'role="tab" data-tab="http" id="tab_1_http"')
+    .replace('role="tab" data-tab="csharp"', 'role="tab" data-tab="csharp" id="tab_1_csharp"')
+)
+FORM_WRAPPERS = (
+    '<form id="f1"><fieldset id="fs1"><label id="l1" for="q">Query</label>'
+    '<input id="q" name="q"><button id="b1" type="submit">Search</button></fieldset></form>'
+)
+
+
+@pytest.mark.parametrize(
+    ("html", "profile", "url", "ids"),
+    [
+        (LABELLED_TABS, profiles.MSLEARN, LEARN_URL, ("tablist_1", "tab_1_http", "tab_1_csharp")),
+        (
+            DEVSITE_PAGE.format(construct=FORM_WRAPPERS),
+            profiles.DEVSITE,
+            SEED,
+            ("f1", "fs1", "l1", "b1"),
+        ),
+    ],
+    ids=["tab-list-and-labels", "form-wrappers"],
+)
+def test_a_tab_label_or_form_wrappers_source_id_stays_an_anchor(
+    html: str, profile: Profile, url: str, ids: tuple[str, ...]
+) -> None:
+    """Weed T17-2, convert.allium BodyShape: the body keeps every source id as an anchor.
+
+    Tab expansion carries a tab label's text as its panel's label and replaces the group
+    with its panels; a form wrapper unwraps (DeclaredReductions: button labels stay).
+    No reduction declares the tab list's, a label's or a wrapper's id lost, so each is an
+    anchor and an anchor island in the body. A form control's id goes with the control.
+    """
+    content = converted_by(html, profile, url)
+    for anchor in ids:
+        assert anchor in content.anchors, (anchor, content.anchors)
+        assert f'<a id="{anchor}"></a>' in content.body, (anchor, content.body)

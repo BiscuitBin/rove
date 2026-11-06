@@ -106,6 +106,7 @@ LATER = START + timedelta(minutes=1)
 LOW = 0.5
 MIDDLE = 0.75
 PERCENTILE = 0.1
+TOLERANCE = 1e-9
 FORBIDDEN = 403
 SERVICE_UNAVAILABLE = 503
 ROBOTS = f"{SITE}/robots.txt"
@@ -744,6 +745,82 @@ def test_entity_fields_QualitySummary() -> None:
     assert empty == QualitySummary(mean_score=0, p10_score=0, gate_failures=())
     third = summarise([1 / 3], [], PERCENTILE)
     assert third.mean_score == round(1 / 3, 4)
+
+
+# --- GateFailure and LowConfidencePage (T17) ---------------------------------------------
+
+# The one-page fixture with a second code sample that names no language: under
+# lang_rate_gate, so the page fails code_lang_rate alone and is low confidence.
+UNNAMED_CODE_PAGE = PAGE.replace(
+    "</main>",
+    '<pre><code class="language-python">print("named")</code></pre>'
+    "<pre><code>echo unnamed</code></pre></main>",
+)
+
+
+def test_value_equality_GateFailure() -> None:
+    """Verify value type GateFailure has structural equality."""
+    row = GateFailure(gate=QualityGate.code_lang_rate, pages=2)
+    again = GateFailure(gate=QualityGate.code_lang_rate, pages=2)
+    assert row == again
+    assert hash(row) == hash(again)
+    assert row != dataclasses.replace(row, pages=1)
+    assert row != dataclasses.replace(row, gate=QualityGate.headings)
+
+
+def test_entity_fields_GateFailure(tmp_path: Path) -> None:
+    """Verify all declared fields on GateFailure are present with correct types.
+
+    A run whose one page fails code_lang_rate tallies it on one page, in the summary and
+    in crawl-report.json's quality_summary.gate_failures.
+    """
+    report, run, _ = tallied(tmp_path, UNNAMED_CODE_PAGE)
+    assert rank_and_write_report(report, run, FixedClock()) is ExitCode.ok
+    (row,) = report.quality_summary.gate_failures
+    assert isinstance(row, GateFailure)
+    assert isinstance(row.gate, QualityGate)
+    assert row.gate is QualityGate.code_lang_rate
+    assert isinstance(row.pages, int)
+    assert row.pages == 1
+    summary = written(tmp_path)["quality_summary"]
+    assert isinstance(summary, dict)
+    assert summary["gate_failures"] == [{"gate": "code_lang_rate", "pages": 1}]
+
+
+def test_value_equality_LowConfidencePage() -> None:
+    """Verify value type LowConfidencePage has structural equality."""
+    first, second = low_confidence_rows()
+    again = dataclasses.replace(first)
+    assert first == again
+    assert hash(first) == hash(again)
+    assert first != second
+    assert first != dataclasses.replace(first, touched_this_run=False)
+    assert first != dataclasses.replace(first, flags=frozenset({QualityFlag.links}))
+
+
+def test_entity_fields_LowConfidencePage(tmp_path: Path) -> None:
+    """Verify all declared fields on LowConfidencePage are present with correct types.
+
+    The page failing code_lang_rate is one row: its path, URL, score, flags and that this
+    run touched it, in the report and in crawl-report.json.
+    """
+    report, run, _ = tallied(tmp_path, UNNAMED_CODE_PAGE)
+    assert rank_and_write_report(report, run, FixedClock()) is ExitCode.ok
+    (row,) = report.low_confidence_pages
+    assert isinstance(row, LowConfidencePage)
+    assert row.path == START_PATH
+    assert row.url == SEED
+    assert isinstance(row.quality_score, float)
+    assert abs(row.quality_score - (1 - profiles.CONFIG.weight_code_lang_rate)) < TOLERANCE
+    assert row.flags == frozenset({QualityFlag.code_lang_rate})
+    assert row.touched_this_run is True
+    rows = written(tmp_path)["low_confidence_pages"]
+    assert isinstance(rows, list)
+    (data,) = rows
+    assert data["path"] == START_PATH
+    assert data["url"] == SEED
+    assert data["flags"] == ["code_lang_rate"]
+    assert data["touched_this_run"] is True
 
 
 def test_value_equality_Change(tmp_path: Path) -> None:

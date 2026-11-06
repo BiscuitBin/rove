@@ -27,19 +27,23 @@ follows [Python packaging](../explanation/packaging.md).
 │   │   ├── _crawl/pace.py     The timer seam, the per-host limiter and retry waits
 │   │   └── _crawl/sitemaps.py The sitemap and llms.txt readers (lxml, entities off)
 │   ├── _config.py  _report.py  Private modules for the command
-│   └── _commands.py  _exit.py  _unfinished.py  init, sync, index, report; exit codes; the guard
+│   ├── _mirror/verify.py  rovo verify's checks of the mirror on disk, offline
+│   └── _commands.py  _exit.py  _unfinished.py  init, sync, verify, index, report; exit codes; the guard
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
 │   ├── fakes.py  spec_values.py  The seams' doubles; config defaults read from the specs
 │   ├── test_sitemaps.py       The sitemap and llms.txt black boxes
+│   ├── test_verify.py         rovo verify's findings, one per reason
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
 │   │   ├── test_errors_report_sync.py  Refusals, interrupts, crashes, progress, rovo report
 │   │   ├── test_lifecycle_sync.py  Removal, archive, moves, duplicates and redirects
+│   │   ├── test_quality_sync.py    Islands, gates and flags, devsite tabs, rovo verify
 │   │   └── test_second_sync.py     A second, incremental sync over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
 │       └── sites/             Static sites the end-to-end tests serve
-│           └── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
+│           ├── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
+│           └── quality/ devsite/  Islands and gates; a DevSite tab page (test_quality_sync.py)
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py
 ├── docs/                      Handbook, manifest, specs/ and decisions/
 │   └── specs/                 The Allium modules: behaviour is decided here
