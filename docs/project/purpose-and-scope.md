@@ -26,8 +26,7 @@ whose links to other mirrored pages are relative, writes the mirror's indexes an
 `crawl-report.json`; `rovo verify` checks the mirror on disk offline, `rovo index`
 rebuilds the indexes offline, and `rovo report` prints the last report; a sync naming
 `--url` or `--path` targets syncs those pages alone. A branch a later slice implements
-(blocks, owner testing) or the specification leaves open (the `mslearn` profile's
-sitemap filter and version label) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
+(blocks, owner testing) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
 product the repository runs everything a change needs: lint and type gates with
 positive controls, a coverage floor, a wheel built and smoke-installed offline on every
 `just check`, the documentation and agent contracts, and CI. Each implementation ticket

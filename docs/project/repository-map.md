@@ -37,11 +37,13 @@ follows [Python packaging](../explanation/packaging.md).
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
 │   │   ├── test_errors_report_sync.py  Refusals, interrupts, crashes, progress, rovo report
 │   │   ├── test_lifecycle_sync.py  Removal, archive, moves, duplicates and redirects
+│   │   ├── test_mslearn_sync.py    An mslearn sitemap filter, version labels, trafilatura
 │   │   ├── test_quality_sync.py    Islands, gates and flags, devsite tabs, rovo verify
 │   │   └── test_second_sync.py     A second, incremental sync over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
 │       └── sites/             Static sites the end-to-end tests serve
+│           ├── mslearn/       Learn-shaped pages (test_mslearn_sync.py)
 │           ├── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
 │           └── quality/ devsite/  Islands and gates; a DevSite tab page (test_quality_sync.py)
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py

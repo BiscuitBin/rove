@@ -161,7 +161,11 @@ linking to an anchor island and a page with no `main`; `devsite` is a DevSite-sh
 page of tab groups and a callout around DevSite chrome. `tests/e2e/test_quality_sync.py`
 syncs both to check islands, the gates and flags, `fail_on_low_quality`, every tab
 panel under `devsite` and `rovo verify`; `tests/test_verify.py` holds one unit test per
-verify finding.
+verify finding. `mslearn` holds Learn-shaped pages, one of them with no Learn article
+content; `tests/e2e/test_mslearn_sync.py` writes its robots.txt and sitemaps once the port
+is known and syncs it under `mslearn` to check the sitemap filter's placeholders, a page
+stored at `<name>@<label>.md` and a page the fallback extractor, trafilatura, takes.
+`tests/test_version_label.py` pins the version label in a page path and `Page.version`.
 `tests/e2e/test_harness.py` proves the harness: the basic site answers 200 with its
 heading. `tests/e2e/test_init_sync.py` runs `rovo init` and `rovo sync` against the
 fixture sites, as the installed command would, and `tests/e2e/test_follow_links.py`

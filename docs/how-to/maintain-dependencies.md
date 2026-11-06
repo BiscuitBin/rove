@@ -27,7 +27,7 @@ window, and they still need `check` and a person's merge.
 
 | Pin | Where | Read by | Pull request |
 | --- | --- | --- | --- |
-| the runtime ranges (typer, httpx, beautifulsoup4, lxml, markdownify, protego) and the `browser` extra's playwright | `[project] dependencies`, `[project.optional-dependencies]` | `pep621` | alone; moves `uv.lock` within the range, and the range only when a release falls outside it |
+| the runtime ranges (typer, httpx, beautifulsoup4, lxml, markdownify, protego, trafilatura) and the `browser` extra's playwright | `[project] dependencies`, `[project.optional-dependencies]` | `pep621` | alone; moves `uv.lock` within the range, and the range only when a release falls outside it |
 | coverage, mypy, prek, pytest, ruff | `[dependency-groups] dev` | `pep621` | one per tool, with its `uv.lock` change |
 | hatchling | `[build-system] requires` | `pep621` | alone; `pyproject.toml` only, since `uv.lock` does not hold it |
 | the shared checkers' tag | `[tool.uv.sources]` | `pep621` | alone, with its `uv.lock` change; the allium pin rides it ([Moving the Allium binary](#moving-the-allium-binary)) |

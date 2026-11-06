@@ -8,8 +8,14 @@ Re-propagated by T17 (origin T09): the Fidelity contract tests, test_body_shape 
 test_surface_exposure_PageConversion are extended with islands, tab panels, the declared
 reductions, the normalisation flags and the devsite and mslearn selections; the
 guarantees without an obligation id follow them, named after the guarantee. The devsite
-markup is tests/fixtures/sites/devsite/; the mslearn markup is a unit input here, since
-no mslearn sync can complete while its sitemap filter and version label are unspecified.
+markup is tests/fixtures/sites/devsite/; the mslearn markup is a unit input here, and
+tests/e2e/test_mslearn_sync.py syncs it end to end.
+
+Re-propagated by the T17 follow-up (spec 022eca4, ExtractNeverEmptyHanded): a page the
+profile's selection does not match is extracted by the fallback extractor, trafilatura,
+before the whole body; only a page trafilatura finds no main content in (IMAGE_ONLY) is
+extracted whole. The island attributes are the union DeclaredReductions and
+SanitizedMeansInert now state.
 """
 
 import dataclasses
@@ -99,6 +105,15 @@ NO_MAIN = """<!doctype html>
         <h1>Loose page</h1>
         <p>A page whose content sits directly in the body, with no main element at all.</p>
     </body>
+</html>
+"""
+
+# A page with no text at all, which the fallback extractor finds no main content in: only
+# the whole body is left (ExtractNeverEmptyHanded, the T17 follow-up).
+IMAGE_ONLY = """<!doctype html>
+<html lang="en">
+    <head><title>Picture page</title></head>
+    <body><p><img src="http://docs.example/a.png" alt="A diagram"></p></body>
 </html>
 """
 
@@ -481,11 +496,12 @@ def test_contract_signature_Fidelity_extract() -> None:
     """Verify implementation satisfies contract Fidelity.extract.
 
     extract: (html: String, url: String, profile: Profile) -> ExtractedContent, and
-    ExtractNeverEmptyHanded's profile and whole-body branches (the fallback extractor is
-    not chosen yet): the generic selection finds `main`, else `article`, else the body.
-    Re-propagated by T17: devsite selects the DevSite article body and its breadcrumbs,
-    mslearn the Learn article content, each without its chrome; markup a profile's
-    selection does not match is extracted whole.
+    ExtractNeverEmptyHanded: the generic selection finds `main`, else `article`, else the
+    fallback extractor runs, else the body. Re-propagated by T17: devsite selects the
+    DevSite article body and its breadcrumbs, mslearn the Learn article content, each
+    without its chrome. Re-propagated by the T17 follow-up (spec 022eca4): markup a
+    profile's selection does not match goes to trafilatura (method fallback), and only a
+    page it finds nothing in is extracted whole.
     """
     assert list(inspect.signature(extract).parameters) == ["html", "url", "profile"]
     by_profile = extract(PAGE, SEED, profiles.GENERIC)
@@ -495,13 +511,19 @@ def test_contract_signature_Fidelity_extract() -> None:
     article = PAGE.replace("<main>", "<article>").replace("</main>", "</article>")
     assert extract(article, SEED, profiles.GENERIC).method is ExtractionMethod.profile
 
-    whole = extract(NO_MAIN, SEED, profiles.GENERIC)
+    fallback = extract(NO_MAIN, SEED, profiles.GENERIC)
+    assert fallback.method is ExtractionMethod.fallback
+    assert fallback.has_text
+    assert fallback.title == "Loose page"
+    # No meta description: the first prose paragraph of what the fallback extractor kept
+    # (its own choice of paragraphs), cut at description_max_chars.
+    assert "A page whose content sits directly" in fallback.description
+    assert len(fallback.description) <= profiles.CONFIG.description_max_chars
+
+    whole = extract(IMAGE_ONLY, SEED, profiles.GENERIC)
     assert whole.method is ExtractionMethod.whole_body
-    assert whole.has_text
-    assert whole.title == "Loose page"
-    # No meta description: the first prose paragraph, cut at description_max_chars.
-    assert whole.description.startswith("A page whose content sits directly")
-    assert len(whole.description) <= profiles.CONFIG.description_max_chars
+    assert whole.title == "Picture page"
+    assert 'src="http://docs.example/a.png"' in whole.html
 
     declared = PAGE.replace(
         "<meta charset", '<link rel="canonical" href="/guide/topic.html">\n    <meta charset'
@@ -526,8 +548,8 @@ def test_contract_signature_Fidelity_extract() -> None:
         assert chrome not in learn.html, chrome
     assert "var user = new User();" in learn.html
 
-    assert extract(PAGE, SEED, profiles.DEVSITE).method is ExtractionMethod.whole_body
-    assert extract(PAGE, SEED, profiles.MSLEARN).method is ExtractionMethod.whole_body
+    assert extract(PAGE, SEED, profiles.DEVSITE).method is ExtractionMethod.fallback
+    assert extract(PAGE, SEED, profiles.MSLEARN).method is ExtractionMethod.fallback
 
 
 def test_contract_signature_Fidelity_normalize() -> None:
@@ -634,6 +656,8 @@ def test_contract_signature_Fidelity_measure() -> None:
     measure: (content, normalized, body) -> QualityResult. Every element class is counted
     on the body and compared with the expected counts; a lost construct fails its gate,
     the score is the weighted share of passed gates, and the whole-body method flags.
+    Re-propagated by the T17 follow-up (spec 022eca4): the fallback method flags
+    extractor_fallback; the whole body is IMAGE_ONLY's, which trafilatura finds nothing in.
     """
     assert list(inspect.signature(measure).parameters) == ["content", "normalized", "body"]
     extracted, normalized, body, quality = run_pipeline(EVERY_CONSTRUCT)
@@ -654,9 +678,13 @@ def test_contract_signature_Fidelity_measure() -> None:
     lost = sum(getattr(profiles.CONFIG, WEIGHTS[gate]) for gate in lossy.failed)
     assert abs(lossy.score - (1 - lost)) < TOLERANCE
 
-    whole = run_pipeline(NO_MAIN)[3]
+    whole = run_pipeline(IMAGE_ONLY)[3]
     assert QualityFlag.whole_body_extracted in whole.flags
     assert whole.low_confidence
+    fallback = run_pipeline(NO_MAIN)[3]
+    assert QualityFlag.extractor_fallback in fallback.flags
+    assert QualityFlag.whole_body_extracted not in fallback.flags
+    assert fallback.low_confidence
 
     # T17: the normalisation flags, and fidelity_loss for an island whose payload is not
     # in the body or whose token survives in it. html_table_kept alone is no failure.
@@ -679,7 +707,7 @@ def test_contract_signature_Fidelity_measure() -> None:
 
 
 def test_body_shape() -> None:
-    """BodyShape (convert.allium 236): LF, one blank line, one h1, ids as {#id}, one final LF.
+    """BodyShape (convert.allium 249): LF, one blank line, one h1, ids as {#id}, one final LF.
 
     Re-propagated by T17: every source id is kept as an anchor, a non-heading id as an
     anchor island before its element's content, and under the inline anchor style a
@@ -735,7 +763,9 @@ def test_enum_comparable_QualityFlag() -> None:
     assert tuple(flag.name for flag in QualityFlag) == spec_enum("convert", "QualityFlag")
     assert QualityFlag.render_needed == QualityFlag("render_needed")
     assert QualityFlag.render_needed in profiles.CONFIG.incomplete_flags
-    assert run_pipeline(NO_MAIN)[3].flags >= {QualityFlag.whole_body_extracted}
+    # Re-propagated by the T17 follow-up: NO_MAIN now goes to the fallback extractor.
+    assert run_pipeline(IMAGE_ONLY)[3].flags >= {QualityFlag.whole_body_extracted}
+    assert run_pipeline(NO_MAIN)[3].flags >= {QualityFlag.extractor_fallback}
 
 
 def test_enum_comparable_ExtractionMethod() -> None:
@@ -1169,13 +1199,25 @@ REDUCTIONS = {
         ('src="http://docs.example/p.png"', 'alt="P"', 'title="T"', 'id="pic"'),
         ('class="x"', "width=", "loading="),
     ),
+    # Re-propagated by the T17 follow-up (convert.allium 223 to 235 at 022eca4): the union,
+    # the sanitiser's attributes plus class and the tab-language attributes.
     "custom-element-attributes": (
         (
-            '<table><tr><td rowspan="2"><my-widget id="w" data-extra="z" onclick="go()">'
-            "widget text</my-widget></td><td>a</td></tr><tr><td>b</td></tr></table>"
+            '<table><tr><td rowspan="2"><my-widget id="w" class="tabs" data-tab="py" '
+            'data-language="python" language="python" title="Widget" data-extra="z" '
+            'onclick="go()" style="color: red">widget text</my-widget></td><td>a</td></tr>'
+            "<tr><td>b</td></tr></table>"
         ),
-        ('id="w"', "widget text"),
-        ("data-extra", "onclick"),
+        (
+            'id="w"',
+            'class="tabs"',
+            'data-tab="py"',
+            'data-language="python"',
+            'language="python"',
+            'title="Widget"',
+            "widget text",
+        ),
+        ("data-extra", "onclick", "style="),
     ),
 }
 
@@ -1259,8 +1301,45 @@ def test_GatesMeasureExtractedContent_and_FlagsAreComplete() -> None:
     assert QualityFlag.html_table_kept in converted(ISLANDS_PAGE).quality.flags
 
 
+def test_ExtractNeverEmptyHanded() -> None:
+    """The selection, then the fallback extractor, then the whole body (spec 022eca4).
+
+    The T17 follow-up, the maintainer's answer to the batched question, item 3: the
+    fallback extractor is trafilatura and runs only when the profile's selection matches
+    nothing. It keeps the main content and leaves the profile's chrome out; its output is
+    method fallback, flagged extractor_fallback, which alone makes the page low confidence.
+    A page it finds nothing in is extracted whole and flagged whole_body_extracted.
+    """
+    assert extract(TABS_PAGE, GOOGLE_URL, profiles.DEVSITE).method is ExtractionMethod.profile
+
+    unselected = TABS_PAGE.replace('class="devsite-article-body"', 'class="article-body"')
+    fallback = converted_by(unselected, profiles.DEVSITE, GOOGLE_URL)
+    assert fallback.method is ExtractionMethod.fallback
+    assert "pip install example-client" in fallback.body
+    for chrome in DEVSITE_CHROME:
+        assert chrome not in fallback.body, chrome
+    assert QualityFlag.extractor_fallback in fallback.quality.flags
+    assert QualityFlag.whole_body_extracted not in fallback.quality.flags
+    assert fallback.quality.low_confidence
+
+    loose = converted(NO_MAIN)
+    assert loose.method is ExtractionMethod.fallback
+    assert "A page whose content sits directly in the body" in loose.body
+    assert not loose.is_empty
+
+    whole = converted(IMAGE_ONLY)
+    assert whole.method is ExtractionMethod.whole_body
+    assert QualityFlag.whole_body_extracted in whole.quality.flags
+    assert QualityFlag.extractor_fallback not in whole.quality.flags
+    assert whole.quality.low_confidence
+
+
 def test_ProfilesAreTheOnlyPlatformKnowledge() -> None:
-    """The same markup converts by the profile's selection, whatever the URL's host."""
+    """The same markup converts by the profile's selection, whatever the URL's host.
+
+    Re-propagated by the T17 follow-up: markup another profile's selection does not match
+    goes to the fallback extractor rather than the whole body.
+    """
     on_example = converted_by(TABS_PAGE, profiles.DEVSITE, SEED)
     on_google = converted_by(TABS_PAGE, profiles.DEVSITE, GOOGLE_URL)
     assert on_example.body == on_google.body
@@ -1269,8 +1348,8 @@ def test_ProfilesAreTheOnlyPlatformKnowledge() -> None:
 
     generic = pipeline(TABS_PAGE, profiles.GENERIC, GOOGLE_URL)[1]
     assert generic.expected.tab_panels == 0
-    assert extract(MSLEARN_PAGE, LEARN_URL, profiles.DEVSITE).method is ExtractionMethod.whole_body
-    assert extract(TABS_PAGE, GOOGLE_URL, profiles.MSLEARN).method is ExtractionMethod.whole_body
+    assert extract(MSLEARN_PAGE, LEARN_URL, profiles.DEVSITE).method is ExtractionMethod.fallback
+    assert extract(TABS_PAGE, GOOGLE_URL, profiles.MSLEARN).method is ExtractionMethod.fallback
 
 
 @pytest.mark.parametrize(

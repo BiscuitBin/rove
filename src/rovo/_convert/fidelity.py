@@ -1,4 +1,4 @@
-"""The Fidelity operations (convert.allium 178): pure, no clock, no network, no file.
+"""The Fidelity operations (convert.allium 179): pure, no clock, no network, no file.
 
 `extract` parses a whole document with lxml and selects the content by the profile's
 selection (`profiles.SELECTIONS`); `normalize` and `convert` work on the extracted
@@ -176,11 +176,12 @@ _PASSES: dict[QualityGate, Callable[[QualityResult], bool]] = {
 
 
 def extract(html: str, url: str, profile: Profile) -> ExtractedContent:
-    """Realises convert.allium Fidelity.extract (ExtractNeverEmptyHanded, in part).
+    """Realises convert.allium Fidelity.extract (ExtractNeverEmptyHanded).
 
-    The profile's content selection first, else the whole body, flagged later by
-    `measure`; the fallback extractor is not chosen yet. Links and images in the content
-    are made absolute against the page URL; the breadcrumbs are the selection's.
+    The profile's content selection first; when it matches nothing, the profile's chrome
+    is stripped and the fallback extractor (`_fallback`) runs, else the whole body stands
+    in; `measure` flags either. Links and images in the content are made absolute against
+    the page URL; the breadcrumbs are the selection's.
     """
     soup = BeautifulSoup(html, "lxml")
     body = soup.body or soup
@@ -192,9 +193,11 @@ def extract(html: str, url: str, profile: Profile) -> ExtractedContent:
     content: Tag | BeautifulSoup = body if selected is None else selected
     method = ExtractionMethod.profile
     if selected is None:
-        method = ExtractionMethod.whole_body
         for chrome in content.select(selection.chrome):
             chrome.extract()
+        found = _fallback(str(soup), url)
+        method = ExtractionMethod.whole_body if found is None else ExtractionMethod.fallback
+        content = content if found is None else found
     _absolutise(content, url)
     kept = _words(content.get_text(" "))
     return ExtractedContent(
@@ -560,6 +563,30 @@ def _low_confidence(failed: frozenset[QualityGate], flags: Iterable[QualityFlag]
 
 def _is_empty(content: ExtractedContent, body: str) -> bool:
     return not content.has_text or not body.strip()
+
+
+def _fallback(html: str, url: str) -> Tag | BeautifulSoup | None:
+    """The fallback extractor's main content (ExtractNeverEmptyHanded), None for none.
+
+    trafilatura's main-content extraction as HTML, its formatting, links, images and
+    tables kept; what it keeps is its own choice. Imported here alone, so `import rovo`
+    never loads it.
+    """
+    import trafilatura  # noqa: PLC0415  Lazy: the fallback runs only on an unmatched page.
+
+    found = trafilatura.extract(
+        html,
+        url=url,
+        output_format="html",
+        include_comments=False,
+        include_formatting=True,
+        include_links=True,
+        include_images=True,
+        include_tables=True,
+    )
+    tree = BeautifulSoup(found or "", "lxml")
+    content = tree.body or tree
+    return content if _words(content.get_text(" ")) else None
 
 
 def _select(body: Tag | BeautifulSoup, selection: Selection) -> Tag | None:

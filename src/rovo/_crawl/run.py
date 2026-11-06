@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2191).
+"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2192).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -631,7 +631,7 @@ def robots_allows(run: Run, url: str) -> bool:
     True under robots = ignore and for an origin whose stance is allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 1070 to 1110).
+    literal-$ copy included (crawl.allium 1071 to 1111).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True

@@ -32,6 +32,7 @@ from fakes import (
 from rovo import _commands
 from rovo._config import SyncOptions, initial_scope, resolve_config, scope_of, signature_of
 from rovo._convert import profiles
+from rovo._convert.model import QualityGate
 from rovo._crawl.model import CONFIG as CRAWL
 from rovo._crawl.model import ProgressEvent, Run
 from rovo._crawl.run import end_run, finish_run
@@ -814,6 +815,44 @@ def test_verify_prints_findings_and_gate_tallies(
     assert lines[0].startswith("index_stale index.md")
     assert "code_lang_rate 1" in lines
     assert lines.index("code_lang_rate 1") > lines.index(finding_lines("\n".join(lines))[-1])
+
+
+def test_verify_tallies_are_always_printed_sorted_by_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tallies are printed with no finding too, one line per failed gate, by gate.
+
+    The T17 follow-up (spec 022eca4, ReportVerification guidance, rovo.allium 811 to 817),
+    the maintainer's answer to the batched question, item 4: always printed, after the
+    findings and whether or not there is any, sorted by gate; never the exit code.
+    """
+    out_dir = indexes_site(tmp_path / "out")
+    mirror = load_mirror(out_dir)
+    written = mirror.written_pages
+    assert len(written) >= len(("first", "second"))
+    failed = (
+        frozenset({QualityGate.tables, QualityGate.code_lang_rate}),
+        frozenset({QualityGate.headings, QualityGate.tables}),
+    )
+    for page, gates in zip(written, failed, strict=False):
+        page.quality = dataclasses.replace(page.quality, failed=gates)
+    clean = verify_pass(Operator(), mirror)
+    assert clean is not None
+    capsys.readouterr()
+    assert _commands.report_verification(dataclasses.replace(clean, failures=())) is ExitCode.ok
+    assert capsys.readouterr().out.splitlines() == ["code_lang_rate 1", "headings 1", "tables 2"]
+
+    finding = VerificationFailure(
+        path="index.md", reason=VerificationReason.index_stale, detail=""
+    )
+    drifted = dataclasses.replace(clean, failures=(finding,))
+    assert _commands.report_verification(drifted) is ExitCode.quality
+    assert capsys.readouterr().out.splitlines() == [
+        "index_stale index.md",
+        "code_lang_rate 1",
+        "headings 1",
+        "tables 2",
+    ]
 
 
 # --- sync paces on its timer and reports what failed (T12) ------------------------------

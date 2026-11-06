@@ -294,20 +294,31 @@ def test_owner_testing_and_dry_runs_stop(tmp_path: Path) -> None:
         crawl(tmp_path / "owner", {}, mode=RunMode.owner_testing)
 
 
-def test_a_sitemap_filter_placeholder_stops(tmp_path: Path) -> None:
-    """T13: a profile's sitemap filter with {section} or {locale} placeholders is unstated.
+def test_a_sitemap_filter_placeholder_is_filled(tmp_path: Path) -> None:
+    """T17 follow-up (spec 022eca4): a run under mslearn's placeholder filter proceeds.
 
-    Re-propagated by T15 from test_a_redirected_sitemap_or_llms_txt_and_a_sitemap_filter_
-    placeholder_stop: T15 follows a sitemap's and llms.txt's redirects, so only the
-    placeholder case is left, unchanged.
+    Re-propagated by T17 from test_a_sitemap_filter_placeholder_stops (T13, re-propagated
+    by T15), which asserted NotInThisSlice("sitemap_admitted"): {section} matches as *
+    does and {locale} is any of the scope's locale codes, so the well-known sitemaps,
+    which the filter does not admit, are never requested, and the seed is stored. It has
+    no version parameter, so its path has no label and its version is mslearn's
+    version_default (StoreNewPage guidance).
     """
-    mirror = new_mirror(tmp_path)
+    mirror = new_mirror(
+        tmp_path,
+        meaningful_query_params=profiles.MSLEARN.meaningful_query_params,
+        locale_codes=profiles.MSLEARN.locale_codes,
+    )
     mirror.profile = profiles.MSLEARN
     fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(request(mirror), None, fetcher, FixedClock())
-    assert stopped.value.rule == "sitemap_admitted"
-    assert SEED not in fetcher.requests
+    run_crawl(request(mirror), None, fetcher, FixedClock())
+    assert SEED in fetcher.requests
+    for well_known in (f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml"):
+        assert well_known not in fetcher.requests
+    page = mirror.page(SEED)
+    assert page is not None
+    assert page.path == START_PATH
+    assert page.version == profiles.MSLEARN.version_default
 
 
 @pytest.mark.parametrize("declared_by", ["robots-txt", "declared-index"])
@@ -585,17 +596,24 @@ def test_an_island_restores_and_the_inline_style_anchors() -> None:
     assert "{#install}" not in body
 
 
-def test_a_dry_run_report_and_a_versioned_path_stop(tmp_path: Path) -> None:
-    """A version label in a path is a later slice's; T13 realises CloseRun's dry-run branch."""
+def test_a_versioned_path_carries_its_label(tmp_path: Path) -> None:
+    """T17 follow-up (spec 022eca4): a version label is "@" and the label before ".md".
+
+    Re-propagated by T17 from T09's test_a_dry_run_report_and_a_versioned_path_stop,
+    which asserted NotInThisSlice("assign_path") (T13 realised its dry-run half). Only an
+    identity carrying mslearn's version parameter is labelled; version_default never
+    touches the path.
+    """
     versioned = Mirror(
         out_dir=tmp_path,
-        scope=scope(),
+        scope=scope(meaningful_query_params=("view",)),
         profile=profiles.MSLEARN,
         processing_signature="signature-1",
     )
-    with pytest.raises(NotInThisSlice):
-        assign_path(versioned, f"{SITE}/guide/page?view=graph-rest-beta")
-    assert version_label(profiles.MSLEARN, f"{SITE}/guide/page?view=graph-rest-beta") == "beta"
+    beta = f"{SITE}/guide/page?view=graph-rest-beta"
+    assert assign_path(versioned, beta) == f"{ROOT}page@beta.md"
+    assert version_label(profiles.MSLEARN, beta) == "beta"
+    assert assign_path(versioned, f"{SITE}/guide/page") == f"{ROOT}page.md"
 
 
 # --- The black boxes' corners --------------------------------------------------------

@@ -276,7 +276,7 @@ class ConvertConfig:
     description_max_chars: int
 
 
-# convert.allium's config block (convert.allium 333 to 355), the one copy in code.
+# convert.allium's config block (convert.allium 346 to 368), the one copy in code.
 CONFIG = ConvertConfig(
     text_coverage_gate=0.97,
     ratio_gate=0.98,

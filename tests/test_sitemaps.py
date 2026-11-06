@@ -5,10 +5,13 @@ is `urlset` or `sitemapindex` in any namespace, `sitemap_is_index` the latter;
 `sitemap_entries` each `url` or `sitemap` child's stripped `loc` with its `lastmod`, in
 order, a child without `loc` skipped; the parser expands no entity and reads no DTD.
 `llms_txt_targets` is every inline Markdown link, resolved against llms.txt, each once;
-`resolve_url` is `urljoin`; an empty `sitemap_include` admits every sitemap, and a
-placeholder stops at `NotInThisSlice("sitemap_admitted")` (FetchSitemap guidance; the
-mslearn placeholder is carried to T17).
+`resolve_url` is `urljoin`; an empty `sitemap_include` admits every sitemap. Re-propagated
+by T17 (spec 022eca4, FetchSitemap guidance, crawl.allium 1057 to 1066): a placeholder is
+filled before matching, `{section}` matching as `*` does and `{locale}` the scope's pinned
+locale, else any one of the scope's locale_codes, so with neither it admits nothing.
 """
+
+import dataclasses
 
 import pytest
 
@@ -26,7 +29,6 @@ from rovo._crawl.sitemaps import (
     well_known_sitemaps,
 )
 from rovo._mirror.model import CrawlScope
-from rovo._unfinished import NotInThisSlice
 
 SITE = "http://docs.example"
 MAP = f"{SITE}/maps/guide.xml"
@@ -239,8 +241,54 @@ def test_an_empty_sitemap_filter_admits_every_sitemap() -> None:
         assert sitemap_admitted("http://elsewhere.example/any/map.xml", profile, scope())
 
 
-def test_a_sitemap_filter_placeholder_stops_at_sitemap_admitted() -> None:
-    """The mslearn {section} and {locale} are unstated (FetchSitemap guidance): T17's."""
-    with pytest.raises(NotInThisSlice) as stopped:
-        sitemap_admitted(f"{SITE}/sitemapindex.xml", profiles.MSLEARN, scope())
-    assert stopped.value.rule == "sitemap_admitted"
+# mslearn's filter is "*/sitemapindex.xml" and "*/{section}_{locale}_*.xml".
+PLACEHOLDER_CASES = {
+    "index-whatever-the-locale": (None, f"{SITE}/sitemapindex.xml", True),
+    "a-listed-locale": (None, f"{SITE}/maps/graph_en-us_0.xml", True),
+    "another-listed-locale": (None, f"{SITE}/maps/graph_de-de_3.xml", True),
+    "an-unlisted-locale": (None, f"{SITE}/maps/graph_xx-xx_0.xml", False),
+    "a-well-known-name": (None, f"{SITE}/sitemap.xml", False),
+    "the-other-well-known-name": (None, f"{SITE}/sitemap_index.xml", False),
+    "the-pinned-locale": ("de-de", f"{SITE}/maps/graph_de-de_0.xml", True),
+    "a-listed-locale-not-pinned": ("de-de", f"{SITE}/maps/graph_en-us_0.xml", False),
+    "index-under-a-pinned-locale": ("de-de", f"{SITE}/sitemapindex.xml", True),
+}
+
+
+@pytest.mark.parametrize("name", list(PLACEHOLDER_CASES))
+def test_a_sitemap_filter_placeholder_is_filled(name: str) -> None:
+    """{section} matches as * does; {locale} is the pinned locale, else any listed code.
+
+    Re-propagated by T17 from T13's test_a_sitemap_filter_placeholder_stops_at_sitemap_
+    admitted (the maintainer's answer, item 1).
+    """
+    locale, url, admitted = PLACEHOLDER_CASES[name]
+    learn = dataclasses.replace(scope(), locale=locale, locale_codes=profiles.MSLEARN.locale_codes)
+    assert sitemap_admitted(url, profiles.MSLEARN, learn) is admitted
+
+
+def test_a_locale_placeholder_with_no_locale_admits_nothing() -> None:
+    """No pinned locale and no locale codes: a {locale} pattern admits nothing.
+
+    A pattern without the placeholder still admits what it matches.
+    """
+    assert scope().locale is None
+    assert scope().locale_codes == frozenset()
+    assert not sitemap_admitted(f"{SITE}/maps/graph_en-us_0.xml", profiles.MSLEARN, scope())
+    assert sitemap_admitted(f"{SITE}/sitemapindex.xml", profiles.MSLEARN, scope())
+
+
+def test_a_section_placeholder_matches_as_a_star_does() -> None:
+    """{section} matches what * matches in pattern_matches, a "/" included.
+
+    A veto-able reading of "matches as * does", recorded in the T17 ledger: fnmatch's *
+    crosses "/", so {section} does too.
+    """
+    rooted = dataclasses.replace(
+        profiles.MSLEARN, sitemap_include=(f"{SITE}/maps/{{section}}_{{locale}}.xml",)
+    )
+    pinned = dataclasses.replace(scope(), locale="en-us")
+    assert sitemap_admitted(f"{SITE}/maps/graph_en-us.xml", rooted, pinned)
+    assert sitemap_admitted(f"{SITE}/maps/graph/beta_en-us.xml", rooted, pinned)
+    assert sitemap_admitted(f"{SITE}/maps/_en-us.xml", rooted, pinned)
+    assert not sitemap_admitted(f"{SITE}/maps/graph_de-de.xml", rooted, pinned)

@@ -195,8 +195,17 @@ usable, the page gets no path: the mirror refuses it, nothing in the mirror chan
 frontier row is `failed`, and the report lists its URL under `failed_urls` with the
 error `no free path` and a `failed` change, so the sync exits 1 (`partial`). The
 200-character limit is the mirror's own parameter, not a `rovo.toml` key, and neither is
-the layout `pages/{host}/{path}`. A profile that maps a version label into the path is
-not yet supported: the sync stops with exit 1.
+the layout `pages/{host}/{path}`.
+
+Under a profile with a version parameter (`mslearn`'s `view`), a page whose URL carries
+that parameter gets `@` and its version label at the end of its last segment, after the
+rewrites above and before `.md`: the label is the value the profile maps it to, else the
+value itself, each character outside `[A-Za-z0-9._-]` replaced with `-`. So
+`/guide/foo?view=graph-rest-beta` gives `foo@beta.md`, the scope root with `?view=x`
+gives `index@x.md`, `/guide/README.md?view=x` gives `README@x.md` and `?view=` with no
+value gives `foo@.md`. No other path holds `@`, since every segment replaces it. A page
+without the parameter gets no label; its frontmatter's `version` is the profile's
+default version (`v1.0` under `mslearn`), and a labelled page's is its label.
 
 A page file is `---`, the frontmatter, `---`, then the Markdown body. The frontmatter's
 keys are sorted and an absent value is left out. Strings and lists are JSON-quoted
@@ -232,7 +241,7 @@ What Markdown cannot carry reaches the body as an island of HTML. A table with a
 list, paragraph or code block in a cell; a definition list whose definitions hold
 blocks; and math with no TeX annotation are kept as one HTML block each, sanitised:
 only `rowspan`, `colspan`, `id`, `scope`, `href`, `src`, `alt`, `title` and `open` are
-kept (a custom element also keeps `class` and its tab language), `javascript:`,
+kept (a custom element also keeps `class`, `data-tab`, `data-language` and `language`), `javascript:`,
 `vbscript:` and `data:` targets are dropped (an image's `data:image/` source is kept),
 no text is removed and the block holds no blank line. A `details` element keeps its
 `summary` as HTML and its content as Markdown between blank lines. An element with an
@@ -253,14 +262,16 @@ Conversion also makes these reductions on purpose: an `iframe`, `embed` or `obje
 becomes a one-line note keeping its label and URL (`interactive_omitted`); a link inside
 code becomes its text; line-number gutters leave code; form controls go and button
 labels stay; a layout table (`role="presentation"` or `"none"`) is unwrapped; and an
-image keeps only its source, alt text and title.
+image keeps only the attributes an island keeps.
 
 The quality flags say what the conversion lost. Each of the ten gates compares the body
 with what the extracted content holds, HTML islands parsed: `text_coverage`,
 `code_blocks`, `code_lang_rate`, `tables`, `table_cells`, `headings`, `links`, `images`,
 `list_items` and `tabs_expanded`; a failed gate is a flag of the same name and lowers
-`quality_score` by its weight. `whole_body_extracted` says the profile's selection
-matched nothing and the whole body was taken, `extracted_share` that the content holds
+`quality_score` by its weight. `extractor_fallback` says the profile's selection
+matched nothing and the fallback extractor, trafilatura, chose the main content (the
+page's `method` is `fallback`), `whole_body_extracted` that it found none either and the
+whole body was taken, `extracted_share` that the content holds
 under 30% of the page's words, `empty_content` that there is no text, `fidelity_loss`
 that an island did not reach the body. A page is low confidence (`low_confidence:
 true`) when a gate failed or it carries `whole_body_extracted`, `empty_content`,

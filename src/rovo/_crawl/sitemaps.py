@@ -7,6 +7,7 @@ module: every value read from the tree becomes a str or None first.
 """
 
 import re
+from collections.abc import Sequence
 from urllib.parse import urljoin
 
 from lxml import etree  # type: ignore[import-untyped]  # lxml ships no type information.
@@ -15,13 +16,13 @@ from rovo._convert.model import Profile
 from rovo._crawl.model import SitemapEntry, SiteResponse
 from rovo._mirror.model import CrawlScope
 from rovo._mirror.urls import pattern_matches
-from rovo._unfinished import NotInThisSlice
 
 _DOCUMENT_ROOTS = frozenset({"urlset", "sitemapindex"})
 _ENTRY_TAGS = frozenset({"url", "sitemap"})
 # An inline Markdown link: [text](destination) or [text](<destination> "title").
 _INLINE_LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-_PLACEHOLDERS = ("{section}", "{locale}")
+_SECTION = "{section}"
+_LOCALE = "{locale}"
 
 
 def well_known_sitemaps(origin: str) -> tuple[str, ...]:
@@ -72,15 +73,25 @@ def llms_txt_targets(response: SiteResponse, base: str) -> tuple[str, ...]:
 def sitemap_admitted(url: str, profile: Profile, scope: CrawlScope) -> bool:
     """The profile's sitemap_include filter: an empty filter admits every sitemap.
 
-    Filling {section} and {locale} with the scope's is unstated (CrawlScope has no
-    section), so a filter holding a placeholder stops the run (FetchSitemap guidance;
-    T13 follow-up question, item 4, carried to T17).
+    A placeholder is filled before matching (FetchSitemap guidance, crawl.allium 1057 to
+    1066): {section} matches as * does, and {locale} is the scope's pinned locale, else
+    any one of the scope's locale_codes; with neither, a {locale} pattern admits nothing.
     """
-    del scope  # Only the placeholders read it, and they stop first.
     patterns = profile.sitemap_include
-    if any(holder in pattern for pattern in patterns for holder in _PLACEHOLDERS):
-        raise NotInThisSlice(rule="sitemap_admitted")
-    return not patterns or any(pattern_matches(url, pattern) for pattern in patterns)
+    locales = (scope.locale,) if scope.locale is not None else sorted(scope.locale_codes)
+    return not patterns or any(
+        pattern_matches(url, filled)
+        for pattern in patterns
+        for filled in _filled(pattern, locales)
+    )
+
+
+def _filled(pattern: str, locales: Sequence[str]) -> tuple[str, ...]:
+    """The pattern with {section} read as * and {locale} as each of `locales`."""
+    pattern = pattern.replace(_SECTION, "*")
+    if _LOCALE not in pattern:
+        return (pattern,)
+    return tuple(pattern.replace(_LOCALE, locale) for locale in locales)
 
 
 def _read(response: SiteResponse) -> tuple[str | None, tuple[SitemapEntry, ...]]:

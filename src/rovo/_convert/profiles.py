@@ -1,6 +1,6 @@
-"""The profile catalogue (convert.allium 363 to 403) and convert's config block, as data.
+"""The profile catalogue (convert.allium 376 to 416) and convert's config block, as data.
 
-`content_selection` is opaque by specification (convert.allium 316); `SELECTIONS` says,
+`content_selection` is opaque by specification (convert.allium 329); `SELECTIONS` says,
 keyed by that string, which elements hold a platform's content, breadcrumbs, tab groups
 and callouts, as CSS selectors. No code branches on a host name
 (ProfilesAreTheOnlyPlatformKnowledge): a profile's selection is data.

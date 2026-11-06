@@ -240,6 +240,19 @@ witness record says `PASS`.
 | `AGENTS.md` | shared, own lines | the "today" sentence (lines 10 to 13) gains `rovo verify`; the required phrases stay in always-visible text |
 | `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: conversion quality and `rovo verify` |
 | `tickets/README.md`, `tickets/T17-quality-gates.md` | ticket | index row, graph, slice bullet, this ticket |
+| `tests/test_sitemaps.py` | shared, own lines (follow-up, re-propagated) | T13's `test_a_sitemap_filter_placeholder_stops_at_sitemap_admitted` becomes the placeholder-filling tests (ledger note, T13); the module docstring |
+| `tests/test_version_label.py` | new (follow-up) | the version label in a page path and `Page.version` (MovePage and StoreNewPage guidance at `022eca4`) |
+| `tests/test_slice_boundaries.py`, `tests/test_mirror.py`, `tests/test_convert.py`, `tests/test_regressions.py`, `tests/test_commands.py`, `tests/e2e/test_quality_sync.py` | shared, own lines (follow-up, re-propagated) | the placeholder and version-label stops become their behaviour (ledger notes, T13/T15 and T09); `entity-optional.Page.version` on a stored page; the whole-body cases become fallback cases and keep a page trafilatura finds nothing in; the union attributes; tallies sorted with no finding |
+| `tests/test_lifecycle_regressions.py`, `tests/test_assign_path_reserved_segments.py` | shared, comments only (follow-up) | `mirror.allium` citations moved by `022eca4` |
+| `tests/e2e/test_mslearn_sync.py` | new (follow-up) | an `mslearn` mirror synced through its sitemap index and filter, `api@beta.md`, and a page converted by the fallback extractor; no unit test is named `test_mslearn_sync.py` |
+| `tests/fixtures/sites/mslearn/` | new (follow-up) | Learn-shaped `guide/start.html`, `guide/api.html` and `guide/hidden.html`, and `guide/loose.html` the selection misses; robots.txt and the sitemaps are written by the test, which needs the port |
+| `pyproject.toml`, `uv.lock`, `docs/decisions/0005-dependency-policy.md` | shared, own lines (follow-up) | `trafilatura>=2.3.1,<3`, authorised by the maintainer for this follow-up, with decision 0005's note |
+| `src/rovo/_crawl/sitemaps.py`, `src/rovo/_mirror/urls.py`, `src/rovo/_convert/fidelity.py` | shared, own lines (follow-up) | `sitemap_admitted` fills the placeholders; `assign_path` appends `@` and the label, `version_label` follows StoreNewPage; `extract` runs trafilatura (imported in `_fallback` alone) before the whole body; the two `NotInThisSlice` stops go |
+| `src/rovo/_convert/model.py`, `src/rovo/_convert/profiles.py`, `src/rovo/_crawl/model.py`, `src/rovo/_crawl/run.py`, `src/rovo/_mirror/finalise.py`, `src/rovo/_mirror/indexes.py`, `src/rovo/_mirror/intake.py`, `src/rovo/_mirror/links.py`, `src/rovo/_mirror/model.py` | shared, comments only (follow-up) | specification citations moved by `022eca4` (`ai_tmp/T17/spec-answers/line-map.md`) |
+| `docs/reference/cli.md`, `docs/reference/mirror.md`, `docs/project/purpose-and-scope.md` | shared, own lines (follow-up) | `mslearn` no longer stops; the version label in a page path; the fallback extractor; the union attributes |
+| `docs/reference/configuration.md`, `docs/how-to/maintain-dependencies.md` | shared, own lines (follow-up) | the runtime dependencies gain trafilatura |
+| `docs/reference/testing.md`, `docs/project/repository-map.md` | shared, own lines (follow-up) | `tests/e2e/test_mslearn_sync.py`, the `mslearn` fixture site and `tests/test_version_label.py` |
+| `CHANGELOG.md` | shared, own lines (follow-up) | the T17 entry loses the `mslearn` stop; one Added entry for the follow-up and the trafilatura dependency |
 | `.allium-loop/T17-quality-gates.json`, `.allium-loop/T17-quality-gates.witness.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `pyproject.toml`, `uv.lock`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
@@ -248,7 +261,7 @@ witness record says `PASS`.
 the table names, `tests/e2e/conftest.py`, `tests/test_import_direction.py`,
 `tests/test_sitemaps.py`, `docs/reference/quality-gates.md` (its topic is `just check`'s
 gates, not conversion's), `docs/manifest.yml`, `docs/decisions/` and `docs/specs/` are read,
-not changed. A file not in this table that turns out to need a change is added to the
+not changed, except where a follow-up row above names one. A file not in this table that turns out to need a change is added to the
 table in the same change with its reason, or handed back if it is a decision record, a
 specification or a dependency.
 
@@ -567,62 +580,63 @@ verification output, each headed by its commit.
 
 ## Open points
 
-- **The T17 batched needs-user question: OPEN.** Items 1 and 2 are on this slice's path
-  and block `mslearn` end to end, not any owned obligation (Facts); item 3 blocks the
-  `extractor_fallback` flag in a run, not any owned obligation; items 4 and 5 block no
-  owned obligation. Each interim is built and tested.
-  1. **Carried from T13 (via T14, T15 and T16): how `mslearn`'s `sitemap_include`
-     placeholders are filled.** `mslearn`'s filter is `*/{section}_{locale}_*.xml`
-     (`convert.allium` 381), and `sitemap_admitted` (`crawl.allium` 1057 to 1065) says
-     how a `{section}` or `{locale}` placeholder is filled "is not yet specified (the
-     scope has no section)", so a run under it stops before the sitemap is read.
-     `CrawlScope` (`mirror.allium` 101 to 155) has a `locale` (pinned, possibly null) but
-     no section. What fills `{section}` (a new scope or profile field, the root URL's
-     first segment after the locale, or a wildcard), and what fills `{locale}` when the
-     scope pins none? Interim: the specification's stop
-     (`NotInThisSlice("sitemap_admitted")`, `sitemaps.py` 82), unchanged;
-     `tests/test_slice_boundaries.py::test_a_sitemap_filter_placeholder_stops` and
-     `tests/test_sitemaps.py::test_a_sitemap_filter_placeholder_stops_at_sitemap_admitted`
-     assert it.
-  2. **The version label's form in a page path.** `assign_path`'s guidance (`mirror.allium`
-     678, 686 to 689) appends "the version label the profile maps" to the relative path,
-     but "its form (separator and position) is not yet specified, so a page whose path
-     would carry a version label is not yet covered here". `mslearn` has
-     `version_default: "v1.0"` (`convert.allium` 387), so `version_label` is non-null for
-     every `mslearn` identity, not only one carrying `?view=`, and every `mslearn` page
-     stops. What is the form (for example `guide/page@v1.0.md`, `guide/page.v1.0.md` or
-     `v1.0/guide/page.md`), and does `version_default` put a label in the path of an
-     identity with no version parameter? Interim: the stop
-     (`NotInThisSlice("assign_path")`, `urls.py` 150), unchanged;
-     `entity-optional.Page.version` is tested on a constructed record.
-  3. **The fallback extractor.** `ExtractNeverEmptyHanded` (`convert.allium` 185) tries
-     "the profile's content selection, then the fallback extractor, then the whole
-     document body", and `extractor_fallback` is an incomplete flag (351); the extractor's
-     name is "a library choice" (23). No locked dependency is one: adding one needs
-     decision 0005's note and `just lock` (network, not authorised here), while a
-     heuristic on the locked stack (`beautifulsoup4`, `lxml`) would be the slice inventing
-     an extractor. Which: a named library (then a separate authorised dependency change),
-     a heuristic on the existing stack (and what it keeps), or no fallback step?
-     Interim: none; extraction goes from the profile's selection straight to the whole
-     body, so a run never produces `method: fallback` or `extractor_fallback`, and the
-     flag's effect on `low_confidence` is tested on unit inputs.
-  4. **Gate tallies with no finding** (found by propagate, tick 1). `ReportVerification`'s
-     guidance (`rovo.allium` 806 to 818) says the gate tallies over the mirror "are
-     printed with the findings"; are they printed when there is no finding? The
-     Acceptance criteria say a fresh `rovo verify` prints nothing on standard output, the
-     Facts that the tallies are one `<gate> <pages>` line per failed gate. Interim: the
-     tallies are always printed (Facts);
-     `tests/e2e/test_quality_sync.py::test_rovo_verify_reports_drift_offline` asserts
-     the fresh quality mirror's standard output is the one tally `code_lang_rate 1`.
-  5. **The attributes a custom element and an image keep in an island** (found by weed,
-     tick 1, `ai_tmp/T17/weed-1.md`). `DeclaredReductions` (`convert.allium` 214 to 216)
-     says custom elements keep only `id`, `class` and the tab language and images only
-     `src`, `alt`, `title` and `id`; `SanitizedMeansInert` (220 to 223) says an island
-     keeps `rowspan`, `colspan`, `id`, `scope`, `href`, `src`, `alt`, `title` and `open`
-     and drops every other attribute, `class` included. Which set holds inside an
-     island, and which attribute is "the tab language"? Interim: the union
-     (`fidelity.py`: a custom element keeps the sanitiser's attributes plus `class`,
-     `data-tab`, `data-language` and `language`).
+- **The T17 batched needs-user question: ANSWERED** (the maintainer, 2026-11-05;
+  specification commit `022eca4`, `ai_tmp/T17/spec-answers/answers.md`). The follow-up
+  conforms to each answer; every line number in this item is at `022eca4`.
+  1. **`mslearn`'s `sitemap_include` placeholders: ANSWERED, wildcards and the pinned
+     locale.** `{section}` matches as `*` does; `{locale}` is the scope's pinned locale,
+     else any one of the scope's `locale_codes`; with neither, a `{locale}` pattern admits
+     nothing (FetchSitemap guidance, `crawl.allium` 1057 to 1066). The stop
+     `NotInThisSlice("sitemap_admitted")` goes. Tests:
+     `tests/test_sitemaps.py::test_a_sitemap_filter_placeholder_is_filled`,
+     `::test_a_locale_placeholder_with_no_locale_admits_nothing`,
+     `::test_a_section_placeholder_matches_as_a_star_does`,
+     `tests/test_slice_boundaries.py::test_a_sitemap_filter_placeholder_is_filled` and
+     `tests/e2e/test_mslearn_sync.py`.
+  2. **The version label: ANSWERED, a suffix, only when explicit.** An identity carrying
+     the profile's `version_param` gets `@` and its label after the rewritten last
+     segment, before `.md` (`foo@beta.md`, `index@x.md`, `README@x.md`, `con-@x.md`); the
+     label is the `version_map` value, else the raw value, sanitised; `version_default` is
+     only the recorded `Page.version` of an identity without the parameter and never
+     touches the path (MovePage guidance, `mirror.allium` 678 to 702; StoreNewPage, 827
+     to 832). The stop `NotInThisSlice("assign_path")` goes. Tests:
+     `tests/test_version_label.py`,
+     `tests/test_slice_boundaries.py::test_a_versioned_path_carries_its_label`,
+     `tests/test_mirror.py::test_entity_optional_Page_version` and
+     `tests/e2e/test_mslearn_sync.py`.
+  3. **The fallback extractor: ANSWERED, trafilatura** (`trafilatura>=2.3.1,<3`, the
+     maintainer authorised the dependency for this follow-up). It runs only when the
+     profile's selection matches nothing, before the whole body; its output is method
+     `fallback`, flagged `extractor_fallback` (ExtractNeverEmptyHanded, `convert.allium`
+     186 to 198). Tests: `tests/test_convert.py::test_ExtractNeverEmptyHanded`, the
+     re-propagated extract, measure, QualityFlag and ProfilesAreTheOnlyPlatformKnowledge
+     tests, `tests/test_regressions.py::test_whole_body_extraction_strips_the_profiles_chrome`,
+     `tests/e2e/test_quality_sync.py::test_fail_on_low_quality_exits_4_for_a_touched_low_confidence_page`
+     and `tests/e2e/test_mslearn_sync.py`.
+  4. **Gate tallies with no finding: ANSWERED, always printed**, after the findings,
+     sorted by gate, never the exit code (ReportVerification guidance, `rovo.allium` 811
+     to 817). The interim already did this. Test:
+     `tests/test_commands.py::test_verify_tallies_are_always_printed_sorted_by_gate`.
+  5. **Island attributes: ANSWERED, the union.** A custom element keeps the sanitiser's
+     attributes plus `class`, `data-tab`, `data-language` and `language`; an image keeps
+     the sanitiser's attributes (`src`, `alt`, `title` and `id` among them) and no other
+     (DeclaredReductions and SanitizedMeansInert, `convert.allium` 214 to 235). The
+     interim already did this. Test:
+     `tests/test_convert.py::test_DeclaredReductions[custom-element-attributes]`.
+- **Veto-able choices the follow-up records, not OPEN.** Two are the spec author's: an
+  existing `.md` is stripped before the label goes on (`README.md?view=x` gives
+  `README@x.md`), and an empty raw value gives `foo@.md` (`Page.version` is then the empty
+  label). One is a reading of "matches as `*` does": `pattern_matches` is `fnmatch`, whose
+  `*` crosses `/`, so `{section}` does too.
+- **The T17 follow-up batched needs-user question: OPEN** (found by propagate, follow-up
+  tick 1). It blocks no owned obligation.
+  1. **Which spelling of the raw version value is sanitised.** An identity's query is
+     URL-encoded (`normalise_url`), so a raw value such as `a/b` or `é` is `a%2Fb` or
+     `%C3%A9` in the identity and `a/b` or `é` decoded, and sanitising gives `a-2Fb` or
+     `-C3-A9` from the first and `a-b` or `-` from the second (MovePage guidance,
+     `mirror.allium` 688 to 702, says "the raw value"; segments are never decoded). Which
+     is it? Interim: the decoded value, as `version_label` reads it today; no test pins
+     either spelling (`tests/test_version_label.py` uses values both spellings agree on).
 - **Carried, realised in this slice** (from `.allium-loop/T16-errors-report.json`): a
   non-heading `id` anchor no longer stops the sync; `UncarryableBecomesIsland` already
   specifies it as an island, so it needs no answer. Mark it ANSWERED-BY-SPEC in this

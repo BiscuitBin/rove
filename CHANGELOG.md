@@ -164,11 +164,18 @@ policy.
   section) stays an anchor, and a blank
   line in code inside an island survives as a character reference. A sync converts under
   the `devsite` and `mslearn` profiles' content, chrome, breadcrumb, tab and callout
-  selections, where any profile but `generic` stopped it; an
-  `mslearn` sync still stops at its sitemap filter's placeholders and its version label,
-  which the specification leaves open. `quality.fail_on_low_quality = true` makes a sync
+  selections, where any profile but `generic` stopped it. `quality.fail_on_low_quality = true` makes a sync
   with a low-confidence page or a broken link exit 4. The new `rovo verify OUT_DIR`
   checks the mirror on disk offline (missing, unmanaged and invalid page files, digest
   mismatches, quality drift, broken links and stale indexes; an unreadable page file is
   an invalid one), prints the findings and
   the gate tallies and exits 0, 4 with a finding, or 2 without a mirror.
+- An `mslearn` sync runs end to end, where it stopped with exit 1: its sitemap filter's
+  `{section}` matches as `*` does and `{locale}` is the pinned locale, else any of the
+  profile's locale codes; a page whose URL carries `?view=` is stored at
+  `<name>@<label>.md`, the label the profile maps the value to, else the value
+  sanitised, and a page without it keeps its plain path with `version` the profile's
+  default. A page the profile's selection does not match is extracted by the new runtime
+  dependency trafilatura (`trafilatura>=2.3.1,<3`, imported only then), flagged
+  `extractor_fallback` with method `fallback`, before the whole body is taken.
+  `rovo verify` prints the gate tallies whether or not there is a finding.

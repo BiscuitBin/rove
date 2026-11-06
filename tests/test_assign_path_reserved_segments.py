@@ -149,7 +149,7 @@ def test_segment_rewrites_happen_before_the_collision_check(tmp_path: Path) -> N
     """A rewritten path another page holds gains the identity's hash suffix.
 
     Since bad753c the rewritten directory -ROVO folds onto the held spelling -rovo
-    (assign_path guidance, mirror.allium 716 to 727), so only the suffix tells them apart.
+    (assign_path guidance, mirror.allium 729 to 740), so only the suffix tells them apart.
     """
     mirror = new_mirror(tmp_path)
     holder = stored(mirror, requested=f"{SITE}/guide/-rovo/page.html")

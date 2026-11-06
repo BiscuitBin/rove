@@ -994,10 +994,12 @@ def test_entity_optional_Page_sitemap_lastmod(tmp_path: Path) -> None:
 def test_entity_optional_Page_version(tmp_path: Path) -> None:
     """Verify optional field Page.version accepts null and non-null values.
 
-    T17: a page of a profile without versions has none. No run stores a versioned page
-    while assign_path stops for a version label (the T17 batched question, item 2), so
-    the labelled page is a constructed record: its frontmatter and the manifest carry
-    the label, and a page without one has no version key.
+    T17: a page of a profile without versions has none. Re-propagated by the T17
+    follow-up (spec 022eca4, StoreNewPage guidance, mirror.allium 827 to 832): StoreNewPage
+    stores a versioned page under mslearn, its version the label assign_path appends
+    (mapped through version_map, else the raw value sanitised) and its path labelled; a
+    page without the parameter has mslearn's version_default and no label. The frontmatter
+    and the manifest carry the version; a page without one has no version key.
     """
     plain = stored(new_mirror(tmp_path / "plain"))
     assert plain.version is None
@@ -1005,15 +1007,30 @@ def test_entity_optional_Page_version(tmp_path: Path) -> None:
     lines = frontmatter_lines((plain.mirror.out_dir / plain.path).read_text(encoding="utf-8"))
     assert not any(line.startswith("version:") for line in lines)
 
-    labelled = stored(new_mirror(tmp_path / "labelled"))
-    labelled.version = "v1.0"
-    published(labelled.mirror, labelled)
-    path = labelled.mirror.out_dir / labelled.path
-    assert 'version: "v1.0"' in frontmatter_lines(path.read_text(encoding="utf-8"))
-    save_mirror(labelled.mirror)
-    loaded = load_mirror(labelled.mirror.out_dir).page(labelled.identity)
+    learn = new_mirror(
+        tmp_path / "learn",
+        meaningful_query_params=profiles.MSLEARN.meaningful_query_params,
+        locale_codes=profiles.MSLEARN.locale_codes,
+    )
+    learn.profile = profiles.MSLEARN
+    beta = stored(learn, requested=f"{SEED}?view=graph-rest-beta")
+    assert beta.identity == f"{SEED}?view=graph-rest-beta"
+    assert beta.version == "beta"
+    assert beta.path == f"{ROOT}start@beta.md"
+    unmapped = stored(learn, requested=f"{SEED}?view=graph-rest-2.0")
+    assert unmapped.version == "graph-rest-2.0"
+    assert unmapped.path == f"{ROOT}start@graph-rest-2.0.md"
+    unversioned = stored(learn)
+    assert unversioned.version == profiles.MSLEARN.version_default
+    assert unversioned.path == f"{ROOT}start.md"
+
+    published(learn, beta)
+    path = learn.out_dir / beta.path
+    assert 'version: "beta"' in frontmatter_lines(path.read_text(encoding="utf-8"))
+    save_mirror(learn)
+    loaded = load_mirror(learn.out_dir).page(beta.identity)
     assert loaded is not None
-    assert loaded.version == "v1.0"
+    assert loaded.version == "beta"
 
 
 def test_entity_optional_Page_locale(tmp_path: Path) -> None:

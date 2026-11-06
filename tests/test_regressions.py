@@ -27,7 +27,9 @@ source id of an element normalisation replaces (a tab group, a tab panel, a call
 interactive embed, a layout table, a footnote section) stays an anchor; whole-body
 extraction strips the profile's chrome; an unreadable page file is invalid_page_file.
 T17 (weed 2, ai_tmp/T17/weed-2.md): the source id of a tab group's tab list and labels and
-of an unwrapped form wrapper (form, fieldset, label, button) stays an anchor.
+of an unwrapped form wrapper (form, fieldset, label, button) stays an anchor. T17
+follow-up (spec 022eca4): the whole-body case is reached when the fallback extractor finds
+nothing.
 """
 
 import json
@@ -1081,13 +1083,17 @@ def test_a_replaced_elements_source_id_stays_an_anchor(name: str) -> None:
         assert f'<a id="{anchor}"></a>' in content.body, (anchor, content.body)
 
 
-def test_whole_body_extraction_strips_the_profiles_chrome() -> None:
+def test_whole_body_extraction_strips_the_profiles_chrome(monkeypatch: pytest.MonkeyPatch) -> None:
     """Weed T17-1, convert.allium ExtractNeverEmptyHanded: the profile's chrome goes.
 
-    When the devsite content selection matches nothing, the whole body stands in for the
-    content and devsite's chrome (header, book navigation, footer) is stripped from it;
-    the article's text stays.
+    When the devsite content selection matches nothing and the fallback extractor finds no
+    main content, the whole body stands in for the content and devsite's chrome (header,
+    book navigation, footer) is stripped from it; the article's text stays. Re-propagated
+    by the T17 follow-up (spec 022eca4): the fallback extractor, trafilatura, runs before
+    the whole body, so it is made to find nothing here (the extract call is the seam);
+    left alone, it extracts this page (tests/test_convert.py::test_ExtractNeverEmptyHanded).
     """
+    monkeypatch.setattr("trafilatura.extract", lambda *_args, **_kwargs: None)
     unselected = TABS_PAGE.replace('class="devsite-article-body"', 'class="article-body"')
     extracted = extract(unselected, SEED, profiles.DEVSITE)
     assert extracted.method is ExtractionMethod.whole_body

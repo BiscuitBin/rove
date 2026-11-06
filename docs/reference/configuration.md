@@ -19,7 +19,7 @@ The project manifest, owned by T00 and frozen while the wave-1 lanes run.
 | Table | What it sets |
 | --- | --- |
 | `[build-system]` | hatchling, pinned exactly, as the build backend. |
-| `[project]` | Name `rovo`, the static `version`, `readme = "README.md"`, `requires-python = ">=3.13"`, the classifiers (including the upload guard), and the runtime dependencies `typer>=0.27.3,<0.28`, `httpx>=0.28.1,<0.29`, `beautifulsoup4>=4.15.0,<5`, `lxml>=6.1.3,<7`, `markdownify>=1.2.3,<2` and `protego>=0.7.0,<0.8`, each with its [decision 0005](../decisions/0005-dependency-policy.md) note. No `license` field ([decision 0006](../decisions/0006-licence-deferred.md)). |
+| `[project]` | Name `rovo`, the static `version`, `readme = "README.md"`, `requires-python = ">=3.13"`, the classifiers (including the upload guard), and the runtime dependencies `typer>=0.27.3,<0.28`, `httpx>=0.28.1,<0.29`, `beautifulsoup4>=4.15.0,<5`, `lxml>=6.1.3,<7`, `markdownify>=1.2.3,<2`, `protego>=0.7.0,<0.8` and `trafilatura>=2.3.1,<3`, each with its [decision 0005](../decisions/0005-dependency-policy.md) note. No `license` field ([decision 0006](../decisions/0006-licence-deferred.md)). |
 | `[project.optional-dependencies]` | `browser = ["playwright>=1.64.1,<2"]`: the browser tier's Python package, never a browser. |
 | `[project.scripts]` | The console script `rovo = "rovo.cli:app"`. |
 | `[project.urls]` | `Repository`, the GitHub repository `BiscuitBin/rove`. |

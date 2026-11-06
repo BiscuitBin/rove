@@ -58,7 +58,7 @@ Create a mirror: write rovo.toml and an empty manifest. Nothing is fetched.
 | --- | --- |
 | `SITE_URL` | The documentation page the mirror starts from: an `http` or `https` URL. |
 | `OUT_DIR` | The directory the mirror is made in; created when absent. |
-| `--profile NAME` | A catalogue profile (`generic`, `mslearn`, `devsite`). By default the URL's host picks one, else `generic`. `generic` takes the content from `main`, else `article`; `devsite` from the DevSite article body, with its breadcrumbs, its `devsite-selector` tab groups and its note, caution and warning callouts; `mslearn` from the Learn article content, with its `tabGroup` tab groups and its alert callouts. A sync under `mslearn` stops: its sitemap filter's `{section}` and `{locale}` placeholders and the version label in a page path are not yet specified. |
+| `--profile NAME` | A catalogue profile (`generic`, `mslearn`, `devsite`). By default the URL's host picks one, else `generic`. `generic` takes the content from `main`, else `article`; `devsite` from the DevSite article body, with its breadcrumbs, its `devsite-selector` tab groups and its note, caution and warning callouts; `mslearn` from the Learn article content, with its `tabGroup` tab groups and its alert callouts. Under `mslearn` a sitemap is read only when its URL matches the profile's filter, `{section}` matching as `*` does and `{locale}` the scope's pinned locale, else any of the profile's locale codes, and a page whose URL carries `?view=` is stored with `@` and its version label before `.md` (the [mirror reference](mirror.md) has the path). A page none of these selections matches is taken by the fallback extractor (trafilatura), else whole. |
 
 `rovo init` writes `OUT_DIR/rovo.toml`, every key with its default (the sections
 `site`, `scope`, `conversion`, `crawl`, `quality`, `mirror` and `unblocking`), and an
@@ -304,8 +304,7 @@ implements (a block, a
 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-profile whose sitemap filter holds a `{section}` or `{locale}` placeholder, a page whose
-path would carry a version label, a login form), the sync stops, names the rule on
+login form), the sync stops, names the rule on
 standard error, exits 1 and leaves the previous report in place.
 
 ## `rovo verify`

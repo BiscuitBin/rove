@@ -2,12 +2,13 @@
 
 Two committed fixture sites are served on 127.0.0.1 by `serve_site`: `quality`, synced
 under the generic profile (a page of islands, a page linking into it, a lossy page, a page
-with no main), and `devsite`, synced under the devsite profile (a page of tab groups and a
-callout around DevSite chrome). `rovo init` and `rovo verify` run through CliRunner; each
-sync runs `rovo._commands.sync` in process over the real HttpxFetcher on a FixedClock,
-which never sleeps. robots.txt declares no Crawl-delay and no sitemap, and there is no
-llms.txt. A page path strips the scope prefix /guide/, so <base>guide/x.html is
-pages/<host>/x.md. Not `test_verify.py` or `test_convert.py`, which the unit suite names.
+with no main, which the fallback extractor takes), and `devsite`, synced under the devsite
+profile (a page of tab groups and a callout around DevSite chrome). `rovo init` and `rovo
+verify` run through CliRunner; each sync runs `rovo._commands.sync` in process over the
+real HttpxFetcher on a FixedClock, which never sleeps. robots.txt declares no Crawl-delay
+and no sitemap, and there is no llms.txt. A page path strips the scope prefix /guide/, so
+<base>guide/x.html is pages/<host>/x.md. Not `test_verify.py` or `test_convert.py`, which
+the unit suite names.
 """
 
 import json
@@ -136,7 +137,12 @@ def test_a_lossy_page_is_flagged_and_reported(serve_site: SiteServer, tmp_path: 
 def test_fail_on_low_quality_exits_4_for_a_touched_low_confidence_page(
     serve_site: SiteServer, tmp_path: Path
 ) -> None:
-    """A page extracted whole is low confidence; under fail_on_low_quality the sync exits 4."""
+    """A page the fallback extractor took is low confidence; fail_on_low_quality exits 4.
+
+    Re-propagated by the T17 follow-up (spec 022eca4): plain.html has no main, so the
+    fallback extractor (trafilatura) takes it before the whole body; extractor_fallback is
+    an incomplete flag as whole_body_extracted was.
+    """
     base, out = quality_site(serve_site, tmp_path)
     plain = f"{page_root(base)}plain.md"
 
@@ -148,7 +154,8 @@ def test_fail_on_low_quality_exits_4_for_a_touched_low_confidence_page(
         return row
 
     first = plain_row()
-    assert "whole_body_extracted" in flags_of(first)
+    assert "extractor_fallback" in flags_of(first)
+    assert "whole_body_extracted" not in flags_of(first)
     assert first["touched_this_run"] is True
     assert load(out / "crawl-report.json")["exit_code"] == "ok"
 
@@ -156,7 +163,7 @@ def test_fail_on_low_quality_exits_4_for_a_touched_low_confidence_page(
     assert ExitCode.quality.number == QUALITY
     assert load(out / "crawl-report.json")["exit_code"] == "quality"
     second = plain_row()
-    assert "whole_body_extracted" in flags_of(second)
+    assert "extractor_fallback" in flags_of(second)
     assert second["touched_this_run"] is True
 
 

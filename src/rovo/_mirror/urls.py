@@ -6,8 +6,6 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from rovo._unfinished import NotInThisSlice
-
 if TYPE_CHECKING:
     from rovo._convert.model import Profile
     from rovo._mirror.model import Mirror, Page
@@ -119,35 +117,55 @@ def digest(text: str) -> str:
 
 
 def version_label(profile: "Profile", identity: str) -> str | None:
-    """The label the profile maps the identity's version parameter to; null without one."""
+    """Page.version for the identity (StoreNewPage guidance, mirror.allium 827 to 832).
+
+    Null when the profile has no version_param; the path's label (`_path_label`) when the
+    identity carries it; otherwise the profile's version_default.
+    """
     if profile.version_param is None:
         return None
-    raw = dict(parse_qsl(urlsplit(identity).query)).get(profile.version_param)
+    label = _path_label(profile, identity)
+    return profile.version_default if label is None else label
+
+
+def _path_label(profile: "Profile", identity: str) -> str | None:
+    """The label assign_path appends (MovePage guidance, mirror.allium 688 to 702).
+
+    Only an identity carrying the profile's version_param has one: the value mapped
+    through version_map, else the raw value, either one with every character outside
+    [A-Za-z0-9._-] replaced with "-". The raw value is read decoded, as parse_qsl gives
+    it (the T17 follow-up batched question).
+    """
+    if profile.version_param is None:
+        return None
+    query = dict(parse_qsl(urlsplit(identity).query, keep_blank_values=True))
+    raw = query.get(profile.version_param)
+    if raw is None:
+        return None
     mapped = {mapping.raw: mapping.label for mapping in profile.version_map}
-    return mapped.get(raw, profile.version_default) if raw is not None else profile.version_default
+    return _SEGMENT_UNSAFE.sub("-", mapped.get(raw, raw))
 
 
 def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 659 to 742).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 659 to 755).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or
     a last segment that drop leaves empty `index`, keeps [A-Za-z0-9._-] in each segment
     and replaces the rest with "-" (a percent escape included: the path is never
     decoded), drops empty segments, applies the segment rewrites (`_rewrite_segment`),
-    and appends ".md" unless the last segment ends in ".md" exactly. A path another page
+    appends "@" and the version label when the identity carries one (`_path_label`; a
+    final ".md" goes first), and appends ".md" unless the last segment ends in ".md"
+    exactly. A path another page
     holds (ignoring case) or one past max_path_chars, which counts the whole path,
     becomes the stem cut to max_path_chars - 10, "-" and the first collision_hash_chars
     hex of the identity's digest; when that path is unusable too, the suffix is the full
     digest, the stem cut to fit; a cut never shortens pages/<host>/. When no option is
     usable, None (RefuseUnplaceableCandidate). `mover` is the page MovePage gives the
-    identity: it is not another page, so the path it holds is usable. A version label's
-    form is not yet specified, so a page whose path would carry one is NotInThisSlice.
+    identity: it is not another page, so the path it holds is usable.
     """
     from rovo._mirror.model import CONFIG  # noqa: PLC0415  The model imports this module.
 
-    if version_label(mirror.profile, identity) is not None:
-        raise NotInThisSlice(rule="assign_path")
     root = page_root(identity)
     plain = _fold_directories(mirror, root, _relative_path(mirror, identity))
     stem = plain.removesuffix(_PAGE_EXTENSION)
@@ -217,13 +235,17 @@ def _relative_path(mirror: "Mirror", identity: str) -> str:
         _rewrite_segment(name, directory=index < last_index) for index, name in enumerate(names)
     ]
     last = segments[-1]
+    label = _path_label(mirror.profile, identity)
+    if label is not None:
+        last = f"{last.removesuffix(_PAGE_EXTENSION)}@{label}{_PAGE_EXTENSION}"
+        segments[-1] = last
     if not last.endswith(_PAGE_EXTENSION):
         segments[-1] = f"{last}{_PAGE_EXTENSION}"
     return "/".join(segments)
 
 
 def _fold_directories(mirror: "Mirror", root: str, relative: str) -> str:
-    """`root` and `relative`, each directory spelt as a held path spells it (715 to 726).
+    """`root` and `relative`, each directory spelt as a held path spells it (728 to 739).
 
     Level by level under the parent already folded, a directory segment takes, ignoring
     case, the spelling of the held path (every page's, its own included) that sorts first
@@ -240,7 +262,7 @@ def _fold_directories(mirror: "Mirror", root: str, relative: str) -> str:
 
 
 def _rewrite_segment(segment: str, *, directory: bool) -> str:
-    """The segment rewrites inside pages/<host>/ (MovePage guidance, 690 to 707).
+    """The segment rewrites inside pages/<host>/ (MovePage guidance, 703 to 720).
 
     Each reads the sanitised segment alone and they apply together, agreeing where they
     overlap: a trailing run of "." and a leading "." become "-"; a directory named,
