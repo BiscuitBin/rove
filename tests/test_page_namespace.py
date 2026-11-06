@@ -11,7 +11,7 @@ the collision step keeps their paths apart. The scope root is pages/<host>/index
 a last segment the dropped .html, .htm or .aspx suffix leaves empty is named index as
 for a directory URL (662 to 665). The identity comment (112 to 117) drops a
 host's trailing ".", so example.com. and example.com are one identity. The template is
-fixed at "pages/{host}/{path}" and is not a configuration key (mirror.allium 481 to 486;
+fixed at "pages/{host}/{path}" and is not a configuration key (mirror.allium 482 to 487;
 rovo.allium 65 to 69): a layer that sets path_template, or max_path_chars, names an
 unknown key.
 """
@@ -60,7 +60,7 @@ def test_assign_path_puts_a_page_under_its_host_segment(
 
 
 def test_ipv6_host_segment_reads_the_bracketed_form(tmp_path: Path) -> None:
-    """[::1]:8080 gives the host segment ---1-_8080 (mirror.allium 56 and 660 to 661).
+    """[::1]:8080 gives the host segment ---1-_8080 (mirror.allium 56 and 661 to 662).
 
     The maintainer's decision at 1be7354: the rule reads an IPv6 host in its bracketed
     form as written, so each of "[", ":", ":" and "]" becomes "-", then "_8080" follows.
@@ -84,7 +84,7 @@ def test_ipv6_host_segment_reads_the_bracketed_form(tmp_path: Path) -> None:
 def test_a_last_segment_left_empty_by_the_dropped_suffix_is_named_index(
     tmp_path: Path, prefix: str, url_path: str, expected: str
 ) -> None:
-    """A bare .html, .htm or .aspx last segment is named index (mirror.allium 669 to 672).
+    """A bare .html, .htm or .aspx last segment is named index (mirror.allium 670 to 673).
 
     The maintainer's decision at 1be7354: under the prefix "/", /guide/.html gives
     pages/<host>/guide/index.md and /.html gives pages/<host>/index.md, as for a

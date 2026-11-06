@@ -1,4 +1,4 @@
-"""Link resolution and rewriting (mirror.allium 1073 to 1241): the finalise pass's links.
+"""Link resolution and rewriting (mirror.allium 1096 to 1265): the finalise pass's links.
 
 Every finalisation drops the written pages' links and resolves each destination of each
 converted body against the whole mirror; exactly one of the four LinkTo* rules fires per
@@ -28,7 +28,7 @@ from rovo._mirror.model import (
     PassStatus,
 )
 
-# Targets that are left as written and never become links (mirror.allium 1089 to 1093).
+# Targets that are left as written and never become links (mirror.allium 1112 to 1116).
 _NOT_LINKS = frozenset({"mailto", "tel", "javascript", "data"})
 _FRONTMATTER = "---\n"
 _FRONTMATTER_END = "\n---\n"

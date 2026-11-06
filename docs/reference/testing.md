@@ -74,8 +74,9 @@ The tests for the Allium specifications are named after the obligation they disc
 `just plan-spec <module>` lists each obligation's id, such as `rule-success.StoreNewPage`,
 and its test is `test_rule_success_StoreNewPage`, one test or one parametrised case per
 obligation, in `tests/test_convert.py`, `test_mirror.py`, `test_crawl.py`,
-`test_config.py`, `test_report.py` and `test_commands.py` (ruff's N802 is off for tests
-so the CamelCase rule name survives). A `config` default is never restated: a test reads
+`test_config.py`, `test_report.py`, `test_commands.py` and, for the targeted run,
+`test_targeted_run.py` (ruff's N802 is off for tests so the CamelCase rule name
+survives). A `config` default is never restated: a test reads
 it from the committed `.allium` file through `tests/spec_values.py`. The loop ledger
 under `.allium-loop/` pins each generated test file's hash; a later change adds tests
 beside them rather than editing them. `tests/test_regressions.py` pins each divergence a

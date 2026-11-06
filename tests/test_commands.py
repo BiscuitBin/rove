@@ -906,29 +906,33 @@ def requesting(  # noqa: PLR0913  One keyword per sync option a test varies.
     )
 
 
-def target_stops(
+def target_runs(
     out_dir: Path,
-    capsys: pytest.CaptureFixture[str],
     *,
     urls: tuple[str, ...] = (),
     paths: tuple[str, ...] = (),
-) -> None:
-    """A sync naming targets that pass the refusals stops at PrepareRun's targeted raise.
+    expected: tuple[str, ...] = (),
+) -> FakeFetcher:
+    """A sync naming targets that pass the refusals runs the targeted run (9a253a4).
 
-    The ticket (Facts, "The options"): the targeted run is a later slice's, so the sync
-    stops, exits 1, makes no request and leaves the previous report and runs.json as they
-    were. Re-propagated by T16 tick 4 (implement tick 3): _commands.sync has caught
-    NotInThisSlice and exited partial since T09, so the stop is its exit and stderr.
+    It exits ok as run 2, requests robots.txt and the `expected` targets alone (no
+    discovery walk), and its report lists the targets and records the options as
+    targeted; runs.json gains the run. Re-propagated by the T16 follow-up (origin T16
+    tick 4, target_stops: the targeted run was a later slice's, so the sync stopped at
+    PrepareRun's raise with nothing requested or written).
     """
-    previous = report_path(out_dir).read_bytes()
-    runs = (out_dir / ".rovo" / "runs.json").read_bytes()
     fetcher = site()
-    capsys.readouterr()
-    assert requesting(out_dir, fetcher, urls=urls, paths=paths) is ExitCode.partial
-    assert "sync stopped: PrepareRun" in capsys.readouterr().err
-    assert fetcher.requests == []
-    assert report_path(out_dir).read_bytes() == previous
-    assert (out_dir / ".rovo" / "runs.json").read_bytes() == runs
+    assert requesting(out_dir, fetcher, urls=urls, paths=paths) is ExitCode.ok
+    assert sorted(fetcher.requests) == sorted([ROBOTS, *expected])
+    data = report(out_dir)
+    assert (data["report_status"], data["run_id"]) == ("finished", len(["first", "targeted"]))
+    assert data["targets"] == sorted(expected)
+    options = data["options"]
+    assert isinstance(options, dict)
+    assert options["targeted"] is True
+    runs = json.loads((out_dir / ".rovo" / "runs.json").read_text(encoding="utf-8"))["runs"]
+    assert [row["id"] for row in runs] == [1, len(["first", "targeted"])]
+    return fetcher
 
 
 def root_changed(out_dir: Path) -> Path:
@@ -1183,19 +1187,52 @@ def test_rule_failure_RefuseOffHostTarget_3(tmp_path: Path) -> None:
     assert refused(out_dir)["refusal_reason"] == CHANGED_ROOT
 
 
-def test_rule_failure_RefuseOffHostTarget_4(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_rule_failure_RefuseOffHostTarget_4(tmp_path: Path) -> None:
     """Verify rule RefuseOffHostTarget is rejected when requires clause fails.
 
     requires: some named URL is not http(s) on an allowed host: every URL here is, one of
     them outside the path prefixes, which a named URL waives. The sync is not refused:
-    StartSync hands the targets to the run and PrepareRun's targeted branch stops it (a
-    later slice's, the ticket's scope note), no request made and the previous report kept.
-    Re-propagated by T16 tick 3 (weed tick 2): the targets were dropped and a full sync ran.
+    StartSync hands the targets to the run, which fetches them alone. Re-propagated by
+    T16 tick 3 (weed tick 2: the targets were dropped) and by the T16 follow-up (origin
+    T16 tick 4: the targeted run stopped at PrepareRun; 9a253a4 runs it).
     """
     out_dir = first_synced(tmp_path / "out")
-    target_stops(out_dir, capsys, urls=(SEED, ON_HOST_OUTSIDE))
+    target_runs(out_dir, urls=(SEED, ON_HOST_OUTSIDE), expected=(SEED, ON_HOST_OUTSIDE))
+
+
+def test_a_url_on_the_first_seeds_host_is_allowed_when_allowed_hosts_is_empty(
+    tmp_path: Path,
+) -> None:
+    """RefuseOffHostTarget and StartSync read the resolved scope's hosts (9a253a4).
+
+    rovo.toml leaves allowed_hosts out, so the scope's allowed hosts are the first
+    seed's (scope_of): a --url on that host is not refused and runs the targeted run; a
+    --url on another host is still refused "invalid or off-host target", no request made.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    drop_key(out_dir, "allowed_hosts")
+    assert resolve_config(out_dir).allowed_hosts == frozenset()
+    fetcher = site()
+    assert requesting(out_dir, fetcher, urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == OFF_HOST
+    assert fetcher.requests == []
+    target_runs(out_dir, urls=(SEED,), expected=(SEED,))
+
+
+def test_a_path_named_with_allowed_hosts_empty_is_not_refused_as_off_host(
+    tmp_path: Path,
+) -> None:
+    """The later guards read the same resolved hosts: a --url and a --path together.
+
+    With allowed_hosts left out, a --url on the first seed's host passes
+    RefuseOffHostTarget, and RefuseUnknownTargetPath then judges the --path alone: an
+    unknown path is refused "unknown target path", not "invalid or off-host target".
+    """
+    out_dir = first_synced(tmp_path / "out")
+    drop_key(out_dir, "allowed_hosts")
+    code = requesting(out_dir, site(), urls=(SEED,), paths=(MISSING_PATH,))
+    assert code is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == UNKNOWN_PATH
 
 
 def test_rule_success_RefuseUnknownTargetPath(tmp_path: Path) -> None:
@@ -1264,17 +1301,16 @@ def test_rule_failure_RefuseUnknownTargetPath_4(tmp_path: Path) -> None:
     assert refused(out_dir)["refusal_reason"] == OFF_HOST
 
 
-def test_rule_failure_RefuseUnknownTargetPath_5(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_rule_failure_RefuseUnknownTargetPath_5(tmp_path: Path) -> None:
     """Verify rule RefuseUnknownTargetPath is rejected when requires clause fails.
 
     requires: some named path is not a written page's path: START_PATH is one, so the
-    sync is not refused; PrepareRun's targeted branch stops it, the previous report kept.
-    Re-propagated by T16 tick 3 (weed tick 2): the targets were dropped and a full sync ran.
+    sync is not refused; the targeted run fetches the page that holds it, the seed.
+    Re-propagated by T16 tick 3 (weed tick 2: the targets were dropped) and by the T16
+    follow-up (origin T16 tick 4: the targeted run stopped at PrepareRun; 9a253a4 runs it).
     """
     out_dir = first_synced(tmp_path / "out")
-    target_stops(out_dir, capsys, paths=(START_PATH,))
+    target_runs(out_dir, paths=(START_PATH,), expected=(SEED,))
 
 
 def test_rule_failure_StartSync_4(tmp_path: Path) -> None:
@@ -1746,7 +1782,9 @@ def test_ProgressOnRequest_the_sink_gets_start_page_backoff_and_one_done_last(
 
     The seed answers 503 once, then the page: the sink receives start first, a
     host_backoff naming the host with its until, a page event per settled row, and
-    exactly one done, last. Nothing is printed: the sink is the caller's.
+    exactly one done, last. url is null on every event but page, which names the row's
+    URL (9a253a4). Nothing is printed: the sink is the caller's. Re-propagated by the T16
+    follow-up (origin T16): the event gains url.
     """
     out_dir = initialised(tmp_path / "out")
     fetcher = ScriptedFetcher(
@@ -1773,10 +1811,66 @@ def test_ProgressOnRequest_the_sink_gets_start_page_backoff_and_one_done_last(
     assert backoffs
     assert {event.host for event in backoffs} == {"docs.example"}
     assert all(event.until is not None for event in backoffs)
+    assert [event.url for event in events if event.event == "page"] == [SEED]
+    assert all(event.url is None for event in events if event.event != "page")
     assert capsys.readouterr().out == ""
     options = report(out_dir)["options"]
     assert isinstance(options, dict)
     assert options["json_events"] is True
+
+
+def test_rule_success_AnnounceStart(tmp_path: Path) -> None:
+    """Verify rule AnnounceStart succeeds when all preconditions are met.
+
+    When the run is created: exactly one start event, the first, raised before any
+    request, its host, until and url null.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = site()
+    seen: list[tuple[ProgressEvent, int]] = []
+
+    def sink(event: ProgressEvent) -> None:
+        seen.append((event, len(fetcher.requests)))
+
+    code = _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        json_events=True,
+        progress=sink,
+    )
+    assert code is ExitCode.ok
+    start = ProgressEvent(event="start", host=None, until=None, url=None)
+    assert seen[0] == (start, 0)
+    assert [event for event, _ in seen].count(start) == 1
+    assert [event.event for event, _ in seen].count("start") == 1
+
+
+def test_rule_success_AnnouncePage(tmp_path: Path) -> None:
+    """Verify rule AnnouncePage succeeds when all preconditions are met.
+
+    When a LadderWalk settles: one page event per settled row, naming the walk's host and
+    the row's URL, until null. The seed links OTHER, which answers 404: two rows settle,
+    so two page events, in fetch order; robots.txt, sitemaps and llms.txt raise none.
+    """
+    out_dir = initialised(tmp_path / "out")
+    fetcher = FakeFetcher({SEED: html_response(SEED, linking("other.html"))})
+    events: list[ProgressEvent] = []
+    code = _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=never_installed,
+        json_events=True,
+        progress=events.append,
+    )
+    assert code is ExitCode.ok
+    assert OTHER in fetcher.requests
+    assert [event for event in events if event.event == "page"] == [
+        ProgressEvent(event="page", host="docs.example", until=None, url=SEED),
+        ProgressEvent(event="page", host="docs.example", until=None, url=OTHER),
+    ]
 
 
 def test_ProgressOnRequest_no_sink_prints_nothing_and_a_dry_run_still_lists(

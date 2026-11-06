@@ -264,8 +264,9 @@ def test_sync_passes_its_options_to_the_command(
     assert strings(call["paths"]) == ("pages/127.0.0.1_9/start.md",)
     assert strings(call["overrides"]) == ("scope.max_depth=3", "mirror.prune=true")
     assert callable(call["progress"])
+    # Re-propagated by the T16 follow-up (origin T16): each line gains url (9a253a4).
     assert [json.loads(line) for line in result.stdout.splitlines()] == [
-        {"event": "done", "host": None, "until": None}
+        {"event": "done", "host": None, "until": None, "url": None}
     ]
 
 

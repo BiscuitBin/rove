@@ -21,7 +21,7 @@ from rovo._convert.profiles import GENERIC, profile_for
 from rovo._exit import ExitCode
 from rovo._mirror.finalise import finalise
 from rovo._mirror.indexes import index_pass, unreadable_page_file
-from rovo._mirror.model import IndexesWritten, Mirror, Operator, PassKind, Tier
+from rovo._mirror.model import CrawlScope, IndexesWritten, Mirror, Operator, PassKind, Tier
 from rovo._mirror.state import (
     ManifestError,
     load_mirror,
@@ -35,6 +35,7 @@ from rovo._unfinished import NotInThisSlice
 
 if TYPE_CHECKING:
     from rovo._config import Configuration, SyncOptions
+    from rovo._convert.model import Profile
     from rovo._crawl.fetch import Fetcher
     from rovo._crawl.model import ProgressEvent, Run
     from rovo._crawl.pace import Timer
@@ -150,10 +151,14 @@ def _start_problem(
     bad_config = "invalid configuration"
     tier_missing = "configured tier is not installed"
     robots = "robots = ignore is only for an owner-testing run"
+    # The resolved scope's hosts (scope_of); without a seed the refusal before it applies.
+    allowed = (
+        _scope(settings).allowed_hosts
+        if settings.valid and settings.has_seeds
+        else frozenset[str]()
+    )
     off_host = [
-        url
-        for url in options.urls
-        if not is_http_url(url) or hostname_of(url) not in settings.allowed_hosts
+        url for url in options.urls if not is_http_url(url) or hostname_of(url) not in allowed
     ]
     unknown = [path for path in options.paths if path not in mirror.page_paths]
     problems = (
@@ -195,6 +200,19 @@ def _start_problem(
         ((reason, detail) for failed, reason, detail in problems if failed),
         None,
     )
+
+
+def _profile(settings: "Configuration") -> "Profile":
+    """rovo.allium's profile_for the root URL, else the first start URL."""
+    seed = settings.root_url or settings.start_urls[0]
+    return profile_for(seed, settings.profile_name) or GENERIC
+
+
+def _scope(settings: "Configuration") -> CrawlScope:
+    """rovo.allium's scope_of the settings and their profile: the hosts StartSync tests."""
+    from rovo._config import scope_of  # noqa: PLC0415  Only a sync loads the configuration.
+
+    return scope_of(settings, _profile(settings))
 
 
 def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progress sink.
@@ -242,8 +260,7 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
     )
 
     operator = Operator()
-    seed = settings.root_url or settings.start_urls[0]
-    profile = profile_for(seed, settings.profile_name) or GENERIC
+    profile = _profile(settings)
     scope = scope_of(settings, profile)
     run_id = next_run_id(mirror.out_dir)
     kind = RunKind.update if mirror.is_populated else RunKind.initial
@@ -305,14 +322,14 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         saved = _after_run(report, result, clock)
     except NotInThisSlice:
         raise
-    except (KeyboardInterrupt, Exception) as error:  # Interim (T16 Open points items 4, 5).
+    except (KeyboardInterrupt, Exception) as error:  # RecordCrashAfterRun's guidance.
         if not record_crash_after_run(mirror, result.run, report, _error_text(error)):
             raise
         if not saved:
             record_run(result.run)
     code = rank_and_write_report(report, result.run, clock)
     if code is not None and progress is not None:
-        progress(ProgressEvent(event="done", host=None, until=None))
+        progress(ProgressEvent(event="done", host=None, until=None, url=None))
     return ExitCode.partial if code is None else code
 
 

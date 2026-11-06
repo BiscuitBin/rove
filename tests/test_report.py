@@ -1117,23 +1117,36 @@ def test_rule_failure_TallySkippedUrl_1(tmp_path: Path) -> None:
 def test_rule_success_AnnounceBackoff(tmp_path: Path) -> None:
     """Verify rule AnnounceBackoff succeeds when all preconditions are met.
 
-    HostBackedOff becomes the host_backoff progress event naming the host and its until.
+    HostBackedOff becomes the host_backoff progress event naming the host and its until,
+    its url null (9a253a4). Re-propagated by the T16 follow-up (origin T16): url.
     """
     run = crawled(tmp_path).run
     host = run.host(HOST)
     assert host is not None
     event = announce_backoff(HostBackedOff(host=host, until=LATER))
-    assert event == ProgressEvent(event="host_backoff", host=HOST, until=LATER)
+    assert event == ProgressEvent(event="host_backoff", host=HOST, until=LATER, url=None)
 
 
 def test_a_progress_event_is_one_json_line_with_sorted_keys() -> None:
-    """ProgressOnRequest: one JSON object a line: event, host and until, until ISO 8601."""
+    """ProgressOnRequest: one JSON object a line: event, host, until and url, keys sorted.
+
+    until is ISO 8601; url is null on every event but page, which names the settled row's
+    URL (9a253a4). Re-propagated by the T16 follow-up (origin T16): the line gains url.
+    """
     line = event_line(ProgressEvent(event="host_backoff", host=HOST, until=LATER))
     assert line.rstrip("\n").count("\n") == 0
-    assert json.loads(line) == {"event": "host_backoff", "host": HOST, "until": timestamp(LATER)}
+    assert json.loads(line) == {
+        "event": "host_backoff",
+        "host": HOST,
+        "until": timestamp(LATER),
+        "url": None,
+    }
     assert line.index('"event"') < line.index('"host"') < line.index('"until"')
+    assert line.index('"until"') < line.index('"url"')
     done = json.loads(event_line(ProgressEvent(event="done", host=None, until=None)))
-    assert done == {"event": "done", "host": None, "until": None}
+    assert done == {"event": "done", "host": None, "until": None, "url": None}
+    page = json.loads(event_line(ProgressEvent(event="page", host=HOST, until=None, url=SEED)))
+    assert page == {"event": "page", "host": HOST, "until": None, "url": SEED}
 
 
 def test_invariant_RefusedReportsHaveNoRun(tmp_path: Path) -> None:

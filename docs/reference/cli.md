@@ -100,8 +100,14 @@ make the configuration invalid, each named by its key path in `configuration.pro
 configuration variable and is ignored. The configuration's `hash` covers the resolved
 values, so it moves with a variable or a flag.
 
-A `--url` or a `--path` that passes the refusals below names a targeted run, which a
-later slice implements: the sync stops there (exit 1, the previous report kept).
+A `--url` or a `--path` that passes the refusals below names a targeted run: only the
+named pages are synced. Each `--url` is normalised to its identity and each `--path`
+names the written page that holds it (a directory prefix is no page's path and is
+refused). The run opens only the targets' hosts, so their robots.txt is read, walks no
+seed, sitemap or `llms.txt`, and fetches each target without validators, a target being
+exempt from `max_pages`; a target with no frontier row gets one. Links a target's page
+adds are queued pending and fetched by a later full sync; every other row is left as it
+was. The report lists the `targets` and its `options` record the run as `targeted`.
 
 `rovo sync OUT_DIR` reads `rovo.toml`, reads each allowed host's `/robots.txt`, fetches
 each seed page the robots rules allow once over HTTP with the user agent
@@ -172,7 +178,8 @@ narrowed `path_prefixes`, say) is not requested and is removed (`out_of_scope`) 
 sync finalises. Files move only then, after the run: an interrupted sync leaves the
 pages and the archive as the last finished sync left them. A directory under `pages/` or
 `_removed/` left empty is removed. A URL an earlier sync left settled with no page of
-its own (one that answered `404` or `410`, a duplicate, or a moved page's old URL) is
+its own (one that answered `404` or `410`, a duplicate, a moved page's old URL, or one
+that answered non-HTML) is
 fetched again, once per sync, when a page link, a sitemap or `llms.txt` names it again;
 an old URL that now answers its own page takes back the page it led to.
 
@@ -248,17 +255,20 @@ exit 0. Retries and waits print nothing unless `--json` is given.
 
 An ok answer that is not HTML (a `.txt` served `text/plain`, say) counts as fetched and
 settles its frontier row `skipped_not_html`: no page is written and nothing is reported
-for it, and the exit code is unaffected. A URL with no page that answered so is not
-requested again by a later sync; a page in the mirror whose URL now answers so keeps its
-record and its file, and the next sync fetches it again. A page whose tries run out, or
+for it, and the exit code is unaffected. A URL with no page that answered so is
+requested again by a later sync only when a page link, a sitemap or `llms.txt` names it
+again. A page in the mirror whose URL now answers so is removed as a `404` is
+(`removal_reason` `absent`, its file archived under `_removed/`, a `removed` change),
+and its row is still `skipped_not_html`. A page whose tries run out, or
 that answers an error, is listed under `failed_urls` and as a `failed` change, and every
 later sync requests it again.
 
 With `--json`, progress goes to standard output as one JSON object a line,
-`{"event": ..., "host": ..., "until": ...}`, keys sorted, `until` an ISO 8601 UTC
-timestamp or `null`: `start` when the run begins, `page` once for each row a fetch
-settles (naming its host), `host_backoff` as a host is paused for a retry (naming the
-host and when the pause ends), and one `done`, last, once the report is written. A dry
+`{"event": ..., "host": ..., "until": ..., "url": ...}`, keys sorted, `until` an ISO
+8601 UTC timestamp or `null`, `url` `null` on every event but `page`: `start` once, when
+the run is created, `page` once for each row a fetch settles (naming its host and its
+URL), `host_backoff` as a host is paused for a retry (naming the host and when the pause
+ends), and one `done`, last, once the report is written. A dry
 run's listing stays plain text, ahead of its `done`. Without `--json` nothing is printed
 for progress, and a refused sync prints no event.
 
@@ -280,6 +290,7 @@ parse, a `max_age` that is not a finite number of seconds, a bad variable or `--
 no root or start URL, or `unblocking.provider` set (`"invalid configuration"`); a root
 URL that differs from the one the last run recorded, without `--yes` (`"changed root
 requires confirmation"`); a `--url` that is not http or https, or not on an allowed host
+of the resolved scope (`allowed_hosts`, or the first seed's host when that is empty)
 (`"invalid or off-host target"`); a `--path` that is not a written page's path, a removed
 page's included (`"unknown target path"`); a browser or stealth engine the configuration
 needs that is not installed (`"configured tier is not installed"`); `robots = "ignore"`
@@ -293,7 +304,7 @@ implements (a block, a
 429 that survives its retries, a `Retry-After`
 past `retry_after_cap` (120 s), however large, on a page, robots.txt or a declared sitemap, a `Crawl-delay` past it, which retires
 the host as soon as its robots.txt is read, a host whose failures trip its breaker, a
-named `--url` or `--path`, a profile other
+profile other
 than `generic` or one whose sitemap filter holds a `{section}` or `{locale}` placeholder,
 a login form, a source id on an element that is not a heading), the sync stops, names the rule on standard error, exits 1 and leaves the
 previous report in place.

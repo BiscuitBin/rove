@@ -323,11 +323,17 @@ def test_a_declared_sitemap_past_the_cap_stops_at_retire_host(
     assert SEED not in fetcher.requests
 
 
-def test_targeted_runs_stop(tmp_path: Path) -> None:
-    """Named targets are a later slice's: PrepareRun and Discover stop on them."""
+def test_owner_testing_runs_stop(tmp_path: Path) -> None:
+    """Owner testing is a later slice's (T20): PrepareRun and Discover stop on it.
+
+    Re-propagated by the T16 follow-up (origin T09, test_targeted_runs_stop): the targeted
+    run is realised (9a253a4, tests/test_targeted_run.py); the raises stay for an
+    owner-testing run alone.
+    """
     mirror = new_mirror(tmp_path)
     run = start_run(request(mirror, targets=frozenset({SEED})), FixedClock())
     assert run is not None
+    run.mode = RunMode.owner_testing
     frontier = create_frontier(run, None)
     with pytest.raises(NotInThisSlice):
         prepare_run(run, frontier)
@@ -476,11 +482,12 @@ def test_a_canonical_merging_a_known_page_into_another_settles(tmp_path: Path) -
 
 
 def test_a_known_pages_non_html_answer_settles_skipped_not_html(tmp_path: Path) -> None:
-    """A known page answering with another raw document that is not HTML is skipped.
+    """A known page answering with another raw document that is not HTML is retired.
 
     Re-propagated by T16 (origin T14, test_a_known_pages_non_html_answer_stops): DisposeFetch's
-    skipped_not_html branch settles the row; the page keeps its record, no candidate is
-    delivered and no URL fails, and the run finishes.
+    skipped_not_html branch settles the row and no URL fails. Re-propagated by the T16
+    follow-up (origin T16, which kept the page written): since 9a253a4 the known page is
+    delivered absent and retired, its record removed with removal_reason absent.
     """
     mirror = new_mirror(tmp_path)
     run_crawl(request(mirror), None, FakeFetcher({SEED: html_response(SEED, PAGE)}), FixedClock())
@@ -494,7 +501,8 @@ def test_a_known_pages_non_html_answer_settles_skipped_not_html(tmp_path: Path) 
     assert rows[SEED] is FrontierStatus.skipped_not_html
     assert result.failed == ()
     assert mirror.pages == [page]
-    assert page.status is PageStatus.written
+    assert page.status is PageStatus.removed
+    assert page.removal_reason is RemovalReason.absent
 
 
 def page_content(html: str) -> ConvertedContent:

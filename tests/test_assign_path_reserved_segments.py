@@ -1,6 +1,6 @@
 """assign_path's segment rewrites inside pages/<host>/ (mirror.allium MovePage, at fed9ed8).
 
-The guidance (mirror.allium 681 to 704): each rewrite reads one sanitised segment alone
+The guidance (mirror.allium 682 to 705): each rewrite reads one sanitised segment alone
 and they apply together. A trailing run of "." becomes "-"; a leading "." becomes "-"
 (.git/ gives -git/, .rovo/ gives -rovo/); a directory segment equal, ignoring case, to a
 managed root file name has its last "." replaced with "-" (llms.txt/guide gives
@@ -149,7 +149,7 @@ def test_segment_rewrites_happen_before_the_collision_check(tmp_path: Path) -> N
     """A rewritten path another page holds gains the identity's hash suffix.
 
     Since bad753c the rewritten directory -ROVO folds onto the held spelling -rovo
-    (assign_path guidance, mirror.allium 715 to 726), so only the suffix tells them apart.
+    (assign_path guidance, mirror.allium 716 to 727), so only the suffix tells them apart.
     """
     mirror = new_mirror(tmp_path)
     holder = stored(mirror, requested=f"{SITE}/guide/-rovo/page.html")

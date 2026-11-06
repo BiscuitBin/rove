@@ -2480,7 +2480,7 @@ class Recorder:
 
 
 def test_httpx_fetcher_one_request_per_fetch_with_the_rovo_user_agent() -> None:
-    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1534)."""
+    """One fetch is one request, sending `User-Agent: rovo/<version>` (crawl.allium 1535)."""
     recorder = Recorder()
     with HttpxFetcher(transport=httpx.MockTransport(recorder)) as fetcher:
         response = fetcher.fetch(SEED)
@@ -6285,52 +6285,166 @@ def test_transition_edge_FrontierEntry_in_progress_skipped_not_html(tmp_path: Pa
 def test_transition_edge_FrontierEntry_skipped_not_html_pending(tmp_path: Path) -> None:
     """Verify transition skipped_not_html -> pending on FrontierEntry.status is reachable via a witnessing rule.
 
-    PrepareRun's written-page recheck: a known page whose URL answered non-HTML keeps its
-    record and its file, its row settles skipped_not_html, and the next full run
-    re-pends the row as a written page.
+    Enqueue's rediscovered set (9a253a4): a linked URL with no page that answered
+    non-HTML settles skipped_not_html; the next full run's PrepareRun notes it in
+    recheckable_urls and leaves it settled, and its discovery naming the URL again
+    re-pends it. PrepareRun's removed-page recheck: a written page whose URL answered
+    non-HTML is retired, its row skipped_not_html, and the next full run re-pends it.
+    Re-propagated by the T16 follow-up (origin T16, which witnessed the edge by the
+    written-page recheck of a page kept written: 9a253a4 retires that page instead).
     """  # noqa: E501  The obligation's description, quoted.
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, LINKING_PAGE), OTHER: text_response(OTHER, PLAIN_TEXT)}
+    )
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    mirror = load_mirror(out_dir)
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    row = frontier.entry(OTHER)
+    assert row is not None
+    assert row.status is FrontierStatus.skipped_not_html
+    run = start_run(request(mirror, run_id=SECOND_RUN, kind=RunKind.update), FixedClock())
+    assert run is not None
+    assert prepare_run(run, frontier)
+    assert OTHER in run.recheckable_urls
+    assert row.status is FrontierStatus.skipped_not_html
+    rediscovered = rediscover(run, frontier, OTHER)
+    assert rediscovered is row
+    assert rediscovered.status is FrontierStatus.pending
+
+    written = tmp_path / "written"
+    assert _commands.init(SEED, written) is ExitCode.ok
+    assert command_synced(written, site()) is ExitCode.ok
+    plain = FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})
+    assert command_synced(written, plain) is ExitCode.ok
+    retired = load_mirror(written)
+    assert [page.status for page in retired.pages] == [PageStatus.removed]
+    saved = load_frontier(retired)
+    assert saved is not None
+    seed_row = saved.entry(SEED)
+    assert seed_row is not None
+    assert seed_row.status is FrontierStatus.skipped_not_html
+    third = start_run(request(retired, run_id=THIRD_RUN, kind=RunKind.update), FixedClock())
+    assert third is not None
+    assert prepare_run(third, saved)
+    rechecked = saved.entry(SEED)
+    assert rechecked is seed_row
+    assert rechecked.status is FrontierStatus.pending
+
+
+def test_a_url_with_no_page_that_answered_non_html_is_rechecked_when_rediscovered(
+    tmp_path: Path,
+) -> None:
+    """PrepareRun and Enqueue (9a253a4): a page-less skipped_not_html row is rechecked.
+
+    A linked URL with no page that answered non-HTML is requested again by the next full
+    sync, whose seed (raw-unchanged, so its stored links are re-followed) names it again;
+    when it now answers HTML it is stored and its row is done. A sync whose seed no
+    longer names it does not request it, and its row stays settled. Re-propagated by the
+    T16 follow-up (origin T16, test_a_url_with_no_page_that_answered_non_html_is_not_
+    fetched_again, the interim of the batched question's item 3).
+    """
+    out_dir = tmp_path / "out"
+    assert _commands.init(SEED, out_dir) is ExitCode.ok
+    fetcher = FakeFetcher(
+        {SEED: html_response(SEED, LINKING_PAGE), OTHER: text_response(OTHER, PLAIN_TEXT)}
+    )
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    assert fetcher.requests.count(OTHER) == 1
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    assert fetcher.requests.count(OTHER) == len(["first", "rediscovered"])
+    fetcher.responses[OTHER] = html_response(OTHER, OTHER_PAGE)
+    assert command_synced(out_dir, fetcher) is ExitCode.ok
+    mirror = load_mirror(out_dir)
+    other = mirror.page(OTHER)
+    assert other is not None
+    assert other.status is PageStatus.written
+    frontier = load_frontier(mirror)
+    assert frontier is not None
+    row = frontier.entry(OTHER)
+    assert row is not None
+    assert row.status is FrontierStatus.done
+
+    unnamed = tmp_path / "unnamed"
+    assert _commands.init(SEED, unnamed) is ExitCode.ok
+    linking = FakeFetcher(
+        {SEED: html_response(SEED, LINKING_PAGE), OTHER: text_response(OTHER, PLAIN_TEXT)}
+    )
+    assert command_synced(unnamed, linking) is ExitCode.ok
+    quiet = FakeFetcher({SEED: html_response(SEED, PAGE), OTHER: html_response(OTHER, OTHER_PAGE)})
+    assert command_synced(unnamed, quiet) is ExitCode.ok
+    assert OTHER not in quiet.requests
+    kept = load_frontier(load_mirror(unnamed))
+    assert kept is not None
+    kept_row = kept.entry(OTHER)
+    assert kept_row is not None
+    assert kept_row.status is FrontierStatus.skipped_not_html
+
+
+def settled_again(mirror: Mirror, frontier: Frontier, fetcher: FakeFetcher) -> LadderWalk:
+    """A second full run over `mirror` to the seed's settled walk over `fetcher`."""
+    run = start_run(request(mirror, run_id=SECOND_RUN, kind=RunKind.update), FixedClock())
+    assert run is not None
+    assert attach_frontier(run, frontier) is frontier
+    assert prepare_run(run, frontier)
+    assert discover(run, frontier, fetcher)
+    assert drop_stale_observations(run, frontier)
+    assert begin_crawl(run)
+    batch = select_batch(run, frontier)
+    assert batch is not None
+    (entry,) = batch
+    assert entry.identity == SEED
+    walk = fetch_entry(run, entry, fetcher)
+    assert walk is not None
+    (attempt,) = walk.attempts
+    assert prepare_attempt(attempt)
+    assert settle_walk(attempt)
+    return walk
+
+
+def test_a_written_pages_non_html_answer_retires_it_as_absent(tmp_path: Path) -> None:
+    """DisposeFetch (9a253a4): a written page whose URL now answers non-HTML is retired.
+
+    Its non-HTML branch, with a known page, delivers an absent candidate for the row's
+    identity and settles the row skipped_not_html; the fetch counts toward the host's
+    fetched. Through the command the page is removed, its removal_reason absent, its file
+    archived at _removed/<host>/ with its published bytes, the report has one removed
+    change for it, and no URL fails.
+    """
+    first = crawl_once(tmp_path / "unit", site())
+    walk = settled_again(
+        first.run.target, first.frontier, FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})
+    )
+    fetched = walk.host.fetched
+    disposed = dispose_fetch(walk)
+    assert isinstance(disposed, CandidateDelivered)
+    assert disposed.outcome is CandidateOutcome.absent
+    assert disposed.requested_identity == SEED
+    assert disposed.content is None
+    assert walk.entry.status is FrontierStatus.skipped_not_html
+    assert walk.host.fetched == fetched + 1
+
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
     assert command_synced(out_dir, site()) is ExitCode.ok
     page_file = out_dir / "pages" / HOST / "start.md"
     published = page_file.read_bytes()
-    assert command_synced(out_dir, FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})) is (
-        ExitCode.ok
-    )
-    assert page_file.read_bytes() == published
-    mirror = load_mirror(out_dir)
-    (page,) = mirror.pages
-    assert page.status is PageStatus.written
-    frontier = load_frontier(mirror)
-    assert frontier is not None
-    assert frontier.entry(SEED) is not None
-    assert frontier.entry(SEED).status is FrontierStatus.skipped_not_html  # type: ignore[union-attr]  # Asserted above.
-    run = start_run(request(mirror, run_id=THIRD_RUN, kind=RunKind.update), FixedClock())
-    assert run is not None
-    assert prepare_run(run, frontier)
-    assert frontier.entry(SEED).status is FrontierStatus.pending  # type: ignore[union-attr]  # Asserted above.
-
-
-def test_a_url_with_no_page_that_answered_non_html_is_not_fetched_again(tmp_path: Path) -> None:
-    """Open points item 3, interim: skipped_not_html is in no retry set.
-
-    A linked URL with no page that answered non-HTML stays skipped_not_html across a
-    full run; the next sync does not request it (crawl.allium Frontier retry_entries,
-    PrepareRun at bad753c).
-    """
-    out_dir = tmp_path / "out"
-    assert _commands.init(SEED, out_dir) is ExitCode.ok
-    linking_page = PAGE.replace("</main>", '<p><a href="other.html">other</a></p></main>')
-    fetcher = FakeFetcher(
-        {SEED: html_response(SEED, linking_page), OTHER: text_response(OTHER, PLAIN_TEXT)}
-    )
-    assert command_synced(out_dir, fetcher) is ExitCode.ok
-    assert fetcher.requests.count(OTHER) == 1
-    assert command_synced(out_dir, fetcher) is ExitCode.ok
-    assert fetcher.requests.count(OTHER) == 1
+    plain = FakeFetcher({SEED: text_response(SEED, PLAIN_TEXT)})
+    assert command_synced(out_dir, plain) is ExitCode.ok
+    assert SEED in plain.requests
+    (page,) = load_mirror(out_dir).pages
+    assert page.status is PageStatus.removed
+    assert page.removal_reason is RemovalReason.absent
+    assert not page_file.exists()
+    assert (out_dir / "_removed" / HOST / "start.md").read_bytes() == published
+    data = json.loads((out_dir / "crawl-report.json").read_text(encoding="utf-8"))
+    assert [row["kind"] for row in data["changes"] if row["url"] == SEED] == ["removed"]
+    assert data["failed_urls"] == []
     frontier = load_frontier(load_mirror(out_dir))
     assert frontier is not None
-    row = frontier.entry(OTHER)
+    row = frontier.entry(SEED)
     assert row is not None
     assert row.status is FrontierStatus.skipped_not_html
 

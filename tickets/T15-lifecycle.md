@@ -212,7 +212,7 @@ witness record says `PASS`; the checkpoint's adversarial review has run.
 | `src/rovo/_crawl/run.py` | shared, own lines | `attempt_tier` following in-scope redirects; `fetch_robots`, `fetch_sitemap` and `read_llms_txt` lose their 3xx raises; `dispose_fetch`'s `absent`, `redirected_out` and `unfollowed_redirect` branches, its raw-3xx raise removed and its last raise narrowed; `_handle_entry` routing an absent or redirected-out candidate to the mirror and a `CandidateDuplicate` to `settle_duplicate_entry`; `CrawlResult.removed`; the docstrings; follow-up (`bad753c`): `prepare_run` notes a full run's absent, duplicate and done rows in `recheckable_urls` and `enqueue` re-pends a rediscovered one once |
 | `src/rovo/_mirror/model.py` | shared, own lines | the mirror's pending file effects and their composition per page path (Facts); `PageRemoved`, `CandidateDuplicate` and the file-effect event types if absent; `RemovalReason` used; follow-up (`bad753c`): `Mirror.prune` (in memory, the resolved `prune`), and an archive cancels a revived page's pending `ArchivedCopyDeleted` by the path the page is held at |
 | `src/rovo/_mirror/intake.py` | shared, own lines | `reject_duplicate_candidate`, `move_page`, `revive_removed_page`, `remove_absent_page`, `accept_absent_without_page`, `remove_redirected_out_page`, `accept_redirected_out_without_page`, `retire_page`; `rewrite_known_page`'s merge branch; `settle_candidate`'s complete partition, its fallback raise removed; the module docstring; follow-up (`bad753c`): `retire_page` reads the mirror's `prune`, `revive_removed_page` names the revived path on its `ArchivedCopyDeleted` |
-| `src/rovo/_mirror/urls.py` | shared, own lines | added at implement tick 2 (weed T15-1): `assign_path` takes the page `MovePage` moves, whose own path is not held by another page (mirror.allium 728 to 741); follow-up (`bad753c`): each directory segment folds onto the spelling a held path uses |
+| `src/rovo/_mirror/urls.py` | shared, own lines | added at implement tick 2 (weed T15-1): `assign_path` takes the page `MovePage` moves, whose own path is not held by another page (mirror.allium 729 to 742 at `9a253a4`); follow-up (`bad753c`): each directory segment folds onto the spelling a held path uses |
 | `src/rovo/_mirror/finalise.py` | shared, own lines | `retire_out_of_scope_pages`; `finalise` applying the file effects before `PublishPage` and removing emptied directories; `Finalisation.removed`; the docstrings; follow-up (`bad753c`): its spec citation moved |
 | `src/rovo/_mirror/state.py` | shared, own lines | only if step 4 shows it: a page record `MovePage` deletes leaves the manifest; `redirect_target` round-trips |
 | `src/rovo/_report.py` | shared, own lines | `tally_removal` (`TallyRemoval`) |
@@ -737,9 +737,15 @@ one arrived; the verification output, each headed by its commit.
   placeholders, and a non-heading id anchor stopping the sync
   (`UncarryableBecomesIsland`). Carried to T18: a retired host's remaining discovery is
   still requested.
-- **The T15 follow-up batched needs-user question: OPEN.** Found while propagating the
-  answers at `bad753c`; it states the interim the specification implies, never
-  presented as the answer, and blocks no owned obligation.
+- **The T15 follow-up batched needs-user question: ANSWERED** (spec `9a253a4`, carried as
+  item 1 of the T16 batched question, `tickets/T16-errors-report.md`). Found while
+  propagating the answers at `bad753c`; the question as asked is kept below. The
+  maintainer's answer: the record returns to its old path, the path its kept copy is at
+  (`Page.revived_from`, set by `ReviveRemovedPage` and cleared by `PublishPage`), so
+  nothing moves on disk and record and copy agree; when another page has taken that old
+  path in the same run, the record keeps its new path and the kept copy moves to it
+  (`ArchivedCopyMoved`, cancelling the pending `ArchivedCopyDeleted`). The T16 follow-up
+  realises it.
   1. **Which path a removed record holds when its kept copy is at its old path.**
      `RetirePage`'s guidance (`mirror.allium` 1030 to 1047) keeps the existing
      `_removed/` copy of a page revived at a new path and retired again in the same
@@ -751,7 +757,7 @@ one arrived; the verification output, each headed by its commit.
      stays in `_removed/` for ever. Should the record return to its old path, should
      the copy move to the new one, or is the stale copy accepted? Interim: as the rules
      are written (the record keeps the new path, the copy stays at the old one); the
-     tests assert the files only.
+     tests assert the files only. ANSWERED, as above.
 - **Scope note, not a specification gap.** `DisposeFetch`'s `skipped_not_html` branch
   and the edges `in_progress -> skipped_not_html` and `skipped_not_html -> pending` are
   claimed by no slice in the T15 to T20 list; this slice keeps their stop. The

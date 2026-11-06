@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2180).
+"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2191).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -112,7 +112,14 @@ _PAST_EVERY_CAP = Decimal(f"1e{MAX_EMAX}")
 _TOO_MANY_REQUESTS = 429
 _SPA_ROOTS = ("root", "app", "__next", "__nuxt")
 # The rows a full run notes for a recheck when its discovery names them again (PrepareRun).
-_RECHECKABLE = frozenset({FrontierStatus.absent, FrontierStatus.duplicate, FrontierStatus.done})
+_RECHECKABLE = frozenset(
+    {
+        FrontierStatus.absent,
+        FrontierStatus.duplicate,
+        FrontierStatus.done,
+        FrontierStatus.skipped_not_html,
+    }
+)
 _UNRESOLVED = frozenset(
     {
         FrontierStatus.pending,
@@ -223,25 +230,38 @@ def attach_frontier(run: Run, existing: Frontier | None) -> Frontier | None:
 
 
 def prepare_run(run: Run, frontier: Frontier | None) -> bool:
-    """Realises crawl.allium PrepareRun (the standard full-run branches).
+    """Realises crawl.allium PrepareRun (the standard full and targeted branches).
 
-    Re-pends the row of every written page the scope admits, returns in-progress rows to
-    pending, rechecks removed pages last and retries the failed, blocked and skipped rows
-    the scope admits. Its absent, duplicate and done rows, as they stood before, are
-    noted in recheckable_urls for Enqueue to re-pend once if discovery names one again.
+    In-progress rows return to pending. A targeted run re-pends only its targets, a
+    deferred one at the start priority, or creates a row for one with none (discovered
+    via named); they are refetched without validators. A full run re-pends the row of
+    every written page the scope admits, rechecks removed pages last and retries the
+    failed, blocked and skipped rows the scope admits; its absent, duplicate, done and
+    skipped_not_html rows, as they stood before, are noted in recheckable_urls for
+    Enqueue to re-pend once if discovery names one again. The owner-testing branch is a
+    later slice's.
     """
     if run.status is not RunStatus.running or frontier is None:
         return False
-    if run.is_owner_testing or run.targets:
+    if run.is_owner_testing:
         raise NotInThisSlice(rule="PrepareRun")
+    for entry in frontier.in_progress_entries:
+        entry.status = FrontierStatus.pending
+    if run.targets:
+        _prepare_targets(run, frontier)
+    else:
+        _prepare_full(run, frontier)
+    return True
+
+
+def _prepare_full(run: Run, frontier: Frontier) -> None:
+    """PrepareRun's full branch: rechecks, removed pages last, retries, recheckable rows."""
     mirror = run.target
     run.forced_refetch = _stale_pages(run) if run.kind is RunKind.update else frozenset()
     run.active_urls = frozenset(entry.identity for entry in frontier.entries)
     run.recheckable_urls = frozenset(
         entry.identity for entry in frontier.entries if entry.status in _RECHECKABLE
     )
-    for entry in frontier.in_progress_entries:
-        entry.status = FrontierStatus.pending
     for page in mirror.written_pages:
         if mirror.scope.within_bounds(page.source_url):
             _pend(frontier, page.identity, CONFIG.recheck_priority, page.sitemap_lastmod)
@@ -252,7 +272,32 @@ def prepare_run(run: Run, frontier: Frontier | None) -> bool:
     for entry in frontier.retry_entries:
         if mirror.scope.within_bounds(entry.identity):
             entry.status = FrontierStatus.pending
-    return True
+
+
+def _prepare_targets(run: Run, frontier: Frontier) -> None:
+    """PrepareRun's targeted branch: each target re-pended, or created as named."""
+    run.forced_refetch = run.targets
+    run.active_urls = run.targets
+    for identity in sorted(run.targets):
+        row = frontier.entry(identity)
+        if row is None:
+            frontier.entries.append(
+                FrontierEntry(
+                    frontier=frontier,
+                    identity=identity,
+                    depth=0,
+                    discovered_via=DiscoverySource.named,
+                    discovered_from=None,
+                    sitemap_lastmod=None,
+                    priority=CONFIG.start_priority,
+                    attempts=0,
+                    status=FrontierStatus.pending,
+                )
+            )
+            continue
+        row.status = FrontierStatus.pending
+        if row.is_deferred:
+            row.priority = CONFIG.start_priority
 
 
 # --- Discovery and robots.txt -------------------------------------------------------
@@ -263,12 +308,18 @@ def discover(run: Run, frontier: Frontier, fetcher: Fetcher) -> bool:
 
     Hosts are visited in sorted order: each is opened (its robots.txt read), then its
     sitemaps are queued and read (QueueSitemaps), then its llms.txt (ReadLlmsTxt), so
-    every host is opened before any sitemap, llms.txt or page request to it.
+    every host is opened before any sitemap, llms.txt or page request to it. A targeted
+    run opens only its targets' hosts and walks no seed, sitemap or llms.txt; the
+    owner-testing branch is a later slice's.
     """
     if run.status is not RunStatus.running:
         return False
-    if run.is_owner_testing or run.targeted:
+    if run.is_owner_testing:
         raise NotInThisSlice(rule="Discover")
+    if run.targeted:
+        for target in sorted(run.targets):
+            open_host(run, hostname_of(target), origin_of(target), fetcher)
+        return True
     scope = run.target.scope
     for url in scope.seeds:
         enqueue(
@@ -1391,10 +1442,12 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     redirect (its stop's text) or for an answer that is not ok (its status text); a
     CandidateDelivered, its row settled, for a 304 on a known page or an unchanged raw
     document (unchanged), a 404 or 410 (absent, no validators) or a known page redirected
-    out of scope (redirected_out, done, the target carried); True when any other ok,
-    unblocked HTML answer counts as fetched and raises PageFetched; False when the guards
-    do not hold, or when an ok answer that is not HTML counts as fetched and settles its
-    row skipped_not_html. A block verdict and a soft verdict are later slices'.
+    out of scope (redirected_out, done, the target carried) or a known page that now
+    answers non-HTML (absent, its row skipped_not_html: retired as absent); True when
+    any other ok, unblocked HTML answer counts as fetched and raises PageFetched; False
+    when the guards do not hold, or when an ok answer that is not HTML, for a URL with
+    no page, counts as fetched and settles its row skipped_not_html. A block verdict and
+    a soft verdict are later slices'.
     """
     attempt = walk.standing
     entry = walk.entry
@@ -1435,9 +1488,15 @@ def dispose_fetch(walk: LadderWalk) -> EntryFailed | CandidateDelivered | bool:
     walk.host.fetched += 1
     if unchanged:
         return _unchanged(walk, attempt, response.raw_digest)
-    if not response.is_html:
-        entry.status = FrontierStatus.skipped_not_html
-    return response.is_html
+    return response.is_html or _not_html(walk, attempt, known)
+
+
+def _not_html(
+    walk: LadderWalk, attempt: FetchAttempt, known: Page | None
+) -> CandidateDelivered | bool:
+    """DisposeFetch's non-HTML branch: the row skipped_not_html; a known page is absent."""
+    walk.entry.status = FrontierStatus.skipped_not_html
+    return False if known is None else _delivered(walk, attempt, CandidateOutcome.absent)
 
 
 def _settled_answer(
@@ -1730,7 +1789,7 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     failed: list[UrlFailed] = []
     try:  # From the start event on, so a failing sink is recorded too (ReportOnEveryExit).
         if progress is not None:
-            progress(ProgressEvent(event="start", host=None, until=None))
+            progress(ProgressEvent(event="start", host=None, until=None, url=None))
         _crawl(run, frontier, fetcher, clock, failed)
     except NotInThisSlice:
         raise
@@ -1802,13 +1861,15 @@ def _handle_entry(
     if walk is None:  # EntryHostReady was raised, so FetchEntry's guards hold.
         return None
     _settle(walk, fetcher)
+    if run.progress is not None:  # rovo.allium AnnouncePage: the walk has settled.
+        run.progress(
+            ProgressEvent(event="page", host=walk.host.name, until=None, url=walk.entry.identity)
+        )
     disposed = dispose_fetch(walk)
-    if run.progress is not None:  # Interim (T16 Open points item 2): one page event a row.
-        run.progress(ProgressEvent(event="page", host=walk.host.name, until=None))
     if isinstance(disposed, EntryFailed):
         return entry_fails(disposed)
     if isinstance(disposed, CandidateDelivered):
-        # An unchanged, absent or redirected-out row is settled already. An unchanged
+        # An unchanged, absent, redirected-out or non-HTML row is settled already. An unchanged
         # page raises no LinksFound (RecordUnchanged); its stored links are queued again.
         # A removal reaches CrawlResult.removed through the mirror's removals.
         candidate = admit_candidate(disposed)

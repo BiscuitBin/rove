@@ -849,17 +849,19 @@ class ProgressEvent:
     """rovo.allium's ProgressReported, as the progress sink receives it.
 
     `event` is one of start, page, host_backoff, breaker_tripped, owner_testing_warning
-    and done; `host` and `until` are null where the event names none.
+    and done; `host` and `until` are null where the event names none, and `url` is null
+    on every event but page, where it is the settled row's URL.
     """
 
     event: str
     host: str | None
     until: datetime | None
+    url: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2272)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2283)."""
 
     operator: Operator
     mirror: Mirror

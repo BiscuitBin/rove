@@ -1028,7 +1028,11 @@ def test_projection_Mirror_written_pages(tmp_path: Path) -> None:
 
 
 def test_entity_fields_Page(tmp_path: Path) -> None:
-    """Verify all declared fields on Page are present with correct types."""
+    """Verify all declared fields on Page are present with correct types.
+
+    Re-propagated by the T16 follow-up (origin T09, extended since): 9a253a4 adds
+    revived_from, null on a stored page.
+    """
     mirror = new_mirror(tmp_path)
     page = stored(mirror)
     fields = {field.name for field in dataclasses.fields(Page)}
@@ -1055,6 +1059,7 @@ def test_entity_fields_Page(tmp_path: Path) -> None:
         "content_digest",
         "previous_digest",
         "moved_from",
+        "revived_from",
         "etag",
         "last_modified",
         "sitemap_lastmod",
@@ -1089,6 +1094,7 @@ def test_entity_fields_Page(tmp_path: Path) -> None:
     assert not page.was_moved
     assert page.removed_at is None
     assert page.removal_reason is None
+    assert page.revived_from is None
 
 
 def test_entity_fields_PageCandidate(tmp_path: Path) -> None:
@@ -4151,34 +4157,133 @@ def test_a_rechecked_alias_serving_its_own_page_moves_the_page_it_aliased(
     assert not (tmp_path / f"{ROOT}new.md").exists()
 
 
-def test_a_page_revived_at_a_new_path_and_retired_in_one_run_keeps_its_archived_copy(
-    tmp_path: Path,
-) -> None:
-    """RetirePage guidance (bad753c): the existing _removed/ copy, its last bytes, stays.
+def revived_at_a_new_path(tmp_path: Path) -> tuple[Mirror, Page, str, bytes]:
+    """OTHER retired by the second run, then revived in the third at a new path.
 
-    OTHER, removed and archived by the second run, is revived in the third after the
-    scope's path prefix was dropped, so its old path is no longer the one assign_path
-    gives and it is revived at a new path; it answers 404 in that same run. The pending
-    ArchivedCopyDeleted is cancelled and the never-published new path is not archived:
-    _removed/ holds the old copy alone, and pages/ has no file at the new path.
+    The scope's path prefix is dropped between the runs, so assign_path no longer gives
+    OTHER its old path; the old path, its archived copy's, and its published bytes.
     """
     mirror, _, other = written_pair(tmp_path)
     old_path = other.path
     published_bytes = (tmp_path / old_path).read_bytes()
     assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
     finalised_run(mirror)
+    assert (tmp_path / archived(old_path)).read_bytes() == published_bytes
     mirror.scope = dataclasses.replace(mirror.scope, path_prefixes=())
     revived = candidate_for(
         mirror, requested=OTHER, run_id=THIRD_RUN, converted=content(body=OTHER_BODY)
     )
     assert settle_candidate(revived, FixedClock(LATEST)) is other
+    assert other.path != old_path
+    return mirror, other, old_path, published_bytes
+
+
+def removed_files(out_dir: Path) -> list[Path]:
+    """Every file under _removed/."""
+    return sorted(path for path in (out_dir / "_removed").rglob("*") if path.is_file())
+
+
+def test_a_page_revived_at_a_new_path_and_retired_in_one_run_keeps_its_archived_copy(
+    tmp_path: Path,
+) -> None:
+    """RetirePage (9a253a4): the record returns to the path its archived copy is at.
+
+    OTHER, removed and archived by the second run, is revived in the third at a new path
+    and answers 404 in that same run. The record goes back to its old path (revived_from),
+    so the PageFileArchived of that path cancels the pending ArchivedCopyDeleted: nothing
+    moves on disk, _removed/ holds the old copy alone with its last published bytes,
+    pages/ has no file at the new path, and record and copy agree (RemovedAreaKeepsPath).
+    Re-propagated by the T16 follow-up (origin T15 follow-up, which asserted the files
+    only while the record kept the new path).
+    """
+    mirror, other, old_path, published_bytes = revived_at_a_new_path(tmp_path)
     new_path = other.path
-    assert new_path != old_path
     gone = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
     assert isinstance(settle_candidate(gone, FixedClock(LATEST)), PageRemoved)
+    assert (other.path, other.revived_from) == (old_path, None)
     finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
-    removed_area = tmp_path / "_removed"
-    kept = [path for path in removed_area.rglob("*") if path.is_file()]
-    assert kept == [tmp_path / archived(old_path)]
-    assert kept[0].read_bytes() == published_bytes
+    assert removed_files(tmp_path) == [tmp_path / archived(old_path)]
+    assert (tmp_path / archived(other.path)).read_bytes() == published_bytes
     assert not (tmp_path / new_path).exists()
+    assert other.status is PageStatus.removed
+
+
+def test_a_revived_page_whose_old_path_was_taken_moves_its_archived_copy_when_retired(
+    tmp_path: Path,
+) -> None:
+    """RetirePage's ArchivedCopyMoved (9a253a4): another page now holds the old path.
+
+    OTHER is revived in the third run at a new path; a new page, {SITE}/other.html, is
+    then stored at OTHER's old path; OTHER answers 404 in the same run. The record keeps
+    its new path and its archived copy moves from _removed/<old path> to _removed/<new
+    path>, cancelling the pending ArchivedCopyDeleted: the copy keeps its last published
+    bytes, nothing is left at the old archived path, and the newcomer is published at
+    pages/<old path>. Record and copy agree, and no two pages share a path.
+    """
+    mirror, other, old_path, published_bytes = revived_at_a_new_path(tmp_path)
+    new_path = other.path
+    newcomer = stored(
+        mirror, requested=f"{SITE}/other.html", run_id=THIRD_RUN, converted=content()
+    )
+    assert newcomer.path == old_path
+    gone = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
+    assert isinstance(settle_candidate(gone, FixedClock(LATEST)), PageRemoved)
+    assert (other.path, other.revived_from) == (new_path, None)
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert removed_files(tmp_path) == [tmp_path / archived(new_path)]
+    assert (tmp_path / archived(new_path)).read_bytes() == published_bytes
+    assert (tmp_path / old_path).is_file()
+    assert (tmp_path / old_path).read_bytes() != published_bytes
+    assert not (tmp_path / new_path).exists()
+    assert len({page.path.casefold() for page in mirror.pages}) == len(mirror.pages)
+
+
+def test_under_prune_a_revived_page_whose_old_path_was_taken_moves_nothing_when_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RetirePage's guidance (9a253a4): under prune the pending ArchivedCopyDeleted wins.
+
+    As the collision case, with prune set: the record keeps its new path, nothing is
+    moved or archived, the old archived copy is deleted, and the newcomer is published.
+    """
+    mirror, other, old_path, _ = revived_at_a_new_path(tmp_path)
+    new_path = other.path
+    replace_mirror_config(monkeypatch, prune=True)
+    mirror.prune = True
+    stored(mirror, requested=f"{SITE}/other.html", run_id=THIRD_RUN, converted=content())
+    gone = absent_candidate(mirror, OTHER, run_id=THIRD_RUN)
+    assert isinstance(settle_candidate(gone, FixedClock(LATEST)), PageRemoved)
+    assert (other.path, other.revived_from) == (new_path, None)
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert not (tmp_path / "_removed").exists()
+    assert (tmp_path / old_path).is_file()
+    assert not (tmp_path / new_path).exists()
+
+
+def test_entity_optional_Page_revived_from(tmp_path: Path) -> None:
+    """Verify optional field Page.revived_from accepts null and non-null values.
+
+    Null on a stored page (StoreNewPage); a revived page's removed path, where its
+    archived copy is, until finalisation: the old path itself when the page is revived
+    there, the old path when it is revived at a new one (ReviveRemovedPage); null again
+    once PublishPage has published the page.
+    """
+    mirror, _, other = written_pair(tmp_path)
+    assert other.revived_from is None
+    path = other.path
+    assert retire_page(other, RemovalReason.absent, FixedClock(LATER)) is not None
+    finalised_run(mirror)
+    again = candidate_for(
+        mirror, requested=OTHER, run_id=THIRD_RUN, converted=content(body=OTHER_BODY)
+    )
+    assert settle_candidate(again, FixedClock(LATEST)) is other
+    assert (reread(other).path, reread(other).revived_from) == (path, path)
+    finalised_run(mirror, THIRD_RUN, FixedClock(LATEST))
+    assert reread(other).revived_from is None
+
+    elsewhere, moved_other, old_path, _ = revived_at_a_new_path(tmp_path / "elsewhere")
+    assert moved_other.revived_from == old_path
+    assert moved_other.path != old_path
+    finalised_run(elsewhere, THIRD_RUN, FixedClock(LATEST))
+    assert reread(moved_other).revived_from is None
+    assert (tmp_path / "elsewhere" / moved_other.path).is_file()

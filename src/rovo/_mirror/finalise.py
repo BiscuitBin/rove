@@ -1,4 +1,4 @@
-"""The finalise pass (mirror.allium 533, 1051 to 1217): bodies, frontmatter, page files.
+"""The finalise pass (mirror.allium 534, 1074 to 1241): bodies, frontmatter, page files.
 
 A page file is `---`, the frontmatter as YAML with its keys sorted and absent values
 omitted, `---`, then the body. Strings and string lists are JSON-quoted, which YAML
@@ -207,7 +207,8 @@ def apply_file_effects(mirror: Mirror) -> None:
 
     Each is idempotent: a missing source is a no-op and an existing destination is
     replaced. An archive takes pages/<host>/<p> to _removed/<host>/<p>; a deletion and an
-    archived copy's deletion remove one file. An archive or a deletion of a page moved
+    archived copy's deletion remove one file; an archived copy's move takes
+    _removed/<host>/<p> to _removed/<host>/<source>. An archive or a deletion of a page moved
     this run takes the file from the path it was last published at (`source`). A move's
     old file is deleted by `delete_moved_files` once PublishPage has written the new one.
     """
@@ -222,6 +223,17 @@ def apply_file_effects(mirror: Mirror) -> None:
             source.unlink(missing_ok=True)
         elif effect.kind is FileEffectKind.archived_copy_deleted:
             (root / archived_path(effect.path)).unlink(missing_ok=True)
+        elif effect.kind is FileEffectKind.archived_copy_moved:
+            _move_archived_copy(root, effect.path, effect.source or effect.path)
+
+
+def _move_archived_copy(root: Path, path: str, to_path: str) -> None:
+    """Move the archived copy of `path` to that of `to_path`, when it exists."""
+    copy = root / archived_path(path)
+    if copy.is_file():
+        target = root / archived_path(to_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy.replace(target)
 
 
 def delete_moved_files(mirror: Mirror) -> None:
@@ -300,6 +312,7 @@ def publish_page(pass_: MirrorPass, page: Page, clock: Clock) -> PageFinalised:
         page.last_changed = clock.now()
     page.previous_digest = page.content_digest
     page.moved_from = None
+    page.revived_from = None
     if not page_file_current(page):
         write_text(page_file(page), page_file_text(page))
     return PageFinalised(

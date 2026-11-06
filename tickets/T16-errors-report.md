@@ -45,7 +45,10 @@ built-in defaults and `rovo.toml`; and there is no `rovo report`. `TallyFailedUr
 `rank_and_write_report` (`_report.py` 344) already ranks all five inputs. The
 specification base is `bad753c` (`git diff --stat bad753c HEAD -- docs/specs` is empty);
 every specification line number below is at `bad753c`, every source line number at
-`cc46695`.
+`cc46695`. The follow-up (committed slice `8361182`, specification `9a253a4`) conforms to
+the maintainer's answers to the batched question (Open points) and owns the targeted run
+(scope note); its specification line numbers are at `9a253a4`, its source line numbers
+at `8361182`.
 
 ### The specified path, and what this slice does with each rule on it
 
@@ -53,7 +56,7 @@ every specification line number below is at `bad753c`, every source line number 
 | --- | --- |
 | **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `rovo.allium`: the configuration layers of `Configuration` (60 to 101: built-in defaults, `rovo.toml`, `ROVO_<SECTION>__<FIELD>` variables, then flags, key by key; `ROVO_MIRROR__PRUNE` and `ROVO_CRAWL__REFOLLOW_UNCHANGED_LINKS` included); `SyncOptions` (103) with `confirmed`, `json_events`, `urls` and `paths` from flags; `RefuseSyncOnBadConfig` (324), `RefuseSyncOnChangedRoot` (333), `RefuseOffHostTarget` (343), `RefuseUnknownTargetPath` (358), in that order after `RefuseSyncWithoutDirectory` (315) and before the two later refusals the code already checks (`RefuseMissingEngine` 374, `RefuseInvalidOwnerRequest` 407, whose own obligations stay T19's and T20's); `ReportRefusal` (430) for every refusal `SyncRefused` names, the two later ones included; `StartSync` (463) its `urls` and `paths` guards; `TallySkippedUrl` (562, on unit inputs only: `UrlSkippedBlocked` comes from `SelectBatch`'s all-tripped branch, T18); `AnnounceBackoff` (576); `RankAndWriteReport` (673) its `done` event and every input of its ranking (`blocked`, `target_skipped` and the owner-testing input on unit inputs only); `InterruptSync` (709), `RecordCrash` (721), `RecordCrashAfterRun` (736); `ShowReport` (814), `RefuseShowReport` (825); the invariants `RefusedReportsHaveNoRun`, `RunReportsNameTheirRun`, `OneOpenReportPerMirror` (878 to 892); the guarantees `SyncExitCodes` (916), `VerifyIndexReportExitCodes` (928) its `report` sentence, `ReportOnEveryExit` (936), `ProgressOnRequest` (942) and `RefusalsInOrder` (950); the `ReportView` surface (962). `crawl.allium`: `DisposeFetch` (1895) its `skipped_not_html` branch (1963); `InterruptRun` (2152) and `EndRun` (2170) its interrupted branch; `FailDiscardedEntry` (2039) under its own obligation names; the frontier edges `in_progress -> skipped_not_html`, `skipped_not_html -> pending` (by `PrepareRun`'s written-page recheck) and `in_progress -> pending` (by `InterruptRun`); the `Run` edge `running -> interrupted`; the `SyncControl` guarantees `ReportableOutcome` and `NoResume` (2278 to 2287). |
 | **Traversed, nothing new to do** | `TallyFailedUrl` (546) and `EntryFails` (1983): a failed URL already gets a `failed_urls` row and a `failed` change. `PrepareRun` (647): already re-pends every failed row on every sync, the interim of the specification's second open question (`crawl.allium` 2411), which this slice keeps. `CloseRun` (631): already maps an interrupted run to `report_status: interrupted` and carries `run.error`; finalisation runs after an interrupted run too (its guidance). `FinishRun` (2133): `unresolved_urls` already excludes `skipped_not_html` (`_UNRESOLVED`, `run.py` 115). `TallyDiscoveryProblem` (569), `TallyRemoval` (595), `TallyFinalisedPage` (608), `TakeBrokenLinks` (657), `FinaliseRunReport` (665). `mirror.allium`: nothing; a known page whose URL now answers non-HTML is simply not delivered, so the mirror keeps it as it stands. |
-| **Later slices'** | The targeted run: `PrepareRun` (`run.py` 235) and `Discover` (270) keep their raises for named targets, so a sync with `--url` or `--path` that passes the refusals stops there (scope note, Open points); the edge `duplicate -> pending`, reached only by a targeted or owner-testing run. `AnnounceTrip` (581), `TallyBlockedUrl` (555), `SelectBatch`'s all-tripped branch (`run.py` 1147) and every block verdict (T18). `RefuseMissingEngine`'s and `RefuseInvalidOwnerRequest`'s obligations, `AnnounceOwnerWarning` (590), `CrawlReport.baseline_run_id`, `preceding_run_id` and `requested_owner_test` (T19, T20). `Verify`, `RefuseVerify`, `ReportVerification` and the quality gates (T17); `rovo fetch` (T19). The `MirrorCommands` and `SyncControl` surfaces' actor and provides obligations, which list the operations of T17, T19 and T20 (the last of those slices). |
+| **Later slices'** | The targeted run: `PrepareRun` (`run.py` 235) and `Discover` (270) keep their raises for named targets, so a sync with `--url` or `--path` that passes the refusals stops there (scope note, Open points); the edge `duplicate -> pending`, reached only by a targeted or owner-testing run. The follow-up (`9a253a4`) realises the targeted run and that edge, and keeps the raises for owner testing. `AnnounceTrip` (581), `TallyBlockedUrl` (555), `SelectBatch`'s all-tripped branch (`run.py` 1147) and every block verdict (T18). `RefuseMissingEngine`'s and `RefuseInvalidOwnerRequest`'s obligations, `AnnounceOwnerWarning` (590), `CrawlReport.baseline_run_id`, `preceding_run_id` and `requested_owner_test` (T19, T20). `Verify`, `RefuseVerify`, `ReportVerification` and the quality gates (T17); `rovo fetch` (T19). The `MirrorCommands` and `SyncControl` surfaces' actor and provides obligations, which list the operations of T17, T19 and T20 (the last of those slices). |
 | **Outside this slice; reaching one still stops the run** | The 23 raises at `cc46695` (`ai_tmp/T16/notinthisslice-cc46695.txt`) all stay, by `rule=`: `sitemap_admitted` (`sitemaps.py` 82); in `run.py`, `PrepareRun` (235), `Discover` (270), `RetireHostOnLongRetryAfter` (348, 792, 1769), `RetireHostOnLongCrawlDelay` (352), `EnqueuePageLinks` (658), `RefollowUnchangedLinks` (699), `SelectBatch` (1147), `AttemptTier` (1265), `classify_block` (1293, 1632, 1634), `DisposeFetch` (1432), `ConvertFetched` (1516), `StartRun` (1693), `Escalate` (1774), `BreakerTrips` (1777); `assign_path` (`urls.py` 150); `UncarryableBecomesIsland` (`fidelity.py` 158, 192) and `BodyShape` (558). `DisposeFetch`'s raise stays, narrowed to a block verdict other than `none` (T18): a non-HTML answer no longer reaches it. A `NotInThisSlice` is never taken for a crash (Facts). |
 
 ### Facts a later reader would otherwise rediscover
@@ -80,9 +83,19 @@ every specification line number below is at `bad753c`, every source line number 
   replaced.
 - **The options.** `rovo sync` gains `--yes` (`confirmed`), `--json` (`json_events`),
   `--url URL` and `--path PATH` (each repeatable, `urls` and `paths`); `interactive`
-  stays `sys.stdin.isatty()`. A `--url` or `--path` that passes the refusals reaches
-  `PrepareRun`'s targeted raise: the sync stops, exits 1 and leaves the previous report,
-  as `render_mode = "auto"` with an installed browser already does (scope note).
+  stays `sys.stdin.isatty()`. Until the follow-up, a `--url` or `--path` that passed the
+  refusals reached `PrepareRun`'s targeted raise and the sync stopped, exiting 1 with the
+  previous report kept. Since the follow-up (`9a253a4`) it runs the targeted run: the
+  targeted branches of `PrepareRun` (`crawl.allium` 647 to 717: only the targets
+  re-pended or created `named`, refetched without validators, no written-page recheck),
+  `Discover` (723 to 767: only the targets' hosts opened, so their robots.txt is read; no
+  seed, sitemap or `llms.txt`) and `SelectBatch` (1394 to 1450: only the targets' rows,
+  exempt from `max_pages`); every other pending row stays pending for a later run. A
+  `--path` names one written page's exact mirror-relative path (`RefuseUnknownTargetPath`,
+  `rovo.allium` 363 to 378), so a subtree is named page by page; a directory prefix is
+  refused as an unknown path. The off-host test and every later `--url` guard read the
+  resolved scope's allowed hosts (`scope_of`: the first seed's host when `allowed_hosts`
+  is empty), never the raw configuration value (`RefuseOffHostTarget`, 343 to 361).
 - **The configuration layers.** `resolve_config(out_dir, environ, overrides)` (both new
   parameters defaulting to empty, so `rovo index` and the earlier tests are unchanged)
   merges, key by key: the built-in defaults, `rovo.toml`, then each environment variable
@@ -168,7 +181,10 @@ every specification line number below is at `bad753c`, every source line number 
   `ai_tmp/T16/uncovered.py`); the owned set of step 3 is `ai_tmp/T16/owned.json` (61, by
   `ai_tmp/T16/owned.py`, which checks each id is in the plan and uncovered); the
   `NotInThisSlice` raises at `cc46695` are in `ai_tmp/T16/notinthisslice-cc46695.txt`.
-  The copies are scratch, regenerated by step 0.
+  The copies are scratch, regenerated by step 0. The follow-up's source is the same
+  command at `9a253a4`, in `ai_tmp/T16/followup/plan-spec-<module>.txt` (crawl 382, rovo
+  169, mirror 201, convert 47; `ai_tmp/T16/spec-answers/obligations-diff.md`); its owned
+  set is `ai_tmp/T16/followup/owned.json` (73, by `ai_tmp/T16/followup/owned.py`).
 
 ## Goal
 
@@ -184,11 +200,22 @@ test named after its id; no test this slice adds or edits sleeps for real (the s
 one real wait is T12's installed-script Crawl-delay scenario, kept by design);
 `just check` is green; the Allium loop's witness record says `PASS`.
 
+The follow-up (`9a253a4`) adds: a sync with `--url` or `--path` that passes the refusals
+runs the targeted run and refetches only the named pages; a `--url` is checked against the
+resolved scope's allowed hosts; a URL with no page that answered non-HTML is rechecked
+when discovery names it again, and a written page whose URL now answers non-HTML is
+retired as absent and archived; every `--json` event carries `url`, null except on `page`,
+which names the settled row's URL; and a page revived at a new path and retired again in
+one run returns to the path its archived copy is at, or, when another page now holds that
+path, its archived copy moves to the new one. Its new obligations and the targeted run's
+(Open points, scope note) each have a test named after the id or the branch, red before
+the code.
+
 ## Non-goals
 
-- No targeted run: `PrepareRun`'s and `Discover`'s raises for named targets stay; the
-  two targeted refusals and the `--url` and `--path` options are this slice's (scope
-  note, Open points).
+- No owner-testing run: `PrepareRun`'s and `Discover`'s raises stay for owner testing
+  (T20). Until the follow-up they also stopped a targeted run; the follow-up (`9a253a4`)
+  realises the targeted run (scope note, Open points).
 - No block verdict, breaker, skipped-blocked rows or `breaker_tripped` event (T18); no
   `rovo verify`, quality gates or `fail_on_low_quality` beyond the ranking input that
   already exists (T17); no browser, `rovo fetch` or engine refusal obligations (T19); no
@@ -197,7 +224,8 @@ one real wait is T12's installed-script Crawl-delay scenario, kept by design);
 - No new `rovo.toml` key; no new dependency; no new module, so `scripts/wheel_smoke.py`'
   `PACKAGE_FILES` does not move.
 - No specification change: `docs/specs/` is read, not edited. The six `open question`
-  blocks stay open (`crawl.allium` 2410 to 2412, `convert.allium` 473 to 475). A
+  blocks stay open (`crawl.allium` 2410 to 2412, `convert.allium` 473 to 475, at
+  `bad753c`; 2421 to 2423 and 473 to 475 at `9a253a4`). A
   specification gap found while planning, implementing, in weed or in review is never
   resolved in code or in the specification: every such gap joins the one batched
   needs-user question (Open points) and the ledger's `open_questions`.
@@ -211,35 +239,41 @@ one real wait is T12's installed-script Crawl-delay scenario, kept by design);
 | Path | Class | Content |
 | --- | --- | --- |
 | `src/rovo/cli.py` | shared, own lines | `rovo sync` gains `--yes`, `--json`, `--url`, `--path` and `--set`, and wires the progress sink under `--json`; the new `rovo report` command, importing only `rovo._commands` in its body |
-| `src/rovo/_commands.py` | shared, own lines | the refusals in order and `ReportRefusal`'s report; `SyncOptions` from the options; `resolve_config` with `os.environ` and the `--set` values; `RecordCrashAfterRun` around everything after the run; the progress sink handed to the run; `report` (`ShowReport`, `RefuseShowReport`); the module and function docstrings |
+| `src/rovo/_commands.py` | shared, own lines | the refusals in order and `ReportRefusal`'s report; `SyncOptions` from the options; `resolve_config` with `os.environ` and the `--set` values; `RecordCrashAfterRun` around everything after the run; the progress sink handed to the run; `report` (`ShowReport`, `RefuseShowReport`); the module and function docstrings; follow-up (`9a253a4`): `StartSync` and every `--url` guard read the resolved scope's allowed hosts (`scope_of`), and a targeted sync runs |
 | `src/rovo/_config.py` | shared, own lines | `resolve_config`'s environment and flag layers (Facts); the module docstring |
-| `src/rovo/_report.py` | shared, own lines | `report_refusal`, `tally_skipped_url`, `announce_backoff`, `interrupt_sync`, `record_crash`, `record_crash_after_run`; `RankAndWriteReport`'s `done` event; the event's JSON line; `report_path` imported from `rovo._mirror.state` |
-| `src/rovo/_crawl/model.py` | shared, own lines | `ProgressEvent` and the progress sink on `Run` or `RunRequest`; the `UrlSkippedBlocked` trigger (absent at `cc46695`; `TallySkippedUrl` takes it, raised by nothing until T18); nothing else unless step 4 shows a field missing |
+| `src/rovo/_report.py` | shared, own lines | `report_refusal`, `tally_skipped_url`, `announce_backoff`, `interrupt_sync`, `record_crash`, `record_crash_after_run`; `RankAndWriteReport`'s `done` event; the event's JSON line; `report_path` imported from `rovo._mirror.state`; follow-up (`9a253a4`): the JSON line gains `url`; its specification line citations moved |
+| `src/rovo/_crawl/model.py` | shared, own lines | `ProgressEvent` and the progress sink on `Run` or `RunRequest`; the `UrlSkippedBlocked` trigger (absent at `cc46695`; `TallySkippedUrl` takes it, raised by nothing until T18); nothing else unless step 4 shows a field missing; follow-up (`9a253a4`): `ProgressEvent.url` (null but on `page`); its specification line citations moved |
 | `src/rovo/_mirror/state.py` | shared, own lines | `report_path` (moved from `rovo._report`, unchanged) |
 | `src/rovo/_crawl/pace.py` | shared, own lines | `back_off` and `pause_for_cap` hand their `HostBackedOff` to the run's sink as they raise it |
-| `src/rovo/_crawl/run.py` | shared, own lines | `dispose_fetch`'s `skipped_not_html` branch, its raise narrowed to a block verdict; `interrupt_run`; `drive_run` catching an interrupt or a crash after `StartRun` (Facts) and appending a run's record on its own for `RecordCrashAfterRun`; `start` and `page` events (Open points item 2); the docstrings |
+| `src/rovo/_crawl/run.py` | shared, own lines | `dispose_fetch`'s `skipped_not_html` branch, its raise narrowed to a block verdict; `interrupt_run`; `drive_run` catching an interrupt or a crash after `StartRun` (Facts) and appending a run's record on its own for `RecordCrashAfterRun`; `start` and `page` events (Open points item 2); the docstrings; follow-up (`9a253a4`): `prepare_run`'s and `discover`'s targeted branches, their raises narrowed to owner testing; `skipped_not_html` among the recheckable statuses (`PrepareRun`, `Enqueue`); `dispose_fetch` delivering a known page's non-HTML answer as an `absent` candidate, its row `skipped_not_html`; `start` and `page` raised as `AnnounceStart` and `AnnouncePage`, `page` naming the row's URL; its specification line citations moved |
+| `src/rovo/_mirror/model.py`, `src/rovo/_mirror/intake.py`, `src/rovo/_mirror/finalise.py` | shared, own lines | follow-up (`9a253a4`): `Page.revived_from`, set by `revive_removed_page`, cleared by `store_new_page`, `PublishPage` and `retire_page`; `retire_page` returns the record to `revived_from`, or, when another page holds that path, records the archived copy's move (`ArchivedCopyMoved`, cancelling the pending `ArchivedCopyDeleted`), which the finalise pass applies; their specification line citations moved |
+| `src/rovo/_mirror/indexes.py`, `src/rovo/_mirror/links.py`, `src/rovo/_mirror/urls.py` | shared, own lines | follow-up (`9a253a4`): their specification line citations moved, comments only |
 | `tests/fakes.py` | shared, own lines | a fetcher wrapper raising a given exception on a given URL, beside `FakeFetcher` |
-| `tests/test_commands.py` | shared, own lines (re-propagated) | the rovo obligations of step 3 on the command; T09's `test_rule_failure_StartSync_2`, `_3`, `_6` and `_7` and the module docstring re-propagated (a refusal now writes a refused report; ledger notes, T09) |
-| `tests/test_report.py` | shared, own lines | the rovo obligations of step 3 on the report; the ranking enumeration |
-| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3; `DisposeFetch`'s `skipped_not_html` branch; `InterruptRun`'s and `RecordCrash`'s run-level cases |
+| `tests/test_commands.py` | shared, own lines (re-propagated) | the rovo obligations of step 3 on the command; T09's `test_rule_failure_StartSync_2`, `_3`, `_6` and `_7` and the module docstring re-propagated (a refusal now writes a refused report; ledger notes, T09); follow-up (`9a253a4`): `rule-success.AnnounceStart` and `rule-success.AnnouncePage`; the resolved-scope `--url` cases; `target_stops` re-propagated as `target_runs` (a targeted sync runs; ledger note, T16) and `ProgressOnRequest` asserting each event's `url` |
+| `tests/test_report.py` | shared, own lines | the rovo obligations of step 3 on the report; the ranking enumeration; follow-up (`9a253a4`): the JSON line and `AnnounceBackoff` re-propagated with `url` (ledger note, T16) |
+| `tests/test_crawl.py` | shared, own lines | the crawl obligations of step 3; `DisposeFetch`'s `skipped_not_html` branch; `InterruptRun`'s and `RecordCrash`'s run-level cases; follow-up (`9a253a4`): a written page's non-HTML answer retires it as absent; a page-less `skipped_not_html` row rechecked when rediscovered (T16's interim test and the `skipped_not_html -> pending` edge re-propagated; ledger note, T16); a citation moved |
 | `tests/test_config.py` | shared, own lines | the layer precedence, the two named variables, a bad value and an unknown key from each layer, the hash |
-| `tests/test_cli.py` | shared, own lines | the new options and `rovo report` through `CliRunner` (option wiring with `rovo._commands.sync` monkeypatched to record its arguments); `rovo report` through the installed script; `rovo report` loads neither httpx nor `rovo._crawl` |
-| `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_a_later_slices_answer_stops_the_run` loses its `not-html` case; `test_a_known_pages_non_html_answer_stops` replaced by `test_a_known_pages_non_html_answer_settles_skipped_not_html` (the page kept, the row `skipped_not_html`; ledger note, T14) |
+| `tests/test_cli.py` | shared, own lines | the new options and `rovo report` through `CliRunner` (option wiring with `rovo._commands.sync` monkeypatched to record its arguments); `rovo report` through the installed script; `rovo report` loads neither httpx nor `rovo._crawl`; follow-up (`9a253a4`): the printed JSON line gains `url` (ledger note, T16) |
+| `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_a_later_slices_answer_stops_the_run` loses its `not-html` case; `test_a_known_pages_non_html_answer_stops` replaced by `test_a_known_pages_non_html_answer_settles_skipped_not_html` (the page kept, the row `skipped_not_html`; ledger note, T14); follow-up (`9a253a4`): `test_targeted_runs_stop` becomes `test_owner_testing_runs_stop` and the known page's non-HTML answer retires it (ledger notes, T09 and T16) |
 | `tests/test_regressions.py` | shared, own lines | only an earlier test the red run shows red because a refusal now writes a report (ledger note naming its slice); one test per divergence weed finds |
-| `tests/e2e/test_errors_report_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and their site-generating helper; no unit test is named `test_errors_report_sync.py` |
-| `docs/reference/cli.md` | shared, own lines | `rovo sync`: the options, the environment and `--set` layers, the refusals in order and the refused report, interrupts and crashes, `--json` events, a non-HTML answer, the exit codes (1 gains interrupted and crashed); the new `rovo report` section; line 16's later commands lose `report`; line 226's "progress output is a later slice's" and the later-slice sentence (234 to 243) lose what this slice realises |
-| `docs/reference/mirror.md` | shared, own lines | the `rovo.toml` section: the four layers and where the variable and flag syntax is described (`cli.md`); the `crawl-report.json` section: a refused report, `error` and `report_status: interrupted`; `runs.json`: a run crashed after it ended is still recorded |
-| `docs/reference/testing.md` | shared, own lines | `tests/e2e/test_errors_report_sync.py` |
+| `tests/test_mirror.py` | shared, own lines (re-propagated) | follow-up (`9a253a4`): `entity-optional.Page.revived_from`; `test_entity_fields_Page` gains `revived_from` (ledger note, T09); T15's revive-then-retire test re-propagated (the record returns to its old path; ledger note, T15); the collision case (`ArchivedCopyMoved`) and its prune variant |
+| `tests/test_targeted_run.py` | new | follow-up (`9a253a4`): `derived.Run.targeted`, `transition-edge.FrontierEntry.duplicate.pending`, and the targeted branches of `PrepareRun`, `Discover` and `SelectBatch` with `FetchEntry`'s refetch without validators, on unit inputs and through `run_crawl` |
+| `tests/test_assign_path_fallback.py`, `tests/test_assign_path_reserved_segments.py`, `tests/test_page_namespace.py`, `tests/test_lifecycle_regressions.py`, `tests/test_convert.py` | shared, own lines | follow-up (`9a253a4`): their specification line citations moved, comments only (ledger note) |
+| `tests/e2e/test_errors_report_sync.py` | new | the end-to-end scenarios (Acceptance criteria) and their site-generating helper; no unit test is named `test_errors_report_sync.py`; follow-up (`9a253a4`): `test_rovo_sync_url_refetches_one_page`, `test_rovo_sync_path_refetches_the_named_pages_of_a_subtree` and `test_a_page_that_turns_into_a_pdf_is_archived`; the non-HTML scenario re-propagated (`data.txt` is requested again: the seed's links name it; ledger note, T16) and the progress scenario's key set gains `url` |
+| `docs/reference/cli.md` | shared, own lines | `rovo sync`: the options, the environment and `--set` layers, the refusals in order and the refused report, interrupts and crashes, `--json` events, a non-HTML answer, the exit codes (1 gains interrupted and crashed); the new `rovo report` section; line 16's later commands lose `report`; line 226's "progress output is a later slice's" and the later-slice sentence (234 to 243) lose what this slice realises; follow-up (`9a253a4`): the recheck list gains a page-less non-HTML URL; a written page answering non-HTML is retired; the JSON event's `url`; the allowed hosts are the resolved scope's; the targeted sync |
+| `docs/reference/mirror.md` | shared, own lines | the `rovo.toml` section: the four layers and where the variable and flag syntax is described (`cli.md`); the `crawl-report.json` section: a refused report, `error` and `report_status: interrupted`; `runs.json`: a run crashed after it ended is still recorded; follow-up (`9a253a4`): a revived page retired in the same run returns to its old path, or its archived copy moves |
+| `docs/reference/testing.md` | shared, own lines | `tests/e2e/test_errors_report_sync.py`; follow-up (`9a253a4`): the obligation-named test files gain `tests/test_targeted_run.py` |
 | `docs/project/repository-map.md` | shared, own lines | the tree gains `test_errors_report_sync.py` |
 | `docs/project/purpose-and-scope.md`, `README.md` | shared, own lines | only the sentences the step 6 search shows false (`rovo report`, a stop now settled) |
 | `AGENTS.md` | shared, own lines | line 10 to 12's "today" sentence gains `rovo report` printing the last report; the required phrases stay in always-visible text |
-| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: errors and the report |
-| `tickets/README.md`, `tickets/T16-errors-report.md` | ticket | index row, graph, slice bullet, this ticket |
+| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: errors and the report; follow-up (`9a253a4`): the targeted run, the non-HTML recheck and retirement, the event's `url`, the revived record's path |
+| `tickets/README.md`, `tickets/T16-errors-report.md` | ticket | index row, graph, slice bullet, this ticket; follow-up (`9a253a4`): `tickets/T15-lifecycle.md` marks its follow-up item 1 ANSWERED |
 | `.allium-loop/T16-errors-report.json`, `.allium-loop/T16-errors-report.witness.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `pyproject.toml`, `uv.lock`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
 `Justfile`, `scripts/wheel_smoke.py`, `src/rovo/__init__.py`, `src/rovo/_exit.py`,
-`src/rovo/_mirror/` but `state.py`, `src/rovo/_convert/`, `src/rovo/_crawl/fetch.py`,
+`src/rovo/_mirror/` but `state.py` (and, since the follow-up, the files its rows name),
+`src/rovo/_convert/`, `src/rovo/_crawl/fetch.py`,
 `src/rovo/_crawl/sitemaps.py`, `tests/e2e/conftest.py`, `tests/test_import_direction.py`,
 `docs/reference/configuration.md` (its topic is the repository's toolchain; its line 73
 stays true of it), `docs/decisions/` and `docs/specs/` are read, not changed. A file not
@@ -414,7 +448,24 @@ witness of step 7 is its only independent check.
    record each round. A batched question still OPEN does not block `PASS` unless it
    blocks an owned obligation; the witness escalates one that does.
 
-8. Hand-back notes; `status: done`; `just check` ending with
+8. **Follow-up (`9a253a4`).** Mark the batched question's items ANSWERED here, in the
+   ledger and, for item 1, in `tickets/T15-lifecycle.md` and
+   `.allium-loop/T15-lifecycle.json`; move the ledger's `specification_base` to
+   `9a253a4`. Write `just plan-spec <module>` for the four modules to
+   `ai_tmp/T16/followup/plan-spec-<module>.txt`; the owned set gains
+   `rule-success.AnnounceStart`, `rule-success.AnnouncePage`,
+   `entity-optional.Page.revived_from`, `derived.Run.targeted` and
+   `transition-edge.FrontierEntry.duplicate.pending`, and the seven ids of `PrepareRun`,
+   `Discover` and `SelectBatch` whose targeted branches it now owns (73 in all);
+   `entity-fields.Page` changed, so its test is extended. The targeted branches of `PrepareRun`, `Discover` and
+   `SelectBatch` and the new branches without an id of their own (`ArchivedCopyMoved`, the
+   non-HTML retirement, the recheck of a page-less `skipped_not_html` row, the resolved
+   `--url` scope) get branch and guarantee tests. Re-propagate the tests the answers
+   change, each with a ledger note naming its origin slice, and move the specification
+   line citations in tests, sources and tickets that `9a253a4` moved. Then implement, weed,
+   witness and gate as steps 4 to 7.
+
+9. Hand-back notes; `status: done`; `just check` ending with
    `All checks passed and the worktree is unchanged.`, `git status --short` empty after
    the commit. Commit on the branch.
    **Authorisation required**: pushing and opening the pull request.
@@ -478,6 +529,23 @@ The end-to-end scenarios live in `tests/e2e/test_errors_report_sync.py`; each st
   `tests/e2e/test_polite_sync.py`, `tests/e2e/test_discovery_sync.py`,
   `tests/e2e/test_second_sync.py`, `tests/e2e/test_lifecycle_sync.py` and
   `tests/e2e/test_harness.py` pass unedited, unless the ledger names an edit and why.
+- **End to end, follow-up: a targeted URL** (`test_rovo_sync_url_refetches_one_page`):
+  the seed links `guide/a.html` and `guide/b.html`; after the first sync both pages'
+  markup changes. `rovo sync --url <base>guide/a.html <out>` requests robots.txt and
+  `/guide/a.html` alone, rewrites `a.md` and leaves `start.md` and `b.md` byte-identical;
+  its report lists the target and `options.targeted` is true, and `run_id` is 2.
+- **End to end, follow-up: named paths** (`test_rovo_sync_path_refetches_the_named_pages_of_a_subtree`):
+  the seed links `guide/sub/c.html` and `guide/sub/d.html`; after the first sync every
+  page's markup changes. `rovo sync --path pages/<host>/sub/c.md --path
+  pages/<host>/sub/d.md` requests robots.txt and those two pages alone and rewrites
+  their files only; a directory prefix (`--path pages/<host>/sub/`) is refused,
+  `"unknown target path"`, with no request.
+- **End to end, follow-up: a page that turns into a PDF**
+  (`test_a_page_that_turns_into_a_pdf_is_archived`): `guide/doc.html` is served as HTML to
+  the first sync and as `application/pdf` afterwards. The second sync retires it as
+  absent: its record is `removed` with `removal_reason: absent`, `doc.md` is archived
+  under `_removed/<host>/`, its row is `skipped_not_html` and the report has a `removed`
+  change for it.
 - Every owned obligation in step 3 has a test named after it, red before the code and
   green after (`ai_tmp/T16/red.txt` and the final run); the reconciliation line shows
   zero uncovered; every extended test is re-hashed in the ledger with its note; every
@@ -491,6 +559,8 @@ The end-to-end scenarios live in `tests/e2e/test_errors_report_sync.py`; each st
   `ai_tmp/T16/notinthisslice-cc46695.txt`
   (`ai_tmp/T16/rules-before.txt` and `ai_tmp/T16/rules-after.txt`, written by the
   Verification block, do not differ), and `dispose_fetch`'s raise no longer tests `is_html`.
+  Since the follow-up, `prepare_run`'s and `discover`'s raises no longer test the targets:
+  they stop only an owner-testing run (T20).
 - `rovo sync --help` lists `--yes`, `--json`, `--url`, `--path` and `--set`; `rovo report`
   runs through the installed script; `rovo report` and `rovo index` load neither httpx
   nor `rovo._crawl`.
@@ -498,7 +568,8 @@ The end-to-end scenarios live in `tests/e2e/test_errors_report_sync.py`; each st
   ledger validates against `ledger.schema.json` with the T16 batched question's items
   and the carried items OPEN unless the maintainer answered them.
 - `just check-specs` and `just analyse-specs` pass with `docs/specs/` unchanged since
-  `bad753c` (`git diff --stat bad753c -- docs/specs` empty).
+  `9a253a4` (`git diff --stat 9a253a4 -- docs/specs` empty; before the follow-up, since
+  `bad753c`).
 - `import rovo` loads no module outside the standard library and `rovo`; `__all__` is
   `["__version__"]`; `just wheel-smoke` passes with the package-file count unchanged.
 - `just coverage` stays at or above the floor of 95.
@@ -515,7 +586,7 @@ just plan-spec crawl > ai_tmp/T16/plan-spec-crawl.txt
 just plan-spec rovo > ai_tmp/T16/plan-spec-rovo.txt
 just plan-spec mirror > ai_tmp/T16/plan-spec-mirror.txt
 just plan-spec convert > ai_tmp/T16/plan-spec-convert.txt
-git diff --stat bad753c -- docs/specs
+git diff --stat 9a253a4 -- docs/specs
 just py-test tests/test_commands.py tests/test_report.py tests/test_crawl.py tests/test_config.py tests/test_cli.py tests/test_slice_boundaries.py tests/test_regressions.py -ra
 ( set -o pipefail; { time just py-test tests/e2e -ra; } 2>&1 | tail -6 )
 just py-lint
@@ -555,10 +626,27 @@ verification output, each headed by its commit.
 
 ## Open points
 
-- **The T16 batched needs-user question: OPEN.** One question to the maintainer, its
-  items numbered so an answer can cite them. Item 1 is carried from T15; items 2 to 5
-  were found while planning T16, item 6 by the weed pass. Each states the interim the slice builds, never
-  presented as the answer; none blocks an owned obligation. Line numbers at `bad753c`.
+- **The T16 batched needs-user question: ANSWERED** (specification `9a253a4`; the
+  follow-up realises it). The maintainer's answers, by item: (1) the record returns to its
+  old path, the path its kept copy is at (`Page.revived_from`, set by
+  `ReviveRemovedPage`, cleared by `StoreNewPage`, `PublishPage` and `RetirePage`), so
+  nothing moves on disk; when another page has taken that old path in the same run, the
+  record keeps its new path and the copy moves to it (`ArchivedCopyMoved`, cancelling the
+  pending `ArchivedCopyDeleted`; under prune the copy is deleted) (`RetirePage`,
+  `mirror.allium` 1010 to 1071); (2) `start` is raised once when the run is created
+  (`AnnounceStart`) and `page` once per row a fetch settles (`AnnouncePage`), and
+  `ProgressReported` gains `url`, null on every event but `page`, which names the row's
+  URL (`rovo.allium` 604 to 614, `ProgressOnRequest`); (3) a page-less
+  `skipped_not_html` row is rechecked when discovery names it again (`PrepareRun`'s
+  `recheckable_urls`, `Enqueue`'s rediscovered set), and a written page whose URL now
+  answers non-HTML is retired as absent and archived like a 404, its row settling
+  `skipped_not_html` (`DisposeFetch`, `crawl.allium` 1896 to 1992; `RemovalReason`'s
+  comment names it); (4) and (5) accepted as built (`InterruptSync` and
+  `RecordCrashAfterRun` guidance, `rovo.allium` 730 to 783); (6) the off-host test and
+  every later `--url` guard read the resolved scope's allowed hosts (`scope_of`), never
+  the raw configuration value (`RefuseOffHostTarget`, 343 to 361). The question as asked
+  follows, its line numbers at `bad753c`. Item 1 is carried from T15; items 2 to 5 were
+  found while planning T16, item 6 by the weed pass.
   1. **Carried from the T15 follow-up batched question, item 1** (OPEN in
      `.allium-loop/T15-lifecycle.json` and `tickets/T15-lifecycle.md`). **Which path a
      removed record holds when its kept copy is at its old path.** `RetirePage`'s
@@ -615,10 +703,12 @@ verification output, each headed by its commit.
   requested, and whether a host retirement ranks exit 3 or 1.
 - **Scope note, not a specification gap.** T14 and T15 assigned the targeted branches of
   `PrepareRun`, `Discover` and `SelectBatch` (a sync with `--url` or `--path`) and the
-  edge `duplicate -> pending` to T16, but T16's capability names the targeted refusals
-  and not the targeted run. This slice takes the refusals and the options and keeps the
-  run's two raises, so a named target that passes the refusals stops the sync. The
-  orchestrator assigns the targeted run (T16's follow-up or a later slice).
+  edge `duplicate -> pending` to T16, but T16's capability named the targeted refusals
+  and not the targeted run, so the slice as committed (`8361182`) took the refusals and
+  the options and kept the run's two raises: a named target that passed the refusals
+  stopped the sync. The orchestrator assigned the targeted run to this slice's
+  follow-up (`9a253a4`), which owns it: those branches, `derived.Run.targeted` and the
+  edge `duplicate -> pending`. The raises stay for owner testing (T20).
 - **The specification's open questions.** The three `crawl.allium` ones (2410 to 2412)
   and the three `convert.allium` ones (473 to 475) stay open; the second (a URL that
   fails on every sync is retried for ever) is on this slice's path: its interim holds,

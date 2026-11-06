@@ -304,13 +304,19 @@ def tally_skipped_url(report: CrawlReport, skipped: UrlSkippedBlocked) -> bool:
 
 def announce_backoff(backed_off: HostBackedOff) -> ProgressEvent:
     """Realises rovo.allium AnnounceBackoff: the host_backoff event, naming the host."""
-    return ProgressEvent(event="host_backoff", host=backed_off.host.name, until=backed_off.until)
+    return ProgressEvent(
+        event="host_backoff", host=backed_off.host.name, until=backed_off.until, url=None
+    )
 
 
 def event_line(event: ProgressEvent) -> str:
-    """One --json progress line: {"event", "host", "until"}, keys sorted, until ISO 8601."""
+    """One --json progress line: {"event", "host", "until", "url"}, keys sorted.
+
+    until is ISO 8601; url is null on every event but page.
+    """
     until = None if event.until is None else timestamp(event.until)
-    return json.dumps({"event": event.event, "host": event.host, "until": until}, sort_keys=True)
+    line = {"event": event.event, "host": event.host, "until": until, "url": event.url}
+    return json.dumps(line, sort_keys=True)
 
 
 def report_refusal(  # noqa: PLR0913  The SyncRefused trigger's parameters, and the clock.

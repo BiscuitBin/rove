@@ -3,14 +3,16 @@
 The refusals in order, each with a refused crawl-report.json and no request; a non-HTML
 answer settled skipped_not_html beside a URL that fails on every sync; `rovo report`; an
 interrupted and a crashed sync, each with its report; --json progress; and the
-environment layer. Each site is generated into tmp_path by this module's own helper:
-served first, so its base URL is known, then written, since `http.server` reads each
-file per request. The syncs that fetch run `rovo._commands.sync` in process over the
-real HttpxFetcher (or a RaisingFetcher around it) on a FixedClock, which never sleeps;
-the refusals and `rovo report` run through CliRunner and make no request. robots.txt
-declares no Crawl-delay and no sitemap, and there is no llms.txt. A page path strips the
-scope prefix /guide/, so <base>guide/x.html is pages/<host>/x.md. Not `test_commands.py`
-or `test_report.py`, which the unit suite names.
+environment layer. The follow-up (spec 9a253a4): a sync naming --url or --path targets
+refetches those pages alone, and a written page that turns into a PDF is archived.
+Each site is generated into tmp_path by this module's own helper: served first, so its
+base URL is known, then written, since `http.server` reads each file per request. The
+syncs that fetch run `rovo._commands.sync` in process over the real HttpxFetcher (or a
+RaisingFetcher around it) on a FixedClock, which never sleeps; the refusals and
+`rovo report` run through CliRunner and make no request. robots.txt declares no
+Crawl-delay and no sitemap, and there is no llms.txt. A page path strips the scope
+prefix /guide/, so <base>guide/x.html is pages/<host>/x.md. Not `test_commands.py` or
+`test_report.py`, which the unit suite names.
 """
 
 import json
@@ -90,12 +92,14 @@ def initialised(base: str, tmp_path: Path, name: str = "out") -> Path:
     return out
 
 
-def synced(
+def synced(  # noqa: PLR0913  One keyword per sync option a scenario varies.
     out: Path,
     *,
     confirmed: bool = False,
     json_events: bool = False,
     progress: Callable[[ProgressEvent], None] | None = None,
+    urls: Sequence[str] = (),
+    paths: Sequence[str] = (),
 ) -> ExitCode:
     """Rovo sync in process over the real HttpxFetcher, on a FixedClock."""
     with HttpxFetcher() as fetcher:
@@ -106,6 +110,8 @@ def synced(
             confirmed=confirmed,
             json_events=json_events,
             progress=progress,
+            urls=tuple(urls),
+            paths=tuple(paths),
         )
 
 
@@ -213,7 +219,9 @@ def test_a_non_html_answer_is_skipped_and_a_failing_url_is_reported_every_sync(
     URL or change names it. broken.html answers 500 on every try: one failed_urls row
     with every attempt and one failed change; the first sync exits 1. The second sync
     requests broken.html again (every failed row is re-pended: the specification's
-    interim for its open question) and not data.txt, and exits 1 with the same row.
+    interim for its open question) and data.txt again (a page-less skipped_not_html row
+    the seed's links name again is rechecked, 9a253a4), and exits 1 with the same row.
+    Re-propagated by the T16 follow-up (origin T16: data.txt was never requested again).
     """
     root, base = served(
         serve_site,
@@ -245,7 +253,8 @@ def test_a_non_html_answer_is_skipped_and_a_failing_url_is_reported_every_sync(
     assert synced(out).number == PARTIAL
     again = serve_site.paths(base)[since:]
     assert "/guide/broken.html" in again
-    assert "/guide/data.txt" not in again
+    assert "/guide/data.txt" in again
+    assert frontier_status(out, data_url) == "skipped_not_html"
     assert report(out)["failed_urls"] == [expected_row]
 
 
@@ -354,8 +363,9 @@ def test_json_progress_ends_with_one_done_event(
     """ProgressOnRequest and AnnounceBackoff: flaky.html answers 503 once, then is served.
 
     The sink receives start first, a host_backoff naming the host, page events and
-    exactly one done, last; each event is one JSON line with event, host and until.
-    Without a sink nothing is printed on standard output.
+    exactly one done, last; each event is one JSON line with event, host, until and url,
+    url naming the settled row on page events alone. Without a sink nothing is printed
+    on standard output. Re-propagated by the T16 follow-up (origin T16): url (9a253a4).
     """
     _, base = served(
         serve_site,
@@ -376,7 +386,9 @@ def test_json_progress_ends_with_one_done_event(
     for event in events:
         line = event_line(event)
         assert line.rstrip("\n").count("\n") == 0
-        assert set(json.loads(line)) == {"event", "host", "until"}
+        assert set(json.loads(line)) == {"event", "host", "until", "url"}
+    page_urls = {event.url for event in events if event.event == "page"}
+    assert page_urls == {f"{base}guide/start.html", f"{base}guide/flaky.html"}
     assert capsys.readouterr().out == ""
 
     quiet = initialised(base, tmp_path, "quiet")
@@ -406,3 +418,111 @@ def test_rovo_mirror_prune_from_the_environment_deletes_removed_files(
     assert record["status"] == "removed"
     assert not (out / gone_path).exists()
     assert not (out / "_removed").exists()
+
+
+def changed(root: Path, names: Sequence[str]) -> None:
+    """Give each generated page guide/<name>.html new prose, links kept out."""
+    for name in names:
+        write(root, f"guide/{name}.html", page_html(f"{name.title()} revised"))
+
+
+def test_rovo_sync_url_refetches_one_page(serve_site: SiteServer, tmp_path: Path) -> None:
+    """The targeted run (9a253a4): `rovo sync --url` refetches the named page alone.
+
+    After the first sync every page's markup changes. A sync naming a.html requests
+    robots.txt (its host is opened) and /guide/a.html, nothing else: no seed, sitemap or
+    llms.txt. a.md is rewritten; start.md and b.md stay byte-identical; the report, run
+    2, lists the target and records the options as targeted.
+    """
+    root, base = served(serve_site, tmp_path, {"start": ("a.html", "b.html"), "a": (), "b": ()})
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    before = page_files(out)
+    changed(root, ("start", "a", "b"))
+    a_url = f"{base}guide/a.html"
+    since = len(serve_site.paths(base))
+    assert synced(out, urls=(a_url,)) is ExitCode.ok
+    assert sorted(serve_site.paths(base)[since:]) == ["/guide/a.html", "/robots.txt"]
+    after = page_files(out)
+    pages = page_root(base)
+    assert after[f"{pages}a.md"] != before[f"{pages}a.md"]
+    assert after[f"{pages}start.md"] == before[f"{pages}start.md"]
+    assert after[f"{pages}b.md"] == before[f"{pages}b.md"]
+    data = report(out)
+    assert (data["run_id"], data["targets"]) == (len(["first", "targeted"]), [a_url])
+    options = data["options"]
+    assert isinstance(options, dict)
+    assert options["targeted"] is True
+
+
+def test_rovo_sync_path_refetches_the_named_pages_of_a_subtree(
+    serve_site: SiteServer, tmp_path: Path
+) -> None:
+    """The targeted run by --path (9a253a4): each named page of guide/sub/ is refetched.
+
+    A --path names one written page's exact mirror-relative path
+    (RefuseUnknownTargetPath), so the subtree is named page by page: robots.txt and the
+    two pages are requested, their files rewritten, start.md left alone. A directory
+    prefix is no page's path: refused "unknown target path", with no request.
+    """
+    root, base = served(
+        serve_site,
+        tmp_path,
+        {"start": ("sub/c.html", "sub/d.html"), "sub/c": (), "sub/d": ()},
+    )
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    pages = page_root(base)
+    named = (f"{pages}sub/c.md", f"{pages}sub/d.md")
+    before = page_files(out)
+    assert set(named) <= set(before)
+    changed(root, ("start", "sub/c", "sub/d"))
+    since = len(serve_site.paths(base))
+    assert synced(out, paths=named) is ExitCode.ok
+    asked = serve_site.paths(base)[since:]
+    assert sorted(asked) == ["/guide/sub/c.html", "/guide/sub/d.html", "/robots.txt"]
+    after = page_files(out)
+    assert all(after[path] != before[path] for path in named)
+    assert after[f"{pages}start.md"] == before[f"{pages}start.md"]
+
+    since = len(serve_site.paths(base))
+    assert cli_sync(out, "--path", f"{pages}sub/") == USAGE
+    assert report(out)["refusal_reason"] == "unknown target path"
+    assert serve_site.paths(base)[since:] == []
+
+
+def test_a_page_that_turns_into_a_pdf_is_archived(serve_site: SiteServer, tmp_path: Path) -> None:
+    """DisposeFetch (9a253a4): a written page whose URL now answers non-HTML is retired.
+
+    doc.html answers HTML to the first sync and application/pdf afterwards. The second
+    sync retires it as absent: its record is removed with removal_reason absent, doc.md
+    leaves pages/ for _removed/<host>/ with its published bytes, its row is
+    skipped_not_html, and the report has one removed change for it.
+    """
+    pdf = Answer(200, headers={"Content-Type": "application/pdf"}, body="%PDF-1.4\n%%EOF\n")
+    html = Answer(200, headers={"Content-Type": "text/html; charset=utf-8"}, body=page_html("Doc"))
+    _, base = served(
+        serve_site,
+        tmp_path,
+        {"start": ("doc.html",)},
+        script={"/guide/doc.html": [html]},
+        always={"/guide/doc.html": pdf},
+    )
+    out = initialised(base, tmp_path)
+    assert synced(out) is ExitCode.ok
+    doc_path = f"{page_root(base)}doc.md"
+    published = (out / doc_path).read_bytes()
+    since = len(serve_site.paths(base))
+    assert synced(out) is ExitCode.ok
+    assert "/guide/doc.html" in serve_site.paths(base)[since:]
+    doc_url = f"{base}guide/doc.html"
+    records = load(out / ".rovo" / "manifest.json")["pages"]
+    assert isinstance(records, list)
+    (record,) = [page for page in records if page["identity"] == doc_url]
+    assert (record["status"], record["removal_reason"]) == ("removed", "absent")
+    assert not (out / doc_path).exists()
+    assert (out / "_removed" / doc_path.removeprefix("pages/")).read_bytes() == published
+    assert frontier_status(out, doc_url) == "skipped_not_html"
+    changes = report(out)["changes"]
+    assert isinstance(changes, list)
+    assert [row["kind"] for row in changes if row["url"] == doc_url] == ["removed"]

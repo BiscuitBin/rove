@@ -138,3 +138,16 @@ policy.
   writing the report with its `error`; prints progress as JSON lines under `--json`;
   reads `ROVO_<SECTION>__<FIELD>` variables and `--set SECTION.FIELD=VALUE` flags over
   `rovo.toml`. The new `rovo report OUT_DIR` prints the last report.
+- Targeted syncs: `rovo sync --url URL` and `--path PATH` sync only the named pages,
+  where they stopped with exit 1: only the targets' hosts are opened (their robots.txt
+  read), no seed, sitemap or `llms.txt` is walked, each target is fetched without
+  validators and exempt from `max_pages`, and every other frontier row is left as it
+  was. A `--url` is checked against the resolved scope's hosts, so the first seed's
+  host is allowed when `allowed_hosts` is empty.
+- A page in the mirror whose URL now answers non-HTML is removed as `absent` and
+  archived, where it kept its file; a URL with no page that answered non-HTML is
+  fetched again when a page link, a sitemap or `llms.txt` names it again. Each `--json`
+  event gains `url`, the settled row's URL on `page` and `null` otherwise. A page
+  revived at a new path and removed again in one sync returns to its old path, where
+  its archived copy is; when another page took that path, the copy moves to the new
+  path.

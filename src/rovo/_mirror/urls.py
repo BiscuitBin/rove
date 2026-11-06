@@ -128,7 +128,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 658 to 741).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 659 to 742).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or

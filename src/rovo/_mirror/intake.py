@@ -1,4 +1,4 @@
-"""Page intake (mirror.allium 518 to 916): candidates become pages and aliases.
+"""Page intake (mirror.allium 519 to 918): candidates become pages and aliases.
 
 Several rules share `PageCandidate.created`; their guards partition the outcomes, so
 `settle_candidate` fires the one whose guards hold, exactly one per candidate. The
@@ -96,6 +96,7 @@ def store_new_page(candidate: PageCandidate, clock: Clock) -> Page | None:
         content_digest=digest(content.body),
         previous_digest=None,
         moved_from=None,
+        revived_from=None,
         etag=candidate.etag,
         last_modified=candidate.last_modified,
         sitemap_lastmod=candidate.sitemap_lastmod,
@@ -187,7 +188,7 @@ def refresh_page(candidate: PageCandidate, page: Page, clock: Clock) -> LinksFou
 
 
 def links_found(candidate: PageCandidate, page: Page) -> LinksFound:
-    """The LinksFound RefreshPage raises for the stored page (mirror.allium 878)."""
+    """The LinksFound RefreshPage raises for the stored page (mirror.allium 880)."""
     content = candidate.content
     return LinksFound(
         candidate=candidate,
@@ -362,7 +363,8 @@ def revive_removed_page(candidate: PageCandidate, clock: Clock) -> Page | None:
     """Realises mirror.allium ReviveRemovedPage: the revived page; None when its guards fail.
 
     The removed record is written again at a path for its identity, new again, and its
-    archived copy leaves the removed area.
+    archived copy leaves the removed area; until finalisation, revived_from keeps the
+    path that copy is at.
     """
     if candidate.status is not CandidateStatus.pending:
         return None
@@ -384,10 +386,11 @@ def revive_removed_page(candidate: PageCandidate, clock: Clock) -> Page | None:
     target.removal_reason = None
     target.redirect_target = None
     target.path = new_path
+    target.revived_from = archived_path
     target.previous_digest = None
     target.first_seen = clock.now()
     mirror.record_file_effect(
-        FileEffect(kind=FileEffectKind.archived_copy_deleted, path=archived_path, source=new_path)
+        FileEffect(kind=FileEffectKind.archived_copy_deleted, path=archived_path)
     )
     refresh_page(candidate, target, clock)
     return target
@@ -452,20 +455,40 @@ def retire_page(
     archived at _removed/<host>/<relative path>, or deleted under the mirror's prune; no file
     moves here: the event is recorded and the next finalise pass applies it. A page moved
     this run and not yet published is still at its published path, which the event takes.
+    A page revived this run returns to the path it was revived from, where its archived
+    copy is, unless another page now holds that path: then it keeps its new path and,
+    without prune, the copy moves there (ArchivedCopyMoved).
     """
     if page.status is not PageStatus.written:
         return None
     mirror = page.mirror
+    revived_from = page.revived_from
+    old_path_held = revived_from is not None and any(
+        other is not page and other.path.casefold() == revived_from.casefold()
+        for other in mirror.pages
+    )
+    retired_path = page.path if revived_from is None or old_path_held else revived_from
     page.status = PageStatus.removed
     page.removed_at = clock.now()
     page.removal_reason = reason
     page.redirect_target = redirect_target
     page.moved_from = None
+    page.revived_from = None
+    page.path = retired_path
     mirror.aliases = [alias for alias in mirror.aliases if alias.target is not page]
     mirror.links = [link for link in mirror.links if link.source is not page]
-    kind = FileEffectKind.deleted if mirror.prune else FileEffectKind.archived
-    source = _published_path(mirror, page.path)
-    mirror.record_file_effect(FileEffect(kind=kind, path=page.path, source=source))
+    if mirror.prune:
+        kind = FileEffectKind.deleted
+    else:
+        kind = FileEffectKind.archived
+        if old_path_held and revived_from is not None:
+            mirror.record_file_effect(
+                FileEffect(
+                    kind=FileEffectKind.archived_copy_moved, path=revived_from, source=retired_path
+                )
+            )
+    source = _published_path(mirror, retired_path)
+    mirror.record_file_effect(FileEffect(kind=kind, path=retired_path, source=source))
     removed = PageRemoved(mirror=mirror, page=page, reason=reason, candidate=candidate)
     mirror.removals.append(removed)
     return removed

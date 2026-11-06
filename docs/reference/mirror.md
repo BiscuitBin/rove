@@ -358,11 +358,14 @@ identity replaces that record, and its archived copy is deleted too. With
 `mirror.prune = true` in `rovo.toml`, a removed page's file is deleted instead of
 archived. A page answered again and removed again in the same sync keeps its archived
 copy, even when it was answered at a new path: that path was never published, so
-nothing is archived from it.
+nothing is archived from it. Its record goes back to its old path, where the copy is;
+when another page took that old path in the same sync, the record keeps the new path
+and the copy moves to `_removed/<host>/<new path>`, so record and copy still agree.
+Under `mirror.prune = true` the copy is deleted instead.
 
 No file moves while a sync fetches. A removal, a move or a revival is recorded in
 memory, and the finalisation applies the file changes in order before it publishes the
-pages: a file is archived, an archived copy deleted, then, once the new file is
+pages: a file is archived, an archived copy deleted or moved, then, once the new file is
 written, a moved page's old file deleted unless another page now holds that path. Each
 change is idempotent, so a sync interrupted before its finalisation leaves the files as
 the last finished sync left them. A sync that stops inside the finalisation, after a

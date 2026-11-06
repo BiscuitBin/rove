@@ -119,6 +119,7 @@ class FileEffectKind(enum.Enum):
     deleted = "deleted"  # PageFileDeleted: pages/<p> deleted (prune)
     moved = "moved"  # PageFileMoved: pages/<p> deleted once the new path is published
     archived_copy_deleted = "archived_copy_deleted"  # ArchivedCopyDeleted: _removed/<p>
+    archived_copy_moved = "archived_copy_moved"  # ArchivedCopyMoved: _removed/<p> to <source>
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ class MirrorConfig:
     prune: bool
 
 
-# mirror.allium's config block (mirror.allium 494 to 502), the one copy in code.
+# mirror.allium's config block (mirror.allium 495 to 503), the one copy in code.
 CONFIG = MirrorConfig(
     max_path_chars=200,
     collision_hash_chars=6,
@@ -157,10 +158,9 @@ class FileEffect:
     """One file event a lifecycle rule raised at intake; the finalise pass applies it.
 
     `path` is the page path the event names (for a move, the old one). `source` is, for
-    a move, the new path; for an archive or a deletion, the file that holds the page now
-    when that is not `path`: a page moved this run and not yet published is still at the
-    path it was last published at; for a revived page's archived copy, the path the page
-    was revived at.
+    a move or an archived copy's move, the new path; for an archive or a deletion, the
+    file that holds the page now when that is not `path`: a page moved this run and not
+    yet published is still at the path it was last published at.
     """
 
     kind: FileEffectKind
@@ -366,20 +366,24 @@ class Mirror:
     def record_file_effect(self, effect: FileEffect) -> None:
         """Record a file event for the next finalise pass, composed per page path.
 
-        An archive of a page revived this run cancels the deletion of its archived copy and
-        is not recorded: the archive still holds the last published bytes. The two are
-        matched by the path the page is held at now, so a page revived at a new path, never
-        published there, keeps the copy at its old one (RetirePage's guidance).
+        A page revived this run and retired again (RetirePage's guidance): the archive of
+        the path its archived copy is at cancels that copy's pending deletion and is not
+        recorded, since the archive still holds the last published bytes; the copy's move
+        to the page's new path cancels the deletion too, and is recorded.
         """
-        if effect.kind is FileEffectKind.archived:
-            held_at = effect.source or effect.path
+        if effect.kind is FileEffectKind.archived and effect.source is not None:
+            self.file_effects.append(effect)  # A moved page: no archived copy at its path.
+            return
+        if effect.kind in {FileEffectKind.archived, FileEffectKind.archived_copy_moved}:
             for pending in self.file_effects:
                 if (
                     pending.kind is FileEffectKind.archived_copy_deleted
-                    and (pending.source or pending.path) == held_at
+                    and pending.path == effect.path
                 ):
                     self.file_effects.remove(pending)
-                    return
+                    if effect.kind is FileEffectKind.archived:
+                        return
+                    break
         self.file_effects.append(effect)
 
     def known_page(self, url: str) -> "Page | None":
@@ -437,6 +441,7 @@ class Page:
     removed_at: datetime | None = None
     removal_reason: RemovalReason | None = None
     redirect_target: str | None = None
+    revived_from: str | None = None
 
     @property
     def outbound_links(self) -> tuple["Link", ...]:
@@ -522,7 +527,7 @@ class Link:
 
 @dataclass(frozen=True, kw_only=True)
 class CandidateDelivered:
-    """The trigger the crawl raises through PageIntake (mirror.allium 1587)."""
+    """The trigger the crawl raises through PageIntake (mirror.allium 1611)."""
 
     run_id: int
     mirror: Mirror
@@ -613,7 +618,7 @@ class Index:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexBuildDue:
-    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1229, 1247)."""
+    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1253, 1271)."""
 
     pass_: MirrorPass
 
@@ -627,7 +632,7 @@ class IndexFilesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexesWritten:
-    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1274)."""
+    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1298)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -636,7 +641,7 @@ class IndexesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksFound:
-    """The trigger RefreshPage raises (mirror.allium 878): the stored page's targets."""
+    """The trigger RefreshPage raises (mirror.allium 880): the stored page's targets."""
 
     candidate: PageCandidate
     page: Page
@@ -647,7 +652,7 @@ class LinksFound:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksRewritten:
-    """The trigger FinishLinkPass raises (mirror.allium 1228)."""
+    """The trigger FinishLinkPass raises (mirror.allium 1252)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -657,7 +662,7 @@ class LinksRewritten:
 
 @dataclass(frozen=True, kw_only=True)
 class PageFinalised:
-    """The trigger PublishPage raises (mirror.allium 1207)."""
+    """The trigger PublishPage raises (mirror.allium 1231)."""
 
     pass_: MirrorPass
     page: Page
