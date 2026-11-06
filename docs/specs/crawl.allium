@@ -513,6 +513,8 @@ entity FetchAttempt {
     challenges: OwnerChallenge with attempt = this
     unsuccessful_challenge: challenges.any(c => c.status in {abandoned, timed_out})
     failed_outright: response.error != null or response.status = 0
+    -- A hop fetch_or_render did not request because its host had tripped.
+    hop_refused: response.error = "redirect to a retired host"
     wants_escalation:
         (render_reason != null or verdict.kind != none)
         and (verdict.kind = none or walk.host.run.policy.protection_escalation)
@@ -1542,7 +1544,24 @@ rule SkipRobotsDisallowedOnNewHost {
     when: EntryHostReady(run, entry)
     requires: run.status = running and entry.status = in_progress
     requires: not robots_allows(run, entry.identity)
+    let host = Host{run: run, name: entry.host_name}
+    requires: exists host and not host.breaker_tripped
     ensures: entry.status = skipped_robots
+}
+
+-- Decided: a row whose own readiness retires its host (the robots.txt
+-- OpenHostForEntry or ReadRobotsForNewOrigin reads has a Crawl-delay or
+-- a Retry-After past the cap) is settled as SkipTrippedHost settles the
+-- host's other rows, so the batch can go idle and other hosts are still
+-- fetched.
+rule SkipTrippedHostAfterReady {
+    when: EntryHostReady(run, entry)
+    requires: run.status = running and entry.status = in_progress
+    let host = Host{run: run, name: entry.host_name}
+    requires: exists host and host.breaker_tripped
+    ensures:
+        entry.status = skipped_blocked
+        UrlSkippedBlocked(run: run, url: entry.identity)
 }
 
 rule FetchEntry {
@@ -1582,7 +1601,7 @@ rule FetchEntry {
 rule AttemptTier {
     when: TierRequested(walk, tier, try)
     requires: walk.status = walking
-    requires: walk.host.run.status = running
+    requires: walk.host.run.status = running and not walk.host.breaker_tripped
     let run = walk.host.run
     let response = fetch_or_render(walk.entry.identity, tier, walk.conditional and tier = http, run, walk.host)
     let verdict = classify_block(response, if walk.host.has_text_baseline: walk.host.median_text else: null)
@@ -1637,7 +1656,11 @@ rule AttemptTier {
         -- whose breaker has tripped is not requested and its robots.txt is
         -- not read: the redirect stops there and the response is an error,
         -- "redirect to a retired host", retried as any error answer is, so
-        -- the page fails with it (DisposeFetch). Every response counts toward
+        -- the page fails with it (DisposeFetch). Decided: when the hop's
+        -- robots.txt retires the walk's own host, or the walk's own host
+        -- has tripped, the hop is a request the walk needed (hop_refused):
+        -- the walk makes no further request and its row is skipped_blocked
+        -- (StopWalkOnTrippedHost). Every response counts toward
         -- max_bytes the moment it arrives, retries and discarded renders
         -- included. Enabled controls wait for a free concurrency
         -- slot, any host pause and a rate token. There is no burst: the
@@ -1723,7 +1746,7 @@ rule SettleChallenge {
 rule HttpRetry {
     when: AttemptReady(attempt)
     requires: attempt.retryable
-    requires: attempt.walk.status = walking and attempt.walk.host.run.status = running
+    requires: attempt.walk.status = walking and attempt.walk.host.run.status = running and not attempt.walk.host.breaker_tripped
     let host = attempt.walk.host
     let policy = host.run.policy
     let retry_until = now + retry_wait(attempt.try, attempt.response.retry_after, policy)
@@ -1784,7 +1807,7 @@ rule CountRetryAfter {
 rule Escalate {
     when: AttemptReady(attempt)
     let walk = attempt.walk
-    requires: walk.status = walking and walk.host.run.status = running
+    requires: walk.status = walking and walk.host.run.status = running and not walk.host.breaker_tripped
     requires: not attempt.retryable and not attempt.retires_host
     requires: attempt.wants_escalation
     requires: next_tier(walk.tiers, attempt.tier) != null
@@ -1797,7 +1820,7 @@ rule Escalate {
 rule SettleWalk {
     when: AttemptReady(attempt)
     let walk = attempt.walk
-    requires: walk.status = walking and walk.host.run.status = running
+    requires: walk.status = walking and walk.host.run.status = running and not (walk.host.breaker_tripped and attempt.hop_refused)
     requires: not attempt.retryable and not attempt.retires_host
     requires:
         not attempt.wants_escalation
@@ -1823,7 +1846,42 @@ rule SettleWalk {
         -- walk's last good http result, flagged render_needed; a blocked
         -- render never falls back. Only the standing tier joins tiers_used,
         -- and a walk counts one render escalation whether it climbed one
-        -- rung or two, never when it only started above http.
+        -- rung or two, never when it only started above http. An answer
+        -- the walk already holds when its host trips settles here as
+        -- usual, so a good page is still stored; only a walk that needs
+        -- another request stops (StopWalkOnTrippedHost).
+}
+
+-- Decided: a walk whose own host trips mid-walk (a hop's robots.txt
+-- retires it, or another walk trips its breaker) makes no further request:
+-- HttpRetry, Escalate and AttemptTier require an untripped host, and a walk
+-- that needs another request (a retry, an escalation, or a hop its own
+-- tripped host refused) stops, its row skipped_blocked as the host's
+-- pending rows are. An answer already held settles as usual (SettleWalk),
+-- and an attempt that itself retires the host settles as it stands
+-- (RetireHostOnLongRetryAfter).
+rule StopWalkOnTrippedHost {
+    when: AttemptReady(attempt)
+    let walk = attempt.walk
+    requires: walk.status = walking and walk.host.run.status = running and walk.host.breaker_tripped
+    requires: not attempt.retires_host
+    requires:
+        attempt.retryable
+        or attempt.hop_refused
+        or (attempt.wants_escalation
+            and next_tier(walk.tiers, attempt.tier) != null
+            and not render_added_nothing(walk.soft_suspect, attempt))
+    ensures:
+        walk.status = settled
+        walk.standing = attempt
+        walk.entry.status = skipped_blocked
+        UrlSkippedBlocked(run: walk.host.run, url: walk.entry.identity)
+
+    @guidance
+        -- The walk settles so no walk is left walking, but its row is
+        -- already skipped_blocked, so DisposeFetch (which requires an
+        -- in_progress row) does not dispose it, and FeedBreaker does not
+        -- feed a tripped breaker.
 }
 
 -- One breaker outcome per settled page fetch.
@@ -1888,7 +1946,10 @@ rule BreakerEscalates {
 
 -- Default stated here (veto at review): a fetch refused after a trip is
 -- skipped_blocked, announced once; no new entry on a tripped host starts
--- a fetch in this run, and walks already in flight finish their tiers.
+-- a fetch in this run. Decided: walks already in flight make no further
+-- request; an answer one already holds settles as usual (SettleWalk), and
+-- one that needs another request stops, its row skipped_blocked
+-- (StopWalkOnTrippedHost).
 rule BreakerTrips {
     when: breaker: Breaker.should_act
     requires: breaker.status = watching
@@ -2374,10 +2435,14 @@ surface SiteExchange {
         -- a stronger policy or starts another run.
 
     @guarantee BreakerStopsTheRun
-        -- When a host's block rate crosses the threshold over the window, a
-        -- standard run stops fetching that host for the rest of the run,
-        -- skips its pending rows and reports the trip; the report lists
-        -- every blocked and skipped URL.
+        -- When a host's block rate crosses the threshold over the window,
+        -- or a Retry-After or Crawl-delay past the cap retires it, a
+        -- standard run makes no further request to that host for the rest
+        -- of the run: its pending rows, a row whose own readiness retired
+        -- it and a walk in flight on it that needs another request are
+        -- skipped_blocked, each announced once, while an answer a walk
+        -- already holds settles as usual; other hosts are still fetched; the run reports
+        -- the trip, and the report lists every blocked and skipped URL.
 }
 
 -- Owner testing: what a declared owner can see and do, and what it cannot.

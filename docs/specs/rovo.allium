@@ -607,7 +607,10 @@ rule AnnounceStart {
 }
 
 -- Decided: page is raised once per frontier row a fetch settles, naming
--- the row's host and its URL.
+-- the row's host and its URL. page means a fetch settled: a walk
+-- StopWalkOnTrippedHost stops has fetched, so it raises page, while a row
+-- skipped without a fetch (SkipTrippedHost, SkipTrippedHostAfterReady,
+-- BreakerTrips, SelectBatch) raises none.
 rule AnnouncePage {
     when: walk: crawl/LadderWalk.status transitions_to settled
     ensures: ProgressReported(operator: walk.host.run.operator, event: page, host: walk.host.name, until: null, url: walk.entry.identity)
