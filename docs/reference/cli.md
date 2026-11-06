@@ -13,8 +13,8 @@ same application under the same program name. The implementation of the specific
 under `docs/specs/` is under way: `rovo init` creates a mirror, `rovo sync` mirrors
 its seed pages, the pages its sitemaps and `llms.txt` name and the pages they link to
 over HTTP and writes the mirror's indexes, `rovo verify` checks the mirror on disk
-offline, `rovo index` rebuilds the indexes offline and `rovo report` prints the last
-report; the later command (`fetch`) arrives with its slice. Every example on this page was run from a checkout as
+offline, `rovo index` rebuilds the indexes offline, `rovo report` prints the last
+report and `rovo fetch` prints one page's Markdown. Every example on this page was run from a checkout as
 `uv run --frozen rovo ...`; an installed command behaves the same.
 
 ## `rovo`
@@ -126,6 +126,30 @@ report's exit code. A page robots.txt disallows is skipped, not fetched. A page 
 mirror has no free path for is refused: its URL is reported as failed with the error
 `no free path` and the sync exits 1 (the [mirror reference](mirror.md#page-files) says
 when that happens).
+
+`crawl.render_mode` decides when the browser tier renders a page, in headless Chromium
+through playwright (the `browser` extra, and a browser `playwright install` fetched).
+Under `"never"`, the default, every page is fetched over HTTP, and a page whose answer
+needs JavaScript (an empty application root, a `<noscript>` notice, no main element,
+or thin text on a large page) is stored from that answer with `render_needed` among its
+`quality_flags`, so it is low confidence. Under `"auto"` such a page climbs to the
+browser: its HTTP answer is rendered, the page is stored from the rendered document
+with `tier: "browser"`, and the host's report row counts one `render_escalations`. A
+render that gets no response, or does not reach its `load` state within
+`render_max_wait` (20 seconds), falls back to the HTTP answer, flagged `render_needed`;
+a render that is blocked stays blocked. A blocked HTTP answer never climbs: the browser
+renders content, it never answers a block. A page that climbed because of an empty
+application root or a `<noscript>` notice teaches its host and path pattern (the
+first two path segments) to start at the browser, kept as `tier_hints` in
+`.rovo/frontier.json`: the next sync renders it with no HTTP try, until
+`reprobe_every_syncs` (5) runs after it was learned, when HTTP is tried again. Under
+`"always"` every page is rendered and none is fetched conditionally (validators are
+HTTP only). A render makes no request of its own: its navigation is made as an HTTP
+try is (robots.txt, redirects, the host's limiter, the `rovo/<version>` user agent),
+and each request the page makes is made the same way only to an allowed host whose
+robots.txt allows it, once, its `Retry-After` pausing the host for at most
+`retry_after_cap`; any other request is aborted. A sync whose `render_mode` is not
+`"never"` is refused before any request when playwright is not installed.
 
 A later `rovo sync` of the same mirror is incremental. Every page already in the mirror
 is fetched again, conditionally: the request carries the page's stored `ETag` as
@@ -326,8 +350,36 @@ standard error, and `crawl-report.json` is replaced by a refused report:
 quoted above, the resolved `configuration` (with its `problems`), the `options` asked
 for, `effective_policy: null` and every count and list empty; it exits 2. A refused
 sync saves no manifest, frontier or run. When a run reaches a branch a later slice
-implements (the browser tier, owner testing), the sync stops, names the rule on
-standard error, exits 1 and leaves the previous report in place.
+implements (owner testing), the sync stops, names the rule on standard error, exits 1
+and leaves the previous report in place.
+
+## `rovo fetch`
+
+```text
+Usage: rovo fetch [OPTIONS] URL
+
+Print one page's Markdown. Nothing is written.
+```
+
+| Argument or option | Effect |
+| --- | --- |
+| `URL` | The page to fetch, an http or https URL. |
+| `--tier TIER` | Fetch at this tier only, `http`, `browser` or `stealth`; by default `http`. |
+
+`rovo fetch URL` fetches one page and prints its Markdown body, without frontmatter, on
+standard output, and exits 0. It needs no mirror and reads no `rovo.toml`: the profile
+is the one the catalogue picks by the URL's host, the scope is the one `rovo init` would
+derive from the URL (it decides which redirects are followed), and the policy is the
+standard one. The URL's `/robots.txt` is read first, and every request is paced and
+retried as a sync's is. With no `--tier`, or `--tier http`, the page is fetched over
+HTTP and never rendered; `--tier browser` renders it in the browser, as a sync does. It
+writes no file: no mirror, report, frontier or run.
+
+It exits 1 and prints nothing when robots.txt disallows the URL (the page is never
+requested), or when the answer is blocked, is not HTML, is not a success, or never
+came. It exits 2 with no request, the problem on standard error, for `--tier stealth`
+or a URL that is not http or https (owner testing and the stealth tier need a mirror and
+an owner-testing sync), and for `--tier browser` when playwright is not installed.
 
 ## `rovo verify`
 
@@ -397,9 +449,9 @@ JSON. It makes no request and writes nothing.
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, a verify found nothing, the indexes were rebuilt, or the report was printed. |
-| 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements. |
-| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync`, `verify` or `index`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
+| 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, a verify found nothing, the indexes were rebuilt, the report was printed, or a fetch printed its page. |
+| 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements; or a fetch printed no page. |
+| 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync`, `verify`, `index` or `fetch`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
 | 3 | Blocked: a host's breaker tripped, by its block rate or a host retirement. |
 | 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken; or `rovo verify` found anything. |
 

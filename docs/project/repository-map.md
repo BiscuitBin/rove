@@ -24,16 +24,18 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── __main__.py            python -m rovo
 │   ├── py.typed               Marks the package as typed
 │   ├── _convert/ _mirror/ _crawl/  Private modules, in that import direction
+│   │   ├── _crawl/browser.py  The browser engine seam and PlaywrightEngine
 │   │   ├── _crawl/pace.py     The timer seam, the per-host limiter and retry waits
 │   │   └── _crawl/sitemaps.py The sitemap and llms.txt readers (lxml, entities off)
 │   ├── _config.py  _report.py  Private modules for the command
 │   ├── _mirror/verify.py  rovo verify's checks of the mirror on disk, offline
-│   └── _commands.py  _exit.py  _unfinished.py  init, sync, verify, index, report; exit codes; the guard
+│   └── _commands.py  _exit.py  _unfinished.py  init, sync, verify, index, report, fetch; exit codes; the guard
 ├── tests/                     pytest suite: the API, the command, the specs' obligations
 │   ├── fakes.py  spec_values.py  The seams' doubles; config defaults read from the specs
 │   ├── test_sitemaps.py       The sitemap and llms.txt black boxes
 │   ├── test_blocks.py  test_blocks_regressions.py  Block verdicts, the breaker, retirement
 │   ├── test_verify.py         rovo verify's findings, one per reason
+│   ├── test_escalation.py  test_browser_engine.py  test_fetch_command.py  The browser tier, its engine, rovo fetch
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
 │   │   ├── test_blocks_sync.py     Blocked pages, the breaker, host retirement, soft blocks
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
@@ -41,6 +43,8 @@ follows [Python packaging](../explanation/packaging.md).
 │   │   ├── test_lifecycle_sync.py  Removal, archive, moves, duplicates and redirects
 │   │   ├── test_mslearn_sync.py    An mslearn sitemap filter, version labels, trafilatura
 │   │   ├── test_quality_sync.py    Islands, gates and flags, devsite tabs, rovo verify
+│   │   ├── test_render_sync.py     Escalation, render_mode, rovo fetch through FakeEngine
+│   │   ├── test_browser_sync.py    The spa site rendered in a real Chromium (just e2e-browser)
 │   │   └── test_second_sync.py     A second, incremental sync over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy
@@ -48,6 +52,7 @@ follows [Python packaging](../explanation/packaging.md).
 │           ├── blocks/ soft/  Twelve linked pages; prose, a thin page, a login wall
 │           ├── mslearn/       Learn-shaped pages (test_mslearn_sync.py)
 │           ├── polite/        robots.txt, Crawl-delay and retries (test_polite_sync.py)
+│           ├── spa/           A JavaScript-only page and its rendered DOM (test_render_sync.py)
 │           └── quality/ devsite/  Islands and gates; a DevSite tab page (test_quality_sync.py)
 ├── scripts/                   initialize.sh (first run) and wheel_smoke.py
 ├── docs/                      Handbook, manifest, specs/ and decisions/

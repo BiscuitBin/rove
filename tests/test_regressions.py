@@ -46,6 +46,7 @@ from typer.testing import CliRunner
 from fakes import (
     FakeFetcher,
     FixedClock,
+    RaisingFetcher,
     fixture_site,
     html_response,
     redirect_response,
@@ -84,8 +85,8 @@ from rovo._mirror.model import (
 from rovo._mirror.state import load_mirror, manifest_path
 from rovo._mirror.urls import assign_path, digest, hostname_of, normalise_url, origin_of
 from rovo._report import ChangeKind, CrawlReportStatus, ExitCode, tally_failed_url
+from rovo._unfinished import NotInThisSlice
 from rovo.cli import app
-from test_commands import set_key
 from test_convert import DEVSITE_CHROME, LEARN_URL, MSLEARN_PAGE, TABS_PAGE, converted_by
 from test_crawl import LLMS_TXT, declaring, host_open, settled, site, urlset
 from test_crawl import new_mirror as crawl_mirror
@@ -146,33 +147,29 @@ def test_a_stopped_finalisation_persists_no_done_row(tmp_path: Path) -> None:
     then answered a non-HTML document. Re-propagated by T16 (origin T09): T16 settles a
     non-HTML answer skipped_not_html, so next.html served a login wall. Re-propagated by
     T18 (origin T09): T18 settles a login wall as a soft verdict and converts it, so
-    next.html now serves an SPA shell under render_mode = auto with the browser engine
-    installed, whose escalation (crawl.allium Escalate, a later slice's) still stops the
-    run; the second sync renders never again.
+    next.html served an SPA shell under render_mode = auto, whose escalation stopped the
+    run. Re-propagated by T19 (origin T09): T19 renders that shell, and no later slice's
+    branch is reachable from a standard sync any more, so the stop is injected:
+    RaisingFetcher raises NotInThisSlice on the request for next.html, which drive_run
+    lets escape and the root takes as a stop (exit 1, the previous report kept).
     """
     out_dir = tmp_path / "out"
     assert _commands.init(SEED, out_dir) is ExitCode.ok
-    set_key(out_dir, "render_mode", '"auto"')
     following = f"{SITE}/guide/next.html"
-    spa_shell = '<html><body><div id="root"></div><script src="a.js"></script></body></html>'
-    fetcher = FakeFetcher(
-        {
-            SEED: html_response(SEED, LINKED),
-            following: html_response(following, spa_shell),
-        }
+    fetcher = RaisingFetcher(
+        FakeFetcher({SEED: html_response(SEED, LINKED)}),
+        following,
+        NotInThisSlice(rule="BreakerEscalates"),
     )
     stopped = _commands.sync(
-        out_dir,
-        fetcher=fetcher,
-        clock=FixedClock(),
-        tier_installed=lambda tier: tier is not Tier.http,
+        out_dir, fetcher=fetcher, clock=FixedClock(), tier_installed=never_installed
     )
     assert stopped is ExitCode.partial
-    assert following in fetcher.requests
+    assert fetcher.raised == [following]
+    assert fetcher.requests[-1] == following
     state = out_dir / ".rovo"
     assert not (state / "frontier.json").exists()
     assert not (state / "runs.json").exists()
-    set_key(out_dir, "render_mode", '"never"')
     assert sync(out_dir, UNLINKED) is ExitCode.ok
     assert len(load_mirror(out_dir).pages) == 1
     frontier = json.loads((state / "frontier.json").read_text(encoding="utf-8"))

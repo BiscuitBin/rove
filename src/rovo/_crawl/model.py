@@ -403,6 +403,7 @@ class Frontier:
     entries: list["FrontierEntry"] = field(default_factory=list)
     observed_urls: list["ObservedUrl"] = field(default_factory=list)
     sitemap_snapshots: list["SitemapSnapshot"] = field(default_factory=list)
+    tier_hints: list["TierHint"] = field(default_factory=list)
 
     @property
     def pending_entries(self) -> list["FrontierEntry"]:
@@ -438,6 +439,21 @@ class Frontier:
     def entry(self, identity: str) -> "FrontierEntry | None":
         """FrontierEntry{frontier: this, identity: identity}."""
         return next((entry for entry in self.entries if entry.identity == identity), None)
+
+
+@dataclass(kw_only=True, eq=False)
+class TierHint:
+    """The starting tier learned for a host and path pattern; never http."""
+
+    frontier: Frontier
+    host_name: str
+    path_pattern: str
+    tier: Tier
+    learned_in_run: int
+
+    def reprobe_due(self, run_id: int) -> bool:
+        """run_id - learned_in_run >= config.reprobe_every_syncs: probe http again."""
+        return run_id - self.learned_in_run >= CONFIG.reprobe_every_syncs
 
 
 @dataclass(kw_only=True, eq=False)

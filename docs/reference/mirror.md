@@ -87,7 +87,8 @@ The mirror: `scope` (the `CrawlScope` the last run used), `profile` (a catalogue
 profile's name), `processing_signature` (a digest of the profile and the pinned
 locale), `declared_owned_hosts`, `recorded_root_url` (the root URL the last run used),
 `pages`, `aliases` and `links`. Each page row holds every `Page` field: its identity,
-path, source and canonical URLs, title, description, extraction method, tier, quality
+path, source and canonical URLs, title, description, extraction method, tier (`http`,
+or `browser` for a page stored from a render), quality
 result, flags, keywords, digests, validators, both bodies, frontmatter, the runs that
 last saw and stored it, and its fetch times. The validators (`etag` and
 `last_modified`) live here alone, never in a page file or an index, so a validator that
@@ -118,8 +119,11 @@ written page's own identity is never an alias.
 per URL a sitemap or `llms.txt` named, in scope or not, sorted by `url`: `url`,
 `sources` (the sorted list of `sitemap` and `llms_txt`) and `last_seen_run`, the id of
 the last run that saw it; a row unseen for more than `observed_url_retention_syncs` (3)
-runs is dropped when the next run's discovery ends. `tier_hints` stays empty until the
-browser slice fills it. `sitemaps.json` holds `snapshots`, one row per sitemap ever
+runs is dropped when the next run's discovery ends. `tier_hints` holds one row per
+starting tier a render taught, sorted by `host_name` then `path_pattern` (the page
+path's first two segments): `host_name`, `path_pattern`, `tier` (always `browser`) and
+`learned_in_run`, the id of the run that last confirmed it; a row is never deleted.
+`sitemaps.json` holds `snapshots`, one row per sitemap ever
 read as a sitemap, sorted by `url`: `url`, `etag`, `last_modified`, `is_index`,
 `entries` (each `loc` and `lastmod`, in document order) and `last_requested_run`, the
 id of the last run that requested the sitemap, whatever it answered. It is written with
@@ -276,7 +280,9 @@ whole body was taken, `extracted_share` that the content holds
 under 30% of the page's words, `empty_content` that there is no text, `fidelity_loss`
 that an island did not reach the body. A page is low confidence (`low_confidence:
 true`) when a gate failed or it carries `whole_body_extracted`, `empty_content`,
-`extractor_fallback`, `render_needed` or `soft_block_suspected`.
+`extractor_fallback`, `render_needed` or `soft_block_suspected`. `render_needed` marks
+a page stored from an HTTP answer that needs JavaScript: under `render_mode = "never"`,
+or when its render failed outright.
 
 ## Links
 
@@ -437,7 +443,8 @@ pages, the broken links (`from_path`, `href`, `reason`, sorted by `from_path` th
 `href`), the blocked URLs (`blocked_urls`: `url`, `status`, `signature`, `tier`),
 the URLs skipped on a tripped host (`skipped_urls`), whether a host's breaker tripped
 (`breaker_tripped`; each host's row carries its own `blocked`, `block_rate` and
-`breaker_tripped`) and one row per change (`kind`, `url`, `path`, `moved_from`): `added`,
+`breaker_tripped`, the sorted `tiers_used` its pages stood at, and its
+`render_escalations`, the pages that climbed from HTTP to the browser) and one row per change (`kind`, `url`, `path`, `moved_from`): `added`,
 `changed`, `unchanged`, `moved` (with the old path in `moved_from`), `removed` (once per
 removal, with the path the record keeps) or `failed`. Every list is
 sorted by URL or path, durations are seconds, and `started_at` and `finished_at` are
@@ -448,8 +455,8 @@ writes a refused report instead: `report_status: refused`, `run_id: null`,
 `exit_code: usage`, `refusal_reason` naming the refusal, `effective_policy: null` and
 every count and list empty. `options` records what the sync asked for, `targeted`
 included (true when a `--url` or `--path` was named). `rovo report` prints the file.
-A sync that stops at a branch a later slice implements, or that finds no mirror,
-leaves the previous report in place.
+A sync that stops at a branch a later slice implements (owner testing), or that finds
+no mirror, leaves the previous report in place.
 
 ## Related pages
 

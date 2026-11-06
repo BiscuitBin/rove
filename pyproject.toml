@@ -62,7 +62,7 @@ browser = [
   # The browser tier: renders pages that need JavaScript; the standard library has no
   # JavaScript engine. The extra installs the Python package only, never a browser
   # (`playwright install` fetches those). Apache-2.0; released by Microsoft, the locked
-  # 1.64.1 uploaded 2026-10-22. Imported by nothing yet.
+  # 1.64.1 uploaded 2026-10-22. Imported by rovo._crawl.browser alone, at the first render.
   "playwright>=1.64.1,<2",
 ]
 

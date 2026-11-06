@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Example app</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="/private/tracker.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // The page's text is assembled here, so no sentence of it appears in this source.
+      var main = document.createElement("main");
+      var heading = document.createElement("h1");
+      heading.textContent = ["Interactive", "guide"].join(" ");
+      main.appendChild(heading);
+      [
+        ["The interactive guide is", "written by a script in the browser, so a reader that runs no JavaScript sees an empty application root and nothing else."],
+        ["Open the dashboard, add a site, choose its profile and", "start the first sync; the mirror then follows every change the site publishes."]
+      ].forEach(function (parts) {
+        var paragraph = document.createElement("p");
+        paragraph.textContent = parts.join(" ");
+        main.appendChild(paragraph);
+      });
+      document.getElementById("root").appendChild(main);
+    </script>
+  </body>
+</html>

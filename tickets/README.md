@@ -42,6 +42,7 @@ snapshot.
 | T16 | Errors and the report: rovo sync skips non-HTML answers, refuses in the specified order with a refused report, survives an interrupt or a crash with a report, ranks every exit code, prints --json progress, reads ROVO_ variables and --set flags, and rovo report shows the last report | `T16-errors-report.md` | T15 | none | open |
 | T17 | Conversion quality: every quality gate and flag, islands for what Markdown cannot carry, every tab panel, the mslearn and devsite profiles, fail_on_low_quality and rovo verify | `T17-quality-gates.md` | T16 | none | open |
 | T18 | Blocks and the breaker: block verdicts, blocked and skipped rows, the per-host breaker, host retirement on a long Crawl-delay or Retry-After, and exit 3 | `T18-blocks-breaker.md` | T17 | none | open |
+| T19 | The browser tier: render reasons, escalation from http to the browser, learned tiers, render_mode, the missing-engine refusal and rovo fetch | `T19-browser-tier.md` | T18 | none | open |
 
 ## Dependency graph
 
@@ -49,7 +50,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18 ─ T19
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -127,6 +128,14 @@ T00 ─┬─ T01 ─┐
   Crawl-delay or a Retry-After past `retry_after_cap` on robots.txt, a declared sitemap
   or a page retires the host the same way; a page whose main text falls under the
   host's baseline, or a login wall, is converted with `soft_block_suspected`.
+- **T19** is slice 11: the browser tier. Under `render_mode = "auto"` a page whose
+  http answer is an SPA shell or asks for JavaScript is rendered in the browser, every
+  request the render causes made by the crawl under robots.txt and the host's limiter,
+  stored with tier `browser`, counted in the report and remembered for its path
+  pattern, so the next sync starts it at the browser; `"always"` renders every page and
+  `"never"` stores the http answer flagged `render_needed`; a sync that needs a missing
+  engine is refused; `rovo fetch` prints one page's Markdown and writes nothing; and
+  `just e2e-browser` renders a JavaScript-only fixture page in Chromium.
 
 ## How to pick up a ticket
 

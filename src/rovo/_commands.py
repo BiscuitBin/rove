@@ -1,11 +1,12 @@
-"""The root's rules (rovo.allium): init, sync, verify, index, report over config, crawl, mirror.
+"""The root's rules (rovo.allium): init, sync, verify, index, report and fetch.
 
 Each command returns the ExitCode the process exits with and writes its problems to
-standard error. `sync` takes the Fetcher and the Timer it runs and paces with, so tests
-drive it without the network and without sleeping; `rovo.cli` builds the real ones.
+standard error. `sync` and `fetch` take the Fetcher and the Timer they run and pace with,
+and the factory of the browser engine they render with, so tests drive them without the
+network, a browser or sleeping; `rovo.cli` builds the real ones.
 Only the mirror's modules load with this one: `verify`, `index` and `report` never crawl,
-so `init` and `sync` import the configuration, the crawl and the report inside their
-bodies, and `rovo verify`, `rovo index` and `rovo report` load neither httpx nor
+so `init`, `sync` and `fetch` import the configuration, the crawl and the report inside
+their bodies, and `rovo verify`, `rovo index` and `rovo report` load neither httpx nor
 rovo._crawl.
 """
 
@@ -47,6 +48,7 @@ from rovo._unfinished import NotInThisSlice
 if TYPE_CHECKING:
     from rovo._config import Configuration, SyncOptions
     from rovo._convert.model import Profile
+    from rovo._crawl.browser import BrowserEngine, EngineFactory
     from rovo._crawl.fetch import Fetcher
     from rovo._crawl.model import BreakerTripped, ProgressEvent, Run
     from rovo._crawl.pace import Timer
@@ -93,6 +95,7 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     fetcher: "Fetcher",
     clock: "Timer",
     tier_installed: Callable[[Tier], bool] | None = None,
+    engine: "EngineFactory | None" = None,
     dry_run: bool = False,
     confirmed: bool = False,
     urls: Sequence[str] = (),
@@ -111,7 +114,9 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     line on standard output, and fetches, converts and writes no page; it saves the
     manifest, the frontier and the run, and writes the report. `progress` receives the
     run's progress events, done last. A branch a later slice implements exits partial
-    and leaves the previous report in place.
+    and leaves the previous report in place. A run that may use the browser tier opens
+    one engine from `engine` (by default PlaywrightEngine) after every refusal, and
+    closes it when the run ends.
     """
     from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
         SyncOptions,
@@ -140,11 +145,70 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
         reason, detail = problem
         report_refusal(mirror, Operator(), options, settings, reason, clock=clock)
         return _refuse(f"sync: {detail}")
+    opened = _open_engine(engine) if settings.needs_browser else None
     try:
-        return _start_sync(mirror, settings, options, fetcher, clock, progress=progress)
+        return _start_sync(mirror, settings, options, (fetcher, clock, opened), progress=progress)
     except NotInThisSlice as stopped:
         sys.stderr.write(f"rovo: sync stopped: {stopped}\n")
         return ExitCode.partial
+    finally:
+        if opened is not None:
+            opened.close()
+
+
+def _open_engine(engine: "EngineFactory | None") -> "BrowserEngine":
+    """One engine from the factory, by default PlaywrightEngine (which starts lazily)."""
+    from rovo._crawl.browser import PlaywrightEngine  # noqa: PLC0415  Only a render loads it.
+
+    return (engine or PlaywrightEngine)()
+
+
+def fetch(  # noqa: PLR0913  The command's seams and its options.
+    url: str,
+    *,
+    fetcher: "Fetcher",
+    clock: "Timer",
+    tier: Tier | None = None,
+    owner_test: object | None = None,
+    tier_installed: Callable[[Tier], bool] | None = None,
+    engine: "EngineFactory | None" = None,
+) -> ExitCode:
+    """Realises rovo.allium RefuseOwnerTestingFetch, RefuseMissingFetchTier and FetchOneUrl.
+
+    An owner test, the stealth tier or a URL that is not http(s) exits usage, then a
+    named tier that is not installed does, each with no request. Otherwise fetch_one
+    fetches the page with the profile the catalogue picks by host, the initial scope of
+    the URL and the standard policy; no rovo.toml is read, and nothing is written. Its
+    Markdown body, without frontmatter, goes to standard output and the exit is ok;
+    nothing is printed and the exit is partial when it gave none. `--tier browser`
+    renders through one engine from `engine`, closed when the fetch ends.
+    """
+    from rovo._config import initial_scope, signature_of  # noqa: PLC0415  It loads rovo._crawl.
+    from rovo._crawl.run import fetch_one  # noqa: PLC0415  Only a fetch loads the crawl.
+
+    installed = tier_installed or _tier_installed
+    if owner_test is not None or tier is Tier.stealth or not is_http_url(url):
+        return _refuse(f"fetch: owner testing, the stealth tier or a non-http URL: {url}")
+    if tier is not None and tier is not Tier.http and not installed(tier):
+        return _refuse(f"fetch: the {tier.value} tier is not installed")
+    profile = profile_for(url, None) or GENERIC
+    scope = initial_scope(url, profile)
+    mirror = Mirror(
+        out_dir=Path(),
+        scope=scope,
+        profile=profile,
+        processing_signature=signature_of(scope, profile),
+    )
+    opened = _open_engine(engine) if tier is Tier.browser else None
+    try:
+        body = fetch_one(mirror, url, tier, (fetcher, clock, opened))
+    finally:
+        if opened is not None:
+            opened.close()
+    if body is None:
+        return ExitCode.partial
+    sys.stdout.write(body if body.endswith("\n") else f"{body}\n")
+    return ExitCode.ok
 
 
 def _start_problem(
@@ -226,12 +290,11 @@ def _scope(settings: "Configuration") -> CrawlScope:
     return scope_of(settings, _profile(settings))
 
 
-def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progress sink.
+def _start_sync(
     mirror: Mirror,
     settings: "Configuration",
     options: "SyncOptions",
-    fetcher: "Fetcher",
-    clock: "Timer",
+    seams: "tuple[Fetcher, Timer, BrowserEngine | None]",
     *,
     progress: "Callable[[ProgressEvent], None] | None",
 ) -> ExitCode:
@@ -271,6 +334,7 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         record_crash_after_run,
     )
 
+    fetcher, clock, engine = seams
     operator = Operator()
     profile = _profile(settings)
     scope = scope_of(settings, profile)
@@ -335,6 +399,7 @@ def _start_sync(  # noqa: PLR0913  StartSync's inputs, the seams and the progres
         on_backoff=None if progress is None else lambda event: progress(announce_backoff(event)),
         on_failure=_failure_handler(mirror),
         on_trip=trip,
+        engine=engine,
     )
     saved = False
     try:

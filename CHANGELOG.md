@@ -191,3 +191,14 @@ policy.
   pages are listed under `skipped_urls`, `--json` prints a `breaker_tripped` event and the sync
   exits 3. A version label's value is form-decoded (`+` is a space) before it is mapped
   and sanitised.
+- The browser tier: under `crawl.render_mode = "auto"` a page whose HTTP answer is an
+  empty application shell, a `<noscript>` notice, has no main element or thin text on a
+  large page is rendered in headless Chromium (the `browser` extra) and stored with
+  `tier: "browser"`, where the sync stopped with exit 1; under `"always"` every page is
+  rendered, and under `"never"` such a page is stored from HTTP flagged
+  `render_needed`. Every request a render causes passes robots.txt and the host's
+  limiter; other requests are aborted. A render that fails falls back to the HTTP answer;
+  a blocked answer never climbs. The tier a page climbed to is learned per host and path
+  pattern (`tier_hints` in `.rovo/frontier.json`) and re-probed over HTTP every
+  `reprobe_every_syncs` runs; the report counts `render_escalations`. `rovo fetch URL
+  [--tier http|browser]` prints one page's Markdown and writes nothing.

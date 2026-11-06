@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from fakes import FakeFetcher, FixedClock, html_response, text_response, xml_response
+from fakes import FakeEngine, FakeFetcher, FixedClock, html_response, text_response, xml_response
 from rovo import _commands
 from rovo._config import SyncOptions, resolve_config
 from rovo._convert import profiles
@@ -280,11 +280,26 @@ def test_a_breaker_breach_trips_the_host(tmp_path: Path) -> None:
     assert (tmp_path / ".rovo" / "frontier.json").exists()
 
 
-def test_escalation_to_the_browser_stops_the_run(tmp_path: Path) -> None:
-    """Under render_mode = auto a page that needs rendering asks for the browser tier."""
+def test_escalation_to_the_browser_renders_the_page(tmp_path: Path) -> None:
+    """Under render_mode = auto a page that needs rendering climbs to the browser tier.
+
+    Re-propagated by T19 from test_escalation_to_the_browser_stops_the_run (T09), which
+    expected NotInThisSlice("Escalate"): the noscript page is requested at http, then
+    rendered (its navigation the seed's second request), stored with tier browser, and
+    the run ends with its frontier saved.
+    """
     noscript = PAGE.replace("</main>", "<noscript>Enable JavaScript.</noscript></main>")
-    with pytest.raises(NotInThisSlice):
-        crawl(tmp_path, {SEED: html_response(SEED, noscript)}, render_mode=RenderMode.auto)
+    fetcher = FakeFetcher({SEED: html_response(SEED, noscript)})
+    engine = FakeEngine({SEED: PAGE})
+    mirror = new_mirror(tmp_path)
+    result = run_crawl(
+        request(mirror, render_mode=RenderMode.auto), None, fetcher, FixedClock(), engine=engine
+    )
+    assert engine.renders == [SEED]
+    assert fetcher.requests.count(SEED) == len(["http try", "render"])
+    (page,) = result.run.target.pages
+    assert page.tier is Tier.browser
+    assert (tmp_path / ".rovo" / "frontier.json").exists()
 
 
 def test_a_devsite_page_converts(tmp_path: Path) -> None:
@@ -391,26 +406,35 @@ def test_owner_testing_runs_stop(tmp_path: Path) -> None:
         discover(run, frontier, FakeFetcher({}))
 
 
-def test_a_browser_attempt_stops_and_a_tripped_hosts_rows_are_skipped(tmp_path: Path) -> None:
-    """A try at the browser tier is a later slice's; rows only on a tripped host are skipped.
+def test_a_browser_attempt_renders_and_a_tripped_hosts_rows_are_skipped(tmp_path: Path) -> None:
+    """A try at the browser tier renders the page; rows only on a tripped host are skipped.
 
     Re-propagated by T18 from test_a_tripped_host_and_a_browser_attempt_stop (T12): the
     tripped half is SelectBatch's all-tripped branch, so the row is skipped_blocked and
     the frontier exhausted, where it stopped at NotInThisSlice("SelectBatch").
+    Re-propagated by T19 from test_a_browser_attempt_stops_and_a_tripped_hosts_rows_are_skipped
+    (T12, re-propagated by T18), whose browser half expected NotInThisSlice("AttemptTier"):
+    under render_mode = auto the browser attempt renders through the engine, its
+    navigation the seed's second request, and joins the walk.
     """
     mirror = new_mirror(tmp_path)
     fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
-    run = start_run(request(mirror), FixedClock())
+    engine = FakeEngine()
+    run = start_run(request(mirror, render_mode=RenderMode.auto), FixedClock())
     assert run is not None
     frontier = create_frontier(run, None)
     assert prepare_run(run, frontier)
     assert discover(run, frontier, fetcher)
     run.crawling = True
     (entry,) = select_batch(run, frontier) or []
-    walk = fetch_entry(run, entry, fetcher)
+    walk = fetch_entry(run, entry, fetcher, engine)
     assert walk is not None
-    with pytest.raises(NotInThisSlice):
-        attempt_tier(walk, Tier.browser, 1, fetcher)
+    rendered = attempt_tier(walk, Tier.browser, 1, fetcher, engine)
+    assert rendered is not None
+    assert rendered.tier is Tier.browser
+    assert walk.attempts[-1] is rendered
+    assert engine.renders == [SEED]
+    assert fetcher.requests.count(SEED) == len(["http try", "render"])
     entry.status = FrontierStatus.pending
     host = run.host(HOST)
     assert host is not None

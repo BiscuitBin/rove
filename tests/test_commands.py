@@ -20,6 +20,7 @@ import pytest
 
 from fakes import (
     START,
+    FakeEngine,
     FakeFetcher,
     FixedClock,
     RaisingFetcher,
@@ -28,6 +29,7 @@ from fakes import (
     fixture_site,
     html_response,
     text_response,
+    unopened_engine,
 )
 from rovo import _commands
 from rovo._config import SyncOptions, initial_scope, resolve_config, scope_of, signature_of
@@ -2250,3 +2252,146 @@ def test_a_sync_whose_host_trips_exits_3_with_its_report(tmp_path: Path) -> None
     assert names.index("breaker_tripped") < max(
         index for index, name in enumerate(names) if name == "page"
     )
+
+
+# --- RefuseMissingEngine (T19) ---------------------------------------------------------
+
+
+def engine_sync(
+    out_dir: Path,
+    fetcher: FakeFetcher,
+    *,
+    installed: frozenset[Tier] = frozenset(),
+    urls: tuple[str, ...] = (),
+    paths: tuple[str, ...] = (),
+) -> ExitCode:
+    """One rovo sync with exactly `installed` engines, opening none (the factory fails)."""
+    return _commands.sync(
+        out_dir,
+        fetcher=fetcher,
+        clock=FixedClock(),
+        tier_installed=lambda tier: tier in installed,
+        engine=unopened_engine,
+        urls=urls,
+        paths=paths,
+    )
+
+
+def needing_browser(out_dir: Path) -> Path:
+    """The mirror's rovo.toml asks for the browser tier: render_mode = auto."""
+    set_key(out_dir, "render_mode", '"auto"')
+    return out_dir
+
+
+def test_rule_success_RefuseMissingEngine(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine succeeds when all preconditions are met.
+
+    A configured browser tier (render_mode = auto) with no browser engine installed, and
+    a configured stealth tier with no stealth engine, each alone: refused "configured
+    tier is not installed", no request, no engine opened, .rovo/ untouched.
+    """
+    browser = needing_browser(first_synced(tmp_path / "browser"))
+    stealth = first_synced(tmp_path / "stealth")
+    set_key(stealth, "stealth_mode", '"on"')
+    for out_dir, installed in (
+        (browser, frozenset({Tier.stealth})),
+        (stealth, frozenset({Tier.browser})),
+    ):
+        before = state_files(out_dir)
+        fetcher = site()
+        assert engine_sync(out_dir, fetcher, installed=installed) is ExitCode.usage
+        assert refused(out_dir)["refusal_reason"] == MISSING_ENGINE
+        assert fetcher.requests == []
+        assert state_files(out_dir) == before
+
+
+def test_rule_failure_RefuseMissingEngine_1(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: directory_exists(out_dir) and exists target: with no directory the sync is
+    refused before it (RefuseSyncWithoutDirectory), with no report.
+    """
+    missing = tmp_path / "missing"
+    fetcher = site()
+    assert engine_sync(missing, fetcher) is ExitCode.usage
+    assert not missing.exists()
+    assert fetcher.requests == []
+
+
+def test_rule_failure_RefuseMissingEngine_2(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: settings.valid and settings.has_seeds and settings.unblocking_provider =
+    null: an invalid configuration that also needs a missing engine is refused for the
+    configuration.
+    """
+    out_dir = needing_browser(with_provider(first_synced(tmp_path / "out")))
+    assert engine_sync(out_dir, site()) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == BAD_CONFIG
+
+
+def test_rule_failure_RefuseMissingEngine_3(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: not settings.root_changed(target.recorded_root_url) or options.confirmed:
+    a changed root without --yes is refused for the root.
+    """
+    out_dir = needing_browser(root_changed(first_synced(tmp_path / "out")))
+    assert engine_sync(out_dir, site()) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == CHANGED_ROOT
+
+
+def test_rule_failure_RefuseMissingEngine_4(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in allowed_hosts):
+    an off-host target is refused as one.
+    """
+    out_dir = needing_browser(first_synced(tmp_path / "out"))
+    assert engine_sync(out_dir, site(), urls=(OFF_HOST_URL,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == OFF_HOST
+
+
+def test_rule_failure_RefuseMissingEngine_5(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: options.paths.all(p => p in target.page_paths): an unknown path is refused
+    as one.
+    """
+    out_dir = needing_browser(first_synced(tmp_path / "out"))
+    assert engine_sync(out_dir, site(), paths=(MISSING_PATH,)) is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == UNKNOWN_PATH
+
+
+def test_rule_failure_RefuseMissingEngine_6(tmp_path: Path) -> None:
+    """Verify rule RefuseMissingEngine is rejected when requires clause fails.
+
+    requires: (settings.needs_browser and not tier_installed(browser)) or
+    (settings.needs_stealth and not tier_installed(stealth)): with the browser engine
+    installed the auto sync runs, through the one engine it opens and closes; with
+    render_mode = never no engine is needed, none is opened, and the sync runs with
+    nothing installed.
+    """
+    auto = needing_browser(first_synced(tmp_path / "auto"))
+    opened: list[FakeEngine] = []
+
+    def open_engine() -> FakeEngine:
+        opened.append(FakeEngine())
+        return opened[-1]
+
+    code = _commands.sync(
+        auto,
+        fetcher=site(),
+        clock=FixedClock(),
+        tier_installed=lambda tier: tier is Tier.browser,
+        engine=open_engine,
+    )
+    assert code is ExitCode.ok
+    assert report(auto)["report_status"] == "finished"
+    assert len(opened) == 1
+    assert opened[0].closed
+    never = first_synced(tmp_path / "never")
+    fetcher = site()
+    assert engine_sync(never, fetcher) is ExitCode.ok
+    assert report(never)["report_status"] == "finished"
+    assert SEED in fetcher.requests

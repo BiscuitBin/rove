@@ -8,6 +8,14 @@ the map: an answer that must hold every time goes in the map, a sequence in the 
 `RaisingFetcher` wraps any fetcher and raises a given exception, an operator interrupt
 or a crash, on the request for a given URL.
 
+`FakeEngine` satisfies the crawl's BrowserEngine seam (T19) without a browser: it
+"renders" a page by answering its navigation through the crawl's request callback, so
+the request is made, paced and logged by the crawl exactly as a real render's would be,
+then asks the callback for each subrequest the page names, and returns the DOM its map
+holds for the URL (else the navigation's own markup). A URL mapped to None is a render
+that never reaches its load state. `unopened_engine` is an engine factory for a sync
+that must open no engine.
+
 `FixedClock` and `SteppingTimer` both satisfy the crawl's Timer seam (`now()` and
 `sleep(seconds)`) and both record every sleep they are asked for; neither sleeps for
 real. `FixedClock` never advances, so a test's timestamps stay where they were;
@@ -189,6 +197,66 @@ class RaisingFetcher:
             self.raised.append(url)
             raise self.error
         return self.fetcher.fetch(url, validators=validators)
+
+
+class Answering(Protocol):
+    """The crawl's request callback a render is answered through (rovo._crawl.browser)."""
+
+    def __call__(self, url: str, *, navigation: bool) -> SiteResponse | None:
+        """The answer to fulfil the request with, or None to abort it unrequested."""
+        ...
+
+
+class FakeEngine:
+    """A BrowserEngine over a URL to rendered-DOM map; records every render and answer.
+
+    `render(url, answer)` asks `answer(url, navigation=True)` for the navigation and,
+    unless that is None, `answer(sub, navigation=False)` for each of `subrequests[url]`
+    in order; it returns `pages[url]` when the URL is mapped (None: the load state was
+    never reached), else the navigation's markup, as a browser renders a page whose
+    script changes nothing.
+    """
+
+    def __init__(
+        self,
+        pages: Mapping[str, str | None] | None = None,
+        *,
+        subrequests: Mapping[str, Sequence[str]] | None = None,
+    ) -> None:
+        """Render each URL of `pages` as its DOM, asking for its `subrequests` first."""
+        self.pages = dict(pages or {})
+        self.subrequests = {url: list(urls) for url, urls in (subrequests or {}).items()}
+        self.renders: list[str] = []
+        self.answers: list[tuple[str, bool, SiteResponse | None]] = []
+        self.closed = False
+
+    def render(self, url: str, answer: Answering) -> str | None:
+        """Navigate through `answer`, then each subrequest; the mapped DOM, else the markup."""
+        self.renders.append(url)
+        navigation = answer(url, navigation=True)
+        self.answers.append((url, True, navigation))
+        if navigation is None:
+            return None
+        for sub in self.subrequests.get(url, ()):
+            self.answers.append((sub, False, answer(sub, navigation=False)))
+        if url in self.pages:
+            return self.pages[url]
+        return navigation.markup
+
+    def close(self) -> None:
+        """Record that the engine was closed."""
+        self.closed = True
+
+    @property
+    def aborted(self) -> list[str]:
+        """The subrequests the crawl aborted (answered None), in order."""
+        return [url for url, navigation, got in self.answers if not navigation and got is None]
+
+
+def unopened_engine() -> FakeEngine:
+    """An engine factory for a sync that must not open an engine: calling it fails."""
+    msg = "no engine is opened by this sync"
+    raise AssertionError(msg)
 
 
 class FixedClock:

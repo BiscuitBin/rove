@@ -171,8 +171,17 @@ def pause_for_cap(host: Host) -> HostBackedOff:
     longer pause; the HostBackedOff carries now + retry_after_cap and is recorded on the
     run (FetchSitemap, ReadLlmsTxt).
     """
+    return pause_host(host, host.run.policy.retry_after_cap)
+
+
+def pause_host(host: Host, wait: timedelta) -> HostBackedOff:
+    """Pause the host until now + `wait`, never shortening a longer pause.
+
+    The HostBackedOff carries now + `wait` and is recorded on the run and handed to the
+    root's AnnounceBackoff (pause_for_cap; a browser subrequest's Retry-After).
+    """
     run = host.run
-    until = run.timer.now() + run.policy.retry_after_cap
+    until = run.timer.now() + wait
     host.paused_until = until if host.paused_until is None else max(host.paused_until, until)
     backed_off = HostBackedOff(host=host, until=until)
     run.backoffs.append(backed_off)

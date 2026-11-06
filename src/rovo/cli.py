@@ -5,7 +5,7 @@ loads no runtime dependency beyond typer.
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
@@ -117,6 +117,28 @@ def sync_command(  # noqa: PLR0913  One parameter per sync option.
             overrides=tuple(set_ or ()),
             json_events=json_events,
             progress=(lambda event: typer.echo(event_line(event))) if json_events else None,
+        )
+    raise typer.Exit(code.number)
+
+
+@app.command("fetch")
+def fetch_command(
+    url: Annotated[str, typer.Argument(metavar="URL", help="The page to fetch.")],
+    tier: Annotated[
+        Literal["http", "browser", "stealth"] | None,
+        typer.Option("--tier", help="Fetch at this tier only; by default http."),
+    ] = None,
+) -> None:
+    """Print one page's Markdown. Nothing is written."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.fetch import HttpxFetcher  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.pace import SystemTimer  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._mirror.model import Tier  # noqa: PLC0415  Loaded only when the command runs.
+
+    timer = SystemTimer()
+    with HttpxFetcher(clock=timer) as fetcher:
+        code = _commands.fetch(
+            url, fetcher=fetcher, clock=timer, tier=None if tier is None else Tier(tier)
         )
     raise typer.Exit(code.number)
 

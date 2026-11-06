@@ -6,8 +6,8 @@ opens hosts and reads their sitemaps and llms.txt, OpenHost reads robots.txt, Fe
 makes its first attempt. `run_crawl`
 drives the rest in the specification's order, one frontier row after another, and
 stops with NotInThisSlice where a later slice's branch would be taken. Every request,
-each redirect hop included, waits its turn at its host name's limiter (rovo._crawl.pace)
-on the run's timer.
+each redirect hop and each request a render causes included, waits its turn at its host
+name's limiter (rovo._crawl.pace) on the run's timer.
 """
 
 import dataclasses
@@ -19,6 +19,7 @@ from decimal import MAX_EMAX, Decimal, InvalidOperation
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, overload
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 from protego import Protego
@@ -35,6 +36,7 @@ from rovo._convert.fidelity import (
 )
 from rovo._convert.model import QualityFlag
 from rovo._crawl import sitemaps
+from rovo._crawl.browser import BrowserEngine
 from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import (
     CONFIG,
@@ -70,10 +72,13 @@ from rovo._crawl.model import (
     SitemapEntry,
     SitemapSnapshot,
     SiteResponse,
+    StealthMode,
+    TierHint,
     UrlBlocked,
     UrlFailed,
     UrlSkippedBlocked,
     WalkStatus,
+    standard_policy,
 )
 from rovo._crawl.pace import (
     STOP_ERRORS,
@@ -83,6 +88,7 @@ from rovo._crawl.pace import (
     follow,
     past_cap,
     pause_for_cap,
+    pause_host,
 )
 from rovo._mirror.intake import admit_candidate, links_found, settle_candidate
 from rovo._mirror.model import (
@@ -93,6 +99,7 @@ from rovo._mirror.model import (
     CrawlScope,
     LinksFound,
     Mirror,
+    Operator,
     Page,
     PageCandidate,
     PageRemoved,
@@ -1322,11 +1329,14 @@ def skip_tripped_host_after_ready(run: Run, entry: FrontierEntry) -> UrlSkippedB
     return _skip(run, entry) if _host_tripped(run, entry) else None
 
 
-def fetch_entry(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> LadderWalk | None:
+def fetch_entry(
+    run: Run, entry: FrontierEntry, fetcher: Fetcher, engine: BrowserEngine | None = None
+) -> LadderWalk | None:
     """Realises crawl.allium FetchEntry, then its first TierRequested.
 
     A known page is fetched conditionally, sending its stored validators, unless a
-    refresh is forced. No tier hint is learned in this slice, so the walk starts at http.
+    refresh is forced (validators go on an http try only). The walk starts at the
+    starting tier (`_starting_tier`); a browser attempt renders through `engine`.
     """
     if run.status is not RunStatus.running or entry.status is not FrontierStatus.in_progress:
         return None
@@ -1334,7 +1344,7 @@ def fetch_entry(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> LadderWalk 
     if not robots_allows(run, entry.identity) or host is None or host.breaker_tripped:
         return None
     known = run.target.known_page(entry.identity)
-    tiers = _start_from(run.usable_tiers, _starting_tier(run))
+    tiers = _start_from(run.usable_tiers, _starting_tier(run, entry))
     entry.attempts += 1
     run.fetch_attempts += 1
     walk = LadderWalk(
@@ -1352,34 +1362,44 @@ def fetch_entry(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> LadderWalk 
             and entry.sitemap_lastmod in {None, known.sitemap_lastmod}
         ),
     )
-    attempt_tier(walk, tiers[0], 1, fetcher)
+    attempt_tier(walk, tiers[0], 1, fetcher, engine)
     return walk
 
 
-def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> FetchAttempt | None:
-    """Realises crawl.allium AttemptTier (the http tier, one try).
+def attempt_tier(
+    walk: LadderWalk,
+    tier: Tier,
+    try_: int,
+    fetcher: Fetcher,
+    engine: BrowserEngine | None = None,
+) -> FetchAttempt | None:
+    """Realises crawl.allium AttemptTier: one try at the http or the browser tier.
 
     fetch_or_render follows in-scope redirects (`pace.follow`): a hop's origin's
     robots.txt is read first when the run has not, and a hop it disallows, or onto a
-    tripped host, is not made. An ok HTML answer carries its main_text (the extracted
-    text length, `main_text_length` under the mirror's profile) before classify_block.
+    tripped host, is not made. At the browser tier `engine` renders the page, every
+    request it causes answered by the crawl (`_Render`); with no engine the render fails
+    outright. An ok HTML answer carries its main_text (the extracted text length,
+    `main_text_length` under the mirror's profile) before classify_block; only an http
+    answer has a render reason.
     """
     run = walk.host.run
     if walk.status is not WalkStatus.walking or run.status is not RunStatus.running:
         return None
     if walk.host.breaker_tripped:
         return None
-    if tier is not Tier.http:
-        raise NotInThisSlice(rule="AttemptTier")
     host = walk.host
-    response = follow(
-        walk.entry.identity,
-        host,
-        fetcher,
-        _validators(walk),
-        admits=run.target.scope.within_bounds,
-        ready=_hop_host(run, fetcher),
-    )
+    if tier is Tier.http:
+        response = follow(
+            walk.entry.identity,
+            host,
+            fetcher,
+            _validators(walk),
+            admits=run.target.scope.within_bounds,
+            ready=_hop_host(run, fetcher),
+        )
+    else:
+        response = _Render(walk, fetcher).through(engine)
     if try_ > 1 or tier is not walk.tiers[0]:
         run.fetch_attempts += 1
     run.bytes_fetched += response.size
@@ -1395,11 +1415,88 @@ def attempt_tier(walk: LadderWalk, tier: Tier, try_: int, fetcher: Fetcher) -> F
         try_=try_,
         response=response,
         verdict=verdict,
-        render_reason=render_reason_of(response) if unblocked else None,
+        render_reason=render_reason_of(response) if unblocked and tier is Tier.http else None,
     )
     walk.attempts.append(attempt)
     count_retry_after(attempt)
     return attempt
+
+
+# A browser attempt whose render gave no DOM (no response, or no load state in time).
+RENDER_FAILED = "render did not reach its load state"
+
+
+class _Render:
+    """One render's request callback (rovo._crawl.browser.Answer): every request it causes.
+
+    The first navigation is the page's own request, made as an http try is (`follow`:
+    in-scope redirects, each hop's robots.txt read first, the host's limiter) but with no
+    validators. Every later request, a subrequest, goes only to an allowed host that has
+    not tripped, after its origin's robots.txt is read and only when that allows it,
+    under that host's limiter, once: it is never retried, and its Retry-After pauses the
+    host, at most retry_after_cap, never retiring it (T19's batched question, item 4).
+    Anything else is aborted unrequested. Every answer's bytes count toward the render.
+    """
+
+    def __init__(self, walk: LadderWalk, fetcher: Fetcher) -> None:
+        """The walk whose page is rendered, over the run's fetcher."""
+        self.walk = walk
+        self.fetcher = fetcher
+        self.ready = _hop_host(walk.host.run, fetcher)
+        self.answers: list[SiteResponse] = []
+
+    def __call__(self, url: str, *, navigation: bool) -> SiteResponse | None:
+        """The answer the engine fulfils the request with, or None to abort it."""
+        run = self.walk.host.run
+        if navigation and not self.answers:
+            response = follow(
+                url,
+                self.walk.host,
+                self.fetcher,
+                None,
+                admits=run.target.scope.within_bounds,
+                ready=self.ready,
+            )
+        else:
+            host = self._subrequest_host(url)
+            if host is None:
+                return None
+            response = follow(
+                url,
+                host,
+                self.fetcher,
+                None,
+                admits=run.target.scope.host_allowed,
+                ready=self.ready,
+            )
+            wait = response.retry_after if response.retryable else None
+            if wait is not None and run.policy.honor_retry_after:
+                pause_host(host, min(wait, run.policy.retry_after_cap))
+        self.answers.append(response)
+        return response
+
+    def _subrequest_host(self, url: str) -> Host | None:
+        """The allowed, untripped host whose robots.txt allows the subrequest, else None."""
+        run = self.walk.host.run
+        if hostname_of(url) not in run.target.scope.allowed_hosts or _url_tripped(run, url):
+            return None
+        host = self.ready(url)
+        return None if host is None or host.breaker_tripped else host
+
+    def through(self, engine: BrowserEngine | None) -> SiteResponse:
+        """The render's answer: the navigation's, its markup the rendered DOM.
+
+        Its size is every answer's. A render that gave no DOM, or no engine, is an
+        answer with status 0 and the error set (the navigation's own, when it had one).
+        """
+        identity = self.walk.entry.identity
+        dom = None if engine is None else engine.render(identity, self)
+        size = sum(answer.size for answer in self.answers)
+        first = self.answers[0] if self.answers else None
+        if dom is None or first is None:
+            error = (first.error if first is not None else None) or RENDER_FAILED
+            return SiteResponse(status=0, source_url=identity, markup="", size=size, error=error)
+        return dataclasses.replace(first, markup=dom, size=size)
 
 
 def prepare_attempt(attempt: FetchAttempt) -> bool:
@@ -1464,10 +1561,13 @@ def count_retry_after(attempt: FetchAttempt) -> bool:
 
 
 def settle_walk(attempt: FetchAttempt) -> bool:
-    """Realises crawl.allium SettleWalk (the no-escalation case): the attempt stands.
+    """Realises crawl.allium SettleWalk: the walk settles with what stands.
 
     A blocked or soft attempt wants no escalation in a standard run, whose
-    protection_escalation is off, so it stands too.
+    protection_escalation is off, so it stands too. A browser attempt that failed
+    outright falls back to the walk's last ok http attempt; a render that added nothing
+    to a soft-suspected copy leaves that copy standing. Only the standing tier joins
+    tiers_used, and a walk that climbed counts one render escalation.
     """
     walk = attempt.walk
     if walk.status is not WalkStatus.walking or walk.host.run.status is not RunStatus.running:
@@ -1476,14 +1576,106 @@ def settle_walk(attempt: FetchAttempt) -> bool:
         return False
     if attempt.retryable or attempt.retires_host:
         return False
-    if attempt.wants_escalation and _next_tier(walk.tiers, attempt.tier) is not None:
+    added_nothing = render_added_nothing(walk.soft_suspect, attempt)
+    if (
+        attempt.wants_escalation
+        and _next_tier(walk.tiers, attempt.tier) is not None
+        and not added_nothing
+    ):
         return False
+    stands = attempt
+    if attempt.verdict.kind is BlockKind.none and added_nothing:
+        stands = walk.soft_suspect[-1]
+    elif attempt.tier is not Tier.http and attempt.failed_outright and walk.ok_http:
+        stands = walk.ok_http[-1]
     walk.status = WalkStatus.settled
-    walk.standing = attempt
-    walk.host.tiers_used = walk.host.tiers_used | {attempt.tier}
+    walk.standing = stands
+    walk.host.tiers_used = walk.host.tiers_used | {stands.tier}
     if walk.escalated:
         walk.host.render_escalations += 1
     return True
+
+
+def render_added_nothing(soft_suspect: Sequence[FetchAttempt], attempt: FetchAttempt) -> bool:
+    """SettleWalk's render_added_nothing: the suspected copy would stand.
+
+    An earlier attempt was soft-suspected, and this ok attempt's main text is under
+    soft_render_gain times that one's.
+    """
+    earlier = [suspect for suspect in soft_suspect if suspect is not attempt]
+    return (
+        bool(earlier)
+        and attempt.response.ok
+        and attempt.response.main_text < CONFIG.soft_render_gain * earlier[-1].response.main_text
+    )
+
+
+def escalate(
+    attempt: FetchAttempt, fetcher: Fetcher, engine: BrowserEngine | None = None
+) -> FetchAttempt | None:
+    """Realises crawl.allium Escalate, then its TierRequested: the next tier's attempt.
+
+    None when its guards do not hold; then nothing is requested and nothing rendered.
+    """
+    walk = attempt.walk
+    if walk.status is not WalkStatus.walking or walk.host.run.status is not RunStatus.running:
+        return None
+    if walk.host.breaker_tripped or attempt.retryable or attempt.retires_host:
+        return None
+    following = _next_tier(walk.tiers, attempt.tier)
+    if not attempt.wants_escalation or following is None:
+        return None
+    if render_added_nothing(walk.soft_suspect, attempt):
+        return None
+    walk.escalated = True
+    return attempt_tier(walk, following, 1, fetcher, engine)
+
+
+def remember_render_tier(walk: LadderWalk) -> TierHint | None:
+    """Realises crawl.allium RememberRenderTier: the TierHint created or updated.
+
+    None when its guards do not hold. The hint is the walk entry's frontier's, keyed by
+    the host name and `path_pattern` of the identity.
+    """
+    standing = walk.standing
+    if walk.status is not WalkStatus.settled or standing is None:
+        return None
+    if not walk.escalated or standing.tier is Tier.http:
+        return None
+    if not standing.response.ok or standing.verdict.kind is not BlockKind.none:
+        return None
+    first_reason = next(
+        (attempt.render_reason for attempt in walk.attempts if attempt.render_reason), None
+    )
+    if first_reason not in {RenderReason.spa_shell, RenderReason.noscript_needs_js}:
+        return None
+    frontier = walk.entry.frontier
+    pattern = path_pattern(walk.entry.identity)
+    hint = _hint(frontier, walk.host.name, pattern)
+    if hint is None:
+        hint = TierHint(
+            frontier=frontier,
+            host_name=walk.host.name,
+            path_pattern=pattern,
+            tier=standing.tier,
+            learned_in_run=walk.host.run.id,
+        )
+        frontier.tier_hints.append(hint)
+    else:
+        hint.tier = standing.tier
+        hint.learned_in_run = walk.host.run.id
+    return hint
+
+
+def path_pattern(identity: str) -> str:
+    """crawl.allium path_pattern: the identity's path cut to its first two segments.
+
+    The interim of T19's batched question, item 5: `/a/b/c.html` is `/a/b`; a path of
+    two segments or fewer, `/` included, stays as it is; the query is dropped.
+    """
+    path = urlsplit(identity).path or "/"
+    segments = path.split("/")
+    return "/".join(segments[:3]) if len(segments) > len(["", "seg1", "seg2"]) else path
 
 
 def stop_walk_on_tripped_host(attempt: FetchAttempt) -> UrlSkippedBlocked | None:
@@ -1894,12 +2086,70 @@ def render_reason_of(response: SiteResponse) -> RenderReason | None:
 
 
 def run_crawl(
-    request: RunRequest, persisted: Frontier | None, fetcher: Fetcher, clock: Timer
+    request: RunRequest,
+    persisted: Frontier | None,
+    fetcher: Fetcher,
+    clock: Timer,
+    *,
+    engine: BrowserEngine | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, then save the frontier and the run."""
-    result = drive_run(request, persisted, fetcher, clock)
+    result = drive_run(request, persisted, fetcher, clock, engine=engine)
     save_run(result)
     return result
+
+
+def fetch_one(
+    mirror: Mirror,
+    url: str,
+    tier: Tier | None,
+    seams: tuple[Fetcher, Timer, BrowserEngine | None],
+) -> str | None:
+    """rovo.allium fetch_one: the Markdown body of `url`, or None.
+
+    An in-memory run over a mirror nothing saves: the URL's host is opened (its
+    robots.txt read), and a walk whose tiers are [tier] (browser through `engine`), else
+    [http], with no climb (T19's batched question, item 2), fetches it under the
+    standard policy as FetchEntry, AttemptTier, HttpRetry and SettleWalk do. None when
+    robots.txt refuses it, the host tripped, or the standing answer is not an ok,
+    unblocked HTML answer; else its conversion under the mirror's profile.
+    """
+    fetcher, clock, engine = seams
+    request = RunRequest(
+        operator=Operator(),
+        mirror=mirror,
+        id=1,
+        kind=RunKind.initial,
+        mode=RunMode.standard,
+        scope_hash="",
+        owned_hosts=frozenset(),
+        policy=standard_policy(),
+        dry_run=False,
+        interactive=False,
+        render_mode=RenderMode.always if tier is Tier.browser else RenderMode.never,
+        stealth_mode=StealthMode.off,
+        targets=frozenset(),
+    )
+    run = start_run(request, clock)
+    if run is None:  # A standard run always starts.
+        return None
+    frontier = Frontier(mirror=mirror)
+    identity = mirror.scope.identity_of(url)
+    entry = enqueue(run, frontier, identity, depth=0, via=DiscoverySource.start, priority=0)
+    entry.status = FrontierStatus.in_progress
+    open_host(run, hostname_of(identity), origin_of(identity), fetcher)
+    walk = fetch_entry(run, entry, fetcher, engine)
+    if walk is None:
+        return None
+    _settle(walk, frontier, fetcher, engine)
+    standing = walk.standing
+    if standing is None or standing.verdict.kind is not BlockKind.none:
+        return None
+    if not standing.response.ok or not standing.response.is_html:
+        return None
+    delivered = convert_fetched(run, entry, walk)
+    content = None if delivered is None else delivered.content
+    return None if content is None else content.body
 
 
 def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the root's sinks.
@@ -1912,6 +2162,7 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     on_backoff: Callable[[HostBackedOff], None] | None = None,
     on_failure: Callable[[Run, BaseException], None] | None = None,
     on_trip: Callable[[BreakerTripped], None] | None = None,
+    engine: BrowserEngine | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, saving nothing.
 
@@ -1923,6 +2174,7 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     `on_failure` (the root's InterruptSync or RecordCrash); when that requested the
     interrupt, InterruptRun and EndRun end the run interrupted, else the error escapes.
     `on_trip` receives each BreakerTripped as it is raised (the root's AnnounceTrip).
+    `engine` renders every browser attempt of the run; the caller opens and closes it.
     """
     run = start_run(request, clock)
     if run is None:
@@ -1938,7 +2190,7 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     try:  # From the start event on, so a failing sink is recorded too (ReportOnEveryExit).
         if progress is not None:
             progress(ProgressEvent(event="start", host=None, until=None, url=None))
-        _crawl(run, frontier, fetcher, clock, failed)
+        _crawl(run, frontier, fetcher, clock, failed, engine=engine)
     except NotInThisSlice:
         raise
     except (KeyboardInterrupt, Exception) as error:
@@ -1960,8 +2212,14 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     )
 
 
-def _crawl(
-    run: Run, frontier: Frontier, fetcher: Fetcher, clock: Timer, failed: list[UrlFailed]
+def _crawl(  # noqa: PLR0913  The run, its frontier, its seams and the failure sink.
+    run: Run,
+    frontier: Frontier,
+    fetcher: Fetcher,
+    clock: Timer,
+    failed: list[UrlFailed],
+    *,
+    engine: BrowserEngine | None,
 ) -> None:
     """PrepareRun to FinishRun, collecting each UrlFailed into `failed` as it is raised."""
     prepare_run(run, frontier)
@@ -1975,7 +2233,7 @@ def _crawl(
         if not batch:
             break
         for entry in batch:
-            url_failed = _handle_entry(run, frontier, entry, fetcher, clock)
+            url_failed = _handle_entry(run, frontier, entry, (fetcher, engine), clock)
             if url_failed is not None:
                 failed.append(url_failed)
     finish_run(run, frontier)
@@ -1997,18 +2255,23 @@ def record_run(run: Run) -> None:
 
 
 def _handle_entry(
-    run: Run, frontier: Frontier, entry: FrontierEntry, fetcher: Fetcher, clock: Clock
+    run: Run,
+    frontier: Frontier,
+    entry: FrontierEntry,
+    seams: tuple[Fetcher, BrowserEngine | None],
+    clock: Clock,
 ) -> UrlFailed | None:
     """One row in progress: its host and origin, robots, the walk, disposal, storage.
 
     UrlFailed when the entry failed (its fetch, or the mirror discarded it), else None.
     """
+    fetcher, engine = seams
     if not _entry_ready(run, entry, fetcher):
         return None
-    walk = fetch_entry(run, entry, fetcher)
+    walk = fetch_entry(run, entry, fetcher, engine)
     if walk is None:  # EntryHostReady was raised, so FetchEntry's guards hold.
         return None
-    _settle(walk, frontier, fetcher)
+    _settle(walk, frontier, fetcher, engine)
     if run.progress is not None:  # rovo.allium AnnouncePage: the walk has settled.
         run.progress(
             ProgressEvent(event="page", host=walk.host.name, until=None, url=walk.entry.identity)
@@ -2047,27 +2310,33 @@ def _entry_ready(run: Run, entry: FrontierEntry, fetcher: Fetcher) -> bool:
     return not skip_robots_disallowed(run, entry) and proceed_with_known_host(run, entry)
 
 
-def _settle(walk: LadderWalk, frontier: Frontier, fetcher: Fetcher) -> None:
-    """The walk's tries to settlement: each attempt ready, retried while it may be.
+def _settle(
+    walk: LadderWalk, frontier: Frontier, fetcher: Fetcher, engine: BrowserEngine | None = None
+) -> None:
+    """The walk's tries to settlement: each attempt ready, retried or climbed while it may be.
 
     RetireHostOnLongRetryAfter settles the walk on a Retry-After past the cap, and
     StopWalkOnTrippedHost when the host has tripped and the walk needs another request;
-    else HttpRetry while the attempt is retryable, then SettleWalk. Then FeedBreaker, and
-    BreakerTrips when the breaker should act. An escalation, and BreakerEscalates (a
-    breaker that should act below the highest tier under protection_escalation, owner
-    testing only), are later slices' branches.
+    else HttpRetry while the attempt is retryable, then SettleWalk, else Escalate to the
+    next tier. The rules' guards leave one of them to every attempt; a walk none of them
+    takes stays walking and is disposed of as nothing. Then FeedBreaker, RememberRenderTier,
+    and BreakerTrips when the breaker should act. BreakerEscalates (a breaker that should
+    act below the highest tier under protection_escalation, owner testing only) is a
+    later slice's branch.
     """
-    attempt = walk.attempts[-1]
-    while True:
+    attempt: FetchAttempt | None = walk.attempts[-1]
+    while attempt is not None:
         prepare_attempt(attempt)
         if retire_host_on_long_retry_after(attempt) or stop_walk_on_tripped_host(attempt):
             break
-        if http_retry(attempt, fetcher) is None:
-            if not settle_walk(attempt):
-                raise NotInThisSlice(rule="Escalate")
+        if http_retry(attempt, fetcher) is not None:
+            attempt = walk.attempts[-1]
+        elif settle_walk(attempt):
             break
-        attempt = walk.attempts[-1]
+        else:
+            attempt = escalate(attempt, fetcher, engine)
     feed_breaker(walk)
+    remember_render_tier(walk)
     breaker = walk.host.breaker
     # A run feeds its breaker only while breaker_enabled holds, so a breaker that should
     # act and does not trip is one BreakerTrips leaves to BreakerEscalates.
@@ -2106,6 +2375,7 @@ def load_frontier(mirror: Mirror) -> Frontier | None:
     frontier = Frontier(mirror=mirror)
     frontier.entries = [_decode_entry(frontier, row) for row in data["entries"]]
     frontier.observed_urls = [_decode_observed(frontier, row) for row in data["observed_urls"]]
+    frontier.tier_hints = [_decode_hint(frontier, row) for row in data["tier_hints"]]
     sitemaps_path = state_path(mirror.out_dir, _SITEMAPS)
     if sitemaps_path.is_file():
         frontier.sitemap_snapshots = [
@@ -2117,8 +2387,8 @@ def load_frontier(mirror: Mirror) -> Frontier | None:
 def save_frontier(frontier: Frontier) -> None:
     """Write <out>/.rovo/frontier.json and <out>/.rovo/sitemaps.json atomically.
 
-    Observed URLs and sitemap snapshots are kept sorted by URL; learned tiers are empty
-    in this slice. The snapshots are saved in their own file (decision 0013).
+    Observed URLs and sitemap snapshots are kept sorted by URL, learned tiers by host
+    name, then path pattern. The snapshots are saved in their own file (decision 0013).
     """
     write_json(
         state_path(frontier.mirror.out_dir, _FRONTIER),
@@ -2128,7 +2398,12 @@ def save_frontier(frontier: Frontier) -> None:
                 _encode_observed(observed)
                 for observed in sorted(frontier.observed_urls, key=lambda observed: observed.url)
             ],
-            "tier_hints": [],
+            "tier_hints": [
+                _encode_hint(hint)
+                for hint in sorted(
+                    frontier.tier_hints, key=lambda hint: (hint.host_name, hint.path_pattern)
+                )
+            ],
         },
     )
     write_json(
@@ -2221,6 +2496,25 @@ def _decode_observed(frontier: Frontier, row: dict[str, Any]) -> ObservedUrl:
         url=str(row["url"]),
         sources=frozenset(DiscoverySource(source) for source in row["sources"]),
         last_seen_run=int(row["last_seen_run"]),
+    )
+
+
+def _encode_hint(hint: TierHint) -> dict[str, object]:
+    return {
+        "host_name": hint.host_name,
+        "learned_in_run": hint.learned_in_run,
+        "path_pattern": hint.path_pattern,
+        "tier": hint.tier.value,
+    }
+
+
+def _decode_hint(frontier: Frontier, row: dict[str, Any]) -> TierHint:
+    return TierHint(
+        frontier=frontier,
+        host_name=row["host_name"],
+        path_pattern=row["path_pattern"],
+        tier=Tier(row["tier"]),
+        learned_in_run=row["learned_in_run"],
     )
 
 
@@ -2344,7 +2638,11 @@ def _skip(run: Run, entry: FrontierEntry) -> UrlSkippedBlocked:
 
 
 def _host_tripped(run: Run, entry: FrontierEntry) -> bool:
-    host = run.host(entry.host_name)
+    return _url_tripped(run, entry.identity)
+
+
+def _url_tripped(run: Run, url: str) -> bool:
+    host = run.host(hostname_of(url))
     return host is not None and host.breaker_tripped
 
 
@@ -2401,9 +2699,29 @@ def _running_for(run: Run | None, entry: FrontierEntry) -> bool:
     )
 
 
-def _starting_tier(run: Run) -> Tier:
-    """Browser under render_mode = always; otherwise http, since no tier hint is learned."""
-    return Tier.browser if run.render_mode is RenderMode.always else Tier.http
+def _starting_tier(run: Run, entry: FrontierEntry) -> Tier:
+    """FetchEntry's starting_tier: browser under render_mode = always; else the hint's.
+
+    The tier learned for the entry's host and path pattern starts the walk unless the
+    hint is reprobe_due(run.id); else http. A breaker's tier rises only under
+    protection_escalation, an owner-testing run's (a later slice's), so it is ignored.
+    """
+    if run.render_mode is RenderMode.always:
+        return Tier.browser
+    hint = _hint(entry.frontier, entry.host_name, path_pattern(entry.identity))
+    return hint.tier if hint is not None and not hint.reprobe_due(run.id) else Tier.http
+
+
+def _hint(frontier: Frontier, host_name: str, pattern: str) -> TierHint | None:
+    """TierHint{frontier, host_name, path_pattern}."""
+    return next(
+        (
+            hint
+            for hint in frontier.tier_hints
+            if hint.host_name == host_name and hint.path_pattern == pattern
+        ),
+        None,
+    )
 
 
 def _start_from(tiers: tuple[Tier, ...], first: Tier) -> tuple[Tier, ...]:

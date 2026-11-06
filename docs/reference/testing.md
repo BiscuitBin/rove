@@ -180,10 +180,17 @@ syncs the linked sites. `tests/test_links.py` holds the hand-written link tests:
 and a whole sync over the links site through `FakeFetcher`. The suite and `just coverage` run the end-to-end tests
 with everything else.
 
-The `browser` marker is for tests that need playwright and a browser. Without the
-`browser` extra installed they skip through `pytest.importorskip`; `just e2e-browser`
-runs them with the extra. Today the one such test checks that playwright's sync API
-imports.
+The `browser` marker is for tests that need playwright and a browser. `pytest.ini`'s
+`addopts` deselects them (`-m "not browser"`), so `just check` and `just coverage` never
+launch a browser; `just e2e-browser` passes its own `-m browser`, which wins, and runs
+exactly them with the extra; without the extra they skip through
+`pytest.importorskip`. They are the harness's import check and
+`tests/e2e/test_browser_sync.py`, which renders the `spa` fixture site's JavaScript-only
+page in a real Chromium. Every other browser-tier test runs in `just check` through
+`FakeEngine` (`tests/fakes.py`), which answers each request a render makes through the
+crawl's callback, as `tests/e2e/test_render_sync.py` does over the served `spa` site;
+`PlaywrightEngine` is covered over a stub `playwright.sync_api` module in
+`tests/test_browser_engine.py`.
 
 ## Coverage
 
