@@ -675,18 +675,31 @@ rule MovePage {
         -- (ignoring case), names a last segment that drop leaves empty
         -- "index" as for a directory URL (under the prefix "/", /guide/.html
         -- gives pages/<host>/guide/index.md and /.html gives
-        -- pages/<host>/index.md), appends the version label the profile maps,
-        -- keeps [A-Za-z0-9._-] in each segment and replaces the rest with "-",
-        -- drops empty segments (so "//" collapses), applies the segment
-        -- rewrites below, and last appends ".md" unless the rewritten last
-        -- segment already ends in ".md" exactly, in lower case, so an
-        -- existing ".md" is not doubled and any other case is: README.md
-        -- stays README.md, while README.MD gives README.MD.md.
+        -- pages/<host>/index.md), keeps [A-Za-z0-9._-] in each segment and
+        -- replaces the rest with "-", drops empty segments (so "//"
+        -- collapses), applies the segment rewrites below, appends the
+        -- version label as the next paragraph says, and last appends ".md"
+        -- unless the rewritten last segment already ends in ".md" exactly,
+        -- in lower case, so an existing ".md" is not doubled and any other
+        -- case is: README.md stays README.md, while README.MD gives
+        -- README.MD.md.
         --
         -- The version label stays in the page path, outside the fixed
-        -- template "pages/{host}/{path}". Its form (separator and position)
-        -- is not yet specified, so a page whose path would carry a version
-        -- label is not yet covered here.
+        -- template "pages/{host}/{path}", and only when the identity
+        -- carries the profile's version_param: the label is that value
+        -- mapped through version_map, or, when unmapped, the raw value,
+        -- either one with every character outside [A-Za-z0-9._-] replaced
+        -- with "-". The rewritten last segment, less a final ".md" (exact,
+        -- in lower case) when it has one, gets "@" and the label, then
+        -- ".md": /foo?view=graph-rest-beta gives foo@beta.md, the scope
+        -- root with ?view=x gives index@x.md, /README.md?view=x gives
+        -- README@x.md, and con?view=x gives con-@x.md (the rewrites run
+        -- first). The separator is "@" because sanitising replaces it in
+        -- every segment, so no unlabelled path holds one and a labelled
+        -- path never meets an unlabelled one's spelling; it is legal on
+        -- every file system the mirror serves and in a relative link. An
+        -- identity without the parameter gets no label, even when the
+        -- profile sets version_default.
         --
         -- Segment rewrites inside pages/<host>/. Each reads one sanitised
         -- segment alone and they apply together, so neither the crawl order
@@ -811,9 +824,12 @@ rule StoreNewPage {
         -- The page is created with provisional content fields; the shared
         -- RefreshPage rule below sets them for every stored candidate, new
         -- or known, so there is one definition of what a store writes.
-        -- version_label maps the identity's version parameter through the
-        -- profile's version map and is null when the profile has no
-        -- version parameter.
+        -- version_label is null when the profile has no version_param.
+        -- When the identity carries that parameter, it is the label
+        -- assign_path appends (MovePage's guidance: the value mapped
+        -- through version_map, or the raw value sanitised when unmapped);
+        -- when it does not, it is the profile's version_default, which is
+        -- only ever this recorded Page.version and never touches the path.
 }
 
 -- A candidate that needs a path (a new page, a move or a revival) and

@@ -1057,12 +1057,13 @@ rule FetchSitemap {
         -- sitemap_admitted applies the profile's sitemap_include filter,
         -- always: an empty filter admits every sitemap, and a non-empty one
         -- admits a URL that one of its patterns matches, matched as the
-        -- scope's include patterns are (pattern_matches). How a {section}
-        -- or {locale} placeholder in a pattern is filled is not yet
-        -- specified (the scope has no section), so a profile whose
-        -- sitemap_include holds a placeholder is not yet covered here: a
-        -- run under it stops when the filter is first applied, before
-        -- that sitemap is read, rather than guess.
+        -- scope's include patterns are (pattern_matches). A placeholder in
+        -- a pattern is filled before matching, and nothing configures it:
+        -- {section} is a wildcard that matches as * does, and {locale} is
+        -- the scope's pinned locale when one is set, otherwise any one of
+        -- the scope's locale_codes, so the pattern admits a URL when it
+        -- matches with {locale} read as one of them (with no pinned locale
+        -- and no locale codes, such a pattern admits nothing).
         -- A sitemap on another host, one robots disallows, or one whose
         -- URL has no identity (identity_of is null: a port out of range,
         -- say) produces nothing and no problem; the identity is only that

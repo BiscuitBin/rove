@@ -811,8 +811,10 @@ rule ReportVerification {
 
     @guidance
         -- Verify is offline and never contacts the site. Gate tallies over
-        -- the mirror are printed with the findings and never change the
-        -- exit code.
+        -- the mirror are always printed, after the findings and whether or
+        -- not there is any: one "<gate> <pages>" line per gate that failed
+        -- on any written page when it was measured, sorted by gate. They
+        -- never change the exit code.
 }
 
 rule RebuildIndex {
