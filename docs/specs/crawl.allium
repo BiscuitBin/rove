@@ -50,13 +50,13 @@
 -- sitemap_is_index, sitemap_entries, resolve_url, well_known_sitemaps,
 -- sitemap_admitted, llms_txt_url, llms_txt_targets, robots_allows,
 -- robots_crawl_delay, robots_crawl_delay_exceeds, robots_sitemaps,
--- next_pending, choose_batch,
--- start_from, next_tier, path_pattern, classify_block, render_reason_of,
--- retry_wait, last_n, append, blocked_share, median, status_text,
--- with_fetch_flags, unresolved_urls, followup_targets, owner_link_needed,
--- later_of, min, max, and the convert Fidelity operations extract,
--- normalize, convert, restore and measure. Their contracts are stated
--- where they are used.
+-- next_pending, choose_batch, starting_tier, first_render_reason,
+-- render_added_nothing, start_from, next_tier, path_pattern,
+-- classify_block, render_reason_of, retry_wait, last_n, append,
+-- blocked_share, median, status_text, with_fetch_flags, unresolved_urls,
+-- followup_targets, owner_link_needed, later_of, min, max, and the
+-- convert Fidelity operations extract, normalize, convert, restore and
+-- measure. Their contracts are stated where they are used.
 use "./mirror.allium" as mirror
 use "./convert.allium" as convert
 
@@ -375,7 +375,10 @@ entity SitemapSnapshot {
 -- The starting tier learned for a host and path pattern on a client-rendered
 -- site. Default stated here (veto at review): a learned tier persists across
 -- runs and is re-probed at http every config.reprobe_every_syncs runs, so a
--- site that stops needing JavaScript drops back.
+-- site that stops needing JavaScript drops back. Decided: path_pattern
+-- keeps the first two segments of the identity's path and drops its query:
+-- /a/b/c.html is /a/b, and a path of two segments or fewer, / included,
+-- stays as it is.
 entity TierHint {
     frontier: Frontier
     host_name: String
@@ -416,7 +419,7 @@ entity Host {
     tiers_used: Set<mirror/Tier>
     fetched: Integer                    -- settled page fetches that answered
     blocked: Integer
-    render_escalations: Integer         -- walks that climbed a tier; never walks that started above http
+    render_escalations: Integer         -- walks that climbed a tier, whatever their outcome; never walks that started above http
     retry_after_honored: Integer
     sitemap_children_read: Integer
     sitemap_entries_admitted: Integer
@@ -496,13 +499,14 @@ entity FetchAttempt {
     verdict: BlockVerdict               -- classified when the attempt is created
     render_reason: RenderReason?        -- why an unblocked http answer still needs a browser
 
-    -- A Retry-After past the cap retires the host, whatever try this is;
-    -- FetchRobots applies the same test to a robots.txt try and
-    -- FetchSitemap to a declared sitemap's; a speculative probe's never
-    -- retires the host, but pauses it for retry_after_cap (FetchSitemap,
-    -- ReadLlmsTxt).
+    -- A Retry-After past the cap retires the host, whatever try this is
+    -- and whatever its tier: decided, a render's navigation answer is
+    -- tested as an http answer is. FetchRobots applies the same test to a
+    -- robots.txt try and FetchSitemap to a declared sitemap's; a
+    -- speculative probe's never retires the host, but pauses it for
+    -- retry_after_cap (FetchSitemap, ReadLlmsTxt).
     retires_host:
-        tier = http and response.retryable
+        response.retryable
         and response.retry_after != null
         and walk.host.run.policy.honor_retry_after
         and response.retry_after > walk.host.run.policy.retry_after_cap
@@ -861,6 +865,14 @@ rule FetchRobots {
         -- block rate, no further discovery request goes to it: this rule,
         -- QueueSitemaps, ReadRobotsBeforeSitemap, FetchSitemap and
         -- ReadLlmsTxt each require an untripped host, as FetchEntry does.
+        -- Decided: that holds for a fetch already under way, as
+        -- StopWalkOnTrippedHost holds it for a page's walk
+        -- (BreakerStopsTheRun): once the fetch's own host has tripped (a
+        -- hop's robots.txt read retires it, or another fetch or walk trips
+        -- it), a retry or hop on that host is not made, so no further
+        -- request goes to it, and the fetch ends with the answer it holds
+        -- as its response: the error "redirect to a retired host" for a
+        -- refused hop, the retryable answer itself for a retry not made.
         -- Decided: a declared sitemap left unread because its host was
         -- retired is not reported (no sitemap_unavailable for it); only the
         -- retirement is (BreakerTripped).
@@ -1667,10 +1679,22 @@ rule AttemptTier {
         -- starts of two requests to one host name are at least
         -- 1 / host.rate apart, and at least host.crawl_delay apart when
         -- Crawl-delay is honoured, robots.txt and retries included. A render waits for the
-        -- configured load state, capped at render_max_wait; a navigation
-        -- with no response is an error, never a success. Cookies a browser
-        -- earns are shared only with that host's http session. Every
-        -- standard request sends a User-Agent naming rovo.
+        -- page's load state, capped at render_max_wait (decided); a navigation
+        -- with no response is an error, never a success. Decided: every
+        -- request a render causes goes out on the run's http session, so
+        -- a cookie a response sets lands in that session's jar, and a
+        -- cookie the page's script sets is not copied out. Decided, for
+        -- now: a render's subrequest goes only to an origin of an allowed
+        -- host, after that origin's robots.txt is read (RobotsRequested, as
+        -- for a hop) and allows it, under that host's limiter; it is never
+        -- retried, and its Retry-After pauses the host (later_of, at most
+        -- retry_after_cap), never retiring it. Any other subrequest is
+        -- refused unrequested (an open question below). Decided: a
+        -- render's navigation answer is an http answer's equal for
+        -- Retry-After: it pauses the host (PauseHostOnRenderRetryAfter), is
+        -- counted (CountRetryAfter) and past retry_after_cap retires the
+        -- host (RetireHostOnLongRetryAfter). Every standard request sends a
+        -- User-Agent naming rovo.
 }
 
 -- The challenge is offered at most once per walk, and only in a browser
@@ -1770,8 +1794,10 @@ rule HttpRetry {
 -- the last included, a robots.txt try (FetchRobots) or a declared
 -- sitemap's (FetchSitemap) through fetch_resource too, never a speculative
 -- probe's, which pauses the host for retry_after_cap instead (FetchSitemap,
--- ReadLlmsTxt). On retirement the breaker trips without a pause, and the
--- attempt settles as it stands.
+-- ReadLlmsTxt), and a render's navigation answer as an http answer's
+-- (decided). On retirement the breaker trips without a pause, and the
+-- attempt settles as it stands. Decided: an escalated walk still counts its
+-- render escalation, whatever its outcome.
 rule RetireHostOnLongRetryAfter {
     when: AttemptReady(attempt)
     requires: attempt.retires_host
@@ -1785,21 +1811,41 @@ rule RetireHostOnLongRetryAfter {
         attempt.walk.status = settled
         attempt.walk.standing = attempt
         host.tiers_used = host.tiers_used + { attempt.tier }
+        if attempt.walk.escalated:
+            host.render_escalations = host.render_escalations + 1
 }
 
 rule CountRetryAfter {
     when: attempt: FetchAttempt.created
     requires: attempt.walk.host.run.status = running
-    requires: attempt.tier = http
     requires: attempt.response.retry_after != null and attempt.response.retryable
     requires: attempt.walk.host.run.policy.honor_retry_after
     ensures: attempt.walk.host.retry_after_honored = attempt.walk.host.retry_after_honored + 1
 
     @guidance
         -- Every honoured Retry-After is counted, on any retryable answer
-        -- (a 429 or any 5xx), the one that retires the host included. A
-        -- robots.txt, sitemap or llms.txt try through fetch_resource is
-        -- counted the same way (FetchRobots).
+        -- (a 429 or any 5xx), the one that retires the host included, at
+        -- any tier: decided, a render's navigation answer counts as an
+        -- http answer does. A robots.txt, sitemap or llms.txt try through
+        -- fetch_resource is counted the same way (FetchRobots).
+}
+
+-- Decided: a render's navigation answer with a Retry-After pauses the host
+-- as an http answer's does (HttpRetry's wait), though a render is never
+-- retried; past retry_after_cap it retires the host instead
+-- (RetireHostOnLongRetryAfter).
+rule PauseHostOnRenderRetryAfter {
+    when: AttemptReady(attempt)
+    requires: attempt.tier != http
+    requires: attempt.walk.host.run.status = running
+    requires: attempt.response.retry_after != null and attempt.response.retryable
+    requires: attempt.walk.host.run.policy.honor_retry_after
+    requires: not attempt.retires_host
+    let host = attempt.walk.host
+    let pause_until = now + retry_wait(attempt.try, attempt.response.retry_after, host.run.policy)
+    ensures:
+        host.paused_until = later_of(host.paused_until, pause_until)
+        HostBackedOff(host: host, until: pause_until)
 }
 
 -- A standard run climbs only to render content, never to answer a block;
@@ -1846,7 +1892,9 @@ rule SettleWalk {
         -- walk's last good http result, flagged render_needed; a blocked
         -- render never falls back. Only the standing tier joins tiers_used,
         -- and a walk counts one render escalation whether it climbed one
-        -- rung or two, never when it only started above http. An answer
+        -- rung or two, never when it only started above http; decided, an
+        -- escalated walk that retires its host or stops on a tripped one
+        -- counts too (RetireHostOnLongRetryAfter, StopWalkOnTrippedHost). An answer
         -- the walk already holds when its host trips settles here as
         -- usual, so a good page is still stored; only a walk that needs
         -- another request stops (StopWalkOnTrippedHost).
@@ -1876,6 +1924,8 @@ rule StopWalkOnTrippedHost {
         walk.standing = attempt
         walk.entry.status = skipped_blocked
         UrlSkippedBlocked(run: walk.host.run, url: walk.entry.identity)
+        if walk.escalated:
+            walk.host.render_escalations = walk.host.render_escalations + 1
 
     @guidance
         -- The walk settles so no walk is left walking, but its row is
@@ -1901,7 +1951,8 @@ rule FeedBreaker {
 }
 
 -- Only a tier that stood is remembered: a render that failed and fell back
--- to its http result teaches nothing.
+-- to its http result teaches nothing. first_render_reason is the
+-- render_reason of the walk's earliest attempt that has one.
 rule RememberRenderTier {
     when: walk: LadderWalk.status transitions_to settled
     requires: walk.status = settled
@@ -2512,3 +2563,4 @@ surface OwnerTesting {
 open question "May a sitemap index on an allowed host point rovo at child sitemaps on other hosts? Until decided, children are read only on the host that served the index."
 open question "Should a URL that fails on every sync be retried for ever, or retired after a number of syncs? Until decided, every failed row is re-pended on every sync and FrontierEntry.attempts keeps counting."
 open question "Should a batch run concurrently across hosts, and when, within the per-host limits SelectBatch allows? Until decided, a batch's rows run one at a time, which respects concurrency_per_host."
+open question "Should a render be allowed to load subresources (scripts, styles, XHR) from origins outside the allowed hosts, such as CDNs, still under robots and per-origin limiters? Until decided, only allowed hosts' origins are requested; restricting renders this way may leave pages that need third-party scripts unrendered."

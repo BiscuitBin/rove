@@ -33,7 +33,7 @@ an index (the comment above `value Frontmatter`, lines 157 to 161, the comment a
 `value IndexEntry`, and the frontmatter contract at lines 1554 to 1557). No index and no
 generated file carries wall-clock time (line 1294 and the guarantee
 `UnchangedRunIsStable` at line 1569). The crawl report, `crawl-report.json`, sits at the
-mirror's root, where `rovo.allium` (line 194) and the layout put it.
+mirror's root, where `rovo.allium` (line 202) and the layout put it.
 
 Three formats were weighed. SQLite answers concurrent writers and partial updates, and
 neither is needed here: one run writes a mirror at a time. TOML has no writer in the

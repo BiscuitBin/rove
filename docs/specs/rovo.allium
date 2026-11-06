@@ -44,11 +44,11 @@
 --
 -- Black box functions (pure): is_http_url, directory_exists,
 -- profile_for, initial_scope, scope_of, policy_of, effective_policy,
--- owner_request_problem, resolve_config, tier_installed, normalise_url,
--- hostname_of, resolve_targets, scope_hash, signature_of, host_reports,
--- discovered_count, summarise, most_severe, latest_report, manifest_exists,
--- page_files_readable, fetch_one, tool_version. Their contracts are stated
--- where they are used.
+-- owner_request_problem, resolve_config, resolve_fetch_config,
+-- tier_installed, normalise_url, hostname_of, resolve_targets, scope_hash,
+-- signature_of, host_reports, discovered_count, summarise, most_severe,
+-- latest_report, manifest_exists, page_files_readable, fetch_one,
+-- tool_version. Their contracts are stated where they are used.
 use "./crawl.allium" as crawl
 use "./mirror.allium" as mirror
 use "./convert.allium" as convert
@@ -70,6 +70,14 @@ use "./convert.allium" as convert
 -- prune is a key, mirror.allium's prune, in rovo.toml's own [mirror]
 -- section (mirror.prune, ROVO_MIRROR__PRUNE): the mirror uses the
 -- resolved value, and the built-in default is the mirror's (false).
+-- Decided: rovo fetch resolves its own Configuration
+-- (resolve_fetch_config): the built-in defaults, then, when --config names
+-- a rovo.toml, that file's shared sections, then its optional [fetch]
+-- section, whose keys override the shared ones key by key; no ROVO_
+-- variables. [fetch] may hold render_mode and profile only, since
+-- rovo.toml has no politeness keys to override; any other key in it is
+-- unknown and makes the configuration invalid, as in any section. A
+-- mirror's own resolve_config accepts a [fetch] section and ignores it.
 value Configuration {
     valid: Boolean
     problems: List<String>
@@ -394,7 +402,14 @@ rule RefuseMissingEngine {
 
     @guidance
         -- A configured but missing engine is refused before any request;
-        -- render_mode = never needs no engine.
+        -- render_mode = never, the default, needs no engine, so a default
+        -- sync is never refused here. Decided: tier_installed(browser)
+        -- holds when the playwright package and its Chromium binary are
+        -- both installed, so a sync that may render (render_mode auto or
+        -- always) fails fast rather than at its first render. The message
+        -- names the missing piece, the package or the browser binary, and
+        -- the two ways forward: install it (playwright install chromium),
+        -- or set render_mode = never.
 }
 
 -- owner_request_problem returns the first problem of an owner-testing
@@ -873,7 +888,7 @@ rule RefuseShowReport {
 ------------------------------------------------------------
 
 rule RefuseOwnerTestingFetch {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test != null or tier = stealth or not is_http_url(url)
     ensures: CommandExited(operator: operator, code: usage)
 
@@ -882,18 +897,43 @@ rule RefuseOwnerTestingFetch {
         -- standard run, saved ownership and an explicit owner-testing sync.
 }
 
-rule RefuseMissingFetchTier {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+rule RefuseFetchOnBadConfig {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test = null and tier != stealth and is_http_url(url)
-    requires: tier != null and tier != http and not tier_installed(tier)
+    let settings = resolve_fetch_config(config_path)
+    requires: not settings.valid or settings.unblocking_provider != null
     ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- No request is made. An unreadable or unparsable file, an
+        -- unknown section or key ([fetch]'s included) or a bad value is
+        -- refused as a sync's configuration is, every bad key path named
+        -- on standard error.
+}
+
+rule RefuseMissingFetchTier {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
+    requires: owner_test = null and tier != stealth and is_http_url(url)
+    let settings = resolve_fetch_config(config_path)
+    requires: settings.valid and settings.unblocking_provider = null
+    requires: (tier = browser or (tier = null and settings.needs_browser)) and not tier_installed(browser)
+    ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- Decided: as RefuseMissingEngine, before any request and with
+        -- the same message, only when the walk could render: --tier
+        -- browser whenever the engine is missing, and no --tier under an
+        -- effective render_mode of auto or always. --tier http never
+        -- renders, so it is never refused here, whatever render_mode says.
 }
 
 rule FetchOneUrl {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test = null and tier != stealth and is_http_url(url)
-    requires: tier = null or tier = http or tier_installed(tier)
-    let result = fetch_one(url, tier, resolve_config(""))
+    let settings = resolve_fetch_config(config_path)
+    requires: settings.valid and settings.unblocking_provider = null
+    requires: tier = http or (tier = null and not settings.needs_browser) or tier_installed(browser)
+    let result = fetch_one(url, tier, settings)
     ensures:
         if result.ok:
             PagePrinted(operator: operator, body: result.body)
@@ -901,11 +941,17 @@ rule FetchOneUrl {
 
     @guidance
         -- Prints the Markdown of one page to stdout and writes nothing
-        -- into a mirror. Without a configuration it uses built-in defaults
-        -- and the profile the catalogue picks by host. Every request,
+        -- into a mirror. Without --config it uses built-in defaults and
+        -- the profile the catalogue picks by host. Every request,
         -- redirect and browser subrequest respects robots, the limiter,
-        -- Retry-After and the standard policy; http may render for
-        -- JavaScript, never to bypass a block. A robots refusal,
+        -- Retry-After and the standard policy. Decided: with --tier the
+        -- walk runs that tier only; without one the effective render_mode
+        -- means what it means for a sync: always starts at the browser,
+        -- auto starts at http and climbs to the browser only when the
+        -- page needs rendering, never to bypass a block, and never is http
+        -- only. Decided: with --config the file's [scope] decides which
+        -- redirects are followed, by a sync's in-scope test; without it
+        -- the scope is the URL's own host. A robots refusal,
         -- challenge, block or failed fetch prints no page and exits
         -- partial.
 }
@@ -945,7 +991,7 @@ surface MirrorCommands {
         OperatorVerifies(operator, out_dir)
         OperatorRebuildsIndex(operator, out_dir)
         OperatorShowsReport(operator, out_dir)
-        OperatorFetchesUrl(operator, url, tier?, owner_test?)
+        OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
 
     @guarantee InitExitCodes
         -- 0: a starter configuration and an empty manifest are written and
@@ -969,8 +1015,8 @@ surface MirrorCommands {
         -- index: 0 when rebuilt, 2 when a page file cannot be read.
         -- report: 0 when shown, 2 when there is no report. fetch: 0 when
         -- a page was printed, 1 when the fetch failed or was refused by
-        -- the site, 2 for owner options, the stealth tier, a missing
-        -- engine or a non-http URL.
+        -- the site, 2 for owner options, the stealth tier, an invalid
+        -- configuration, a missing engine or a non-http URL.
 
     @guarantee ReportOnEveryExit
         -- Once the output directory holds a mirror, every sync, including
