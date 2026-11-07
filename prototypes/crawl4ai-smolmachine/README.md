@@ -26,8 +26,9 @@ boxes.
   token, passes it as the machine's environment and keeps it in a state file under
   `ai_tmp/c4ai-proto/` at the repository root (gitignored, inside the worktree).
 - The machine is created persistent, detached and named, so separate processes reopen
-  it by name. It is stopped, not deleted, between sessions: pulled layers are per
-  machine and a delete forces a 2.9 GB re-pull.
+  it by name. It is stopped, not deleted, between sessions, which keeps the machine's
+  own disk. The plan assumed a delete forces a 2.9 GB re-pull; it does not: ticket 02
+  found the pulled image cached host-side (see "Lifecycle" below).
 - `fetch` prints Markdown by default through the `/md` endpoint; `--json` prints the
   full `/crawl` result.
 - macOS on Apple Silicon only. The first `vm up` writes under
@@ -111,4 +112,109 @@ Surprises and facts worth keeping:
 
 ## Sample run
 
-Not yet recorded: ticket 03 fills this section.
+Real output, 2026-11-06, trimmed only where marked.
+
+### Lifecycle (ticket 02)
+
+Reconnecting to the stopped machine from a fresh process takes about 3 s to healthy,
+and `vm status` from another process reads the shared registry:
+
+```text
+$ uv run c4ai vm up
+c4ai-proto exists (stopped); connecting
+state=running; waiting for /health
+[health] waiting 0s: http://127.0.0.1:11235/health: [Errno 54] Connection reset by peer
+[health] ok after 3s
+---- state ----
+machine:  c4ai-proto
+state:    running
+endpoint: http://127.0.0.1:11235
+health:   {'status': 'ok', 'timestamp': 1794013541.693281, 'version': '0.9.5'}
+token:    present
+uv run c4ai vm up  0.07s user 0.03s system 2% cpu 3.345 total
+
+$ uv run c4ai vm status
+---- state ----
+machine:  c4ai-proto
+state:    running
+endpoint: http://127.0.0.1:11235
+health:   {'status': 'ok', 'timestamp': 1794013541.7976086, 'version': '0.9.5'}
+token:    present
+
+$ uv run c4ai vm down
+stopped
+---- state ----
+machine:  c4ai-proto
+state:    stopped
+endpoint: http://127.0.0.1:11235
+health:   error: http://127.0.0.1:11235/health: <urlopen error [Errno 61] Connection refused>
+token:    present
+
+$ uv run c4ai vm destroy
+deleted
+state file removed: .../ai_tmp/c4ai-proto/state.json
+registry: []
+---- state ----
+machine:  c4ai-proto
+state:    (no machine)
+health:   error: http://127.0.0.1:11235/health: <urlopen error [Errno 61] Connection refused>
+token:    absent
+```
+
+After `destroy`, a fresh `vm up` through the create path took 3.8 s to healthy, not 54 s:
+`~/Library/Caches/smolvm/vms` went to 0 B but `image-seeds` kept its 7.4 GB, so the
+pulled image is a host-side cache, not per machine. `vm down` took between 0.7 s and
+10 s (the second time, with a crawl done, gunicorn drained longer).
+
+### Fetch (ticket 03)
+
+```text
+$ uv run c4ai fetch https://example.com
+This domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.
+(five translations trimmed)
+[Learn more](https://iana.org/help/example-domains)
+exit 0   (0.98 s wall)
+
+$ uv run c4ai fetch https://www.python.org/ --filter fit
+**Notice:** This page displays a fallback because interactive scripts did not run. Possible causes include disabled JavaScript or failure to load scripts or stylesheets.
+(one line trimmed: the site's security notice)
+## Get Started
+Whether you're new to programming or an experienced developer, it's easy to learn and use Python.
+[Start with our Beginner's Guide](https://www.python.org/about/gettingstarted/)
+## Download
+(trimmed: the rest of the home page as Markdown, 1.18 s wall)
+
+$ uv run c4ai fetch https://example.com --json | python -c '... results[0] ...'
+{'status_code': 200, 'success': True, 'raw_markdown': 'This domain is for use in documentation examples ...', 'fit_markdown_len': 0}
+
+$ uv run c4ai fetch https://example.com -o ../../ai_tmp/c4ai-proto/example.md
+exit 0, nothing on stdout; the file is 1337 bytes
+
+$ uv run c4ai fetch http://127.0.0.1:11235/health
+error: HTTP 400 from http://127.0.0.1:11235/md: URL blocked (SSRF protection): URL blocked
+exit 1
+
+$ uv run c4ai fetch https://this-host-does-not-exist.invalid/
+error: HTTP 400 from http://127.0.0.1:11235/md: URL blocked (SSRF protection): URL blocked
+exit 1
+
+$ uv run c4ai vm down && uv run c4ai fetch https://example.com
+error: machine c4ai-proto is stopped, not running; run `c4ai vm up`
+exit 1
+
+$ uv run c4ai vm destroy && uv run c4ai fetch https://example.com
+error: no state file; run `c4ai vm up` first
+exit 1
+```
+
+Facts from the fetch runs:
+
+- A page round trip through the microVM is about 1 s wall clock for example.com and
+  python.org, measured from the host process start.
+- python.org's `fit` Markdown opens with the site's own no-JavaScript fallback notice:
+  crawl4AI's headless Chromium ran the page but the site's scripts did not, so a fetch
+  tier built on this must expect some pages' no-script branches.
+- `/crawl` returned an empty `fit_markdown` for example.com while `/md` with `f=fit`
+  returned content for python.org; the raw Markdown is the reliable field.
+- crawl4AI's SSRF guard rejects loopback and private URLs with HTTP 400, and reports an
+  unresolvable host the same way, since it resolves the name as part of the check.

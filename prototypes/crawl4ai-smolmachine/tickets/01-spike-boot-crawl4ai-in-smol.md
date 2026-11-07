@@ -30,7 +30,8 @@ Only after those three rungs is Docker-in-VM proposed.
 - [x] The health endpoint answers 200 from the host, through the published port.
 - [x] The printed machine state is `running`.
 - [x] The spike ends by stopping the machine, not deleting it, under the same machine
-      name ticket 02 uses: pulled layers are per machine, so a delete forces a 2.9 GB
-      re-pull.
+      name ticket 02 uses. (The premise that a delete forces a 2.9 GB re-pull proved
+      wrong in ticket 02: the pulled image is cached host-side. Stop is still the
+      default, to keep the machine's own disk.)
 - [x] The verdict, the first-start time and the diagnostic rungs climbed (if any) are
       written in the README.

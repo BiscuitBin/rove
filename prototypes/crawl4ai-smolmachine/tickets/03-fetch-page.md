@@ -11,11 +11,11 @@ fetch fails.
 **Blocked by:** 02 (the state file with the token, and a machine that stays up between
 invocations).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A real public page prints readable Markdown.
-- [ ] `--json` shows the raw Markdown and the HTTP status code of the fetched page
+- [x] A real public page prints readable Markdown.
+- [x] `--json` shows the raw Markdown and the HTTP status code of the fetched page
       inside the first result.
-- [ ] `-o` writes the file and prints nothing else to stdout.
-- [ ] `vm down` then `fetch` exits 1 with a clear message.
-- [ ] A sample run is captured in the README.
+- [x] `-o` writes the file and prints nothing else to stdout.
+- [x] `vm down` then `fetch` exits 1 with a clear message.
+- [x] A sample run is captured in the README.

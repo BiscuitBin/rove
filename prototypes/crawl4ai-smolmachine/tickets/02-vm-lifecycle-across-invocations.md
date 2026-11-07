@@ -12,11 +12,11 @@ whether a token is present.
 
 **Blocked by:** 01 (the spike proves the direct boot and fixes the machine settings).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `vm up` in one shell, then `vm status` in another, shows `running` and a healthy
+- [x] `vm up` in one shell, then `vm status` in another, shows `running` and a healthy
       health body.
-- [ ] `vm down` then `vm status` shows `stopped`.
-- [ ] `vm up` again reconnects to the stopped machine without re-pulling the image.
-- [ ] `vm destroy` leaves nothing in the machine registry and removes the state file.
-- [ ] Every command ends with the full state block.
+- [x] `vm down` then `vm status` shows `stopped`.
+- [x] `vm up` again reconnects to the stopped machine without re-pulling the image.
+- [x] `vm destroy` leaves nothing in the machine registry and removes the state file.
+- [x] Every command ends with the full state block.
