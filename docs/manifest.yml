@@ -249,6 +249,21 @@
       "requires": []
     },
     {
+      "path": "reference/mirror.md",
+      "title": "The mirror on disk",
+      "kind": "reference",
+      "audience": [
+        "user",
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "mirror_files_reference"
+      ],
+      "requires": []
+    },
+    {
       "path": "reference/api.md",
       "title": "API reference",
       "kind": "reference",
@@ -539,6 +554,20 @@
       ],
       "canonical_for": [
         "decision_product_definition"
+      ],
+      "requires": []
+    },
+    {
+      "path": "decisions/0013-mirror-state-on-disk.md",
+      "title": "Decision 0013: The mirror's state on disk",
+      "kind": "decision",
+      "audience": [
+        "contributor",
+        "maintainer",
+        "agent"
+      ],
+      "canonical_for": [
+        "decision_mirror_state"
       ],
       "requires": []
     }

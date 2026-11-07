@@ -4,7 +4,10 @@
 --
 -- Scope
 --   What a mirror is: an output directory holding page files, a manifest
---   of pages, aliases and links, generated indexes and the last report.
+--   of pages, aliases and links, generated indexes and the last report,
+--   laid out in fixed namespaces: collected pages under pages/<host>/,
+--   their archived copies under _removed/<host>/, the per-directory
+--   indexes under _indexes/<host>/, and every managed file at the root.
 --   This module says how a page is identified, where its file lives, what
 --   happens when its URL moves or the page disappears, how links between
 --   pages are rewritten, how the indexes are generated, and what verify
@@ -16,8 +19,8 @@
 --   removed, moves, revival, duplicates); aliases; the removed area and
 --   pruning; path assignment; the ownership declaration; link resolution,
 --   rewriting and the link flags; frontmatter; the indexes (index.md,
---   index.jsonl, links.jsonl, llms.txt, _index.md); keywords; the
---   finalisation of a run; verification.
+--   index.jsonl, links.jsonl, llms.txt and the directory indexes under
+--   _indexes/); keywords; the finalisation of a run; verification.
 --
 -- Excludes
 --   Fetching, discovery, the frontier, politeness, tiers and owner testing
@@ -36,13 +39,23 @@
 --   page declares about itself; source URL is the URL whose response was
 --   converted, after redirects. alias: any other URL that resolves to a
 --   page (a redirect hop, a non-canonical URL). removed, removed area: a
---   page gone at the source; _removed/ holds its archived file unless
---   prune deletes it. moved: a page whose identity changed, so its path
+--   page gone at the source; _removed/, a root sibling of pages/ that
+--   mirrors it, holds its archived file unless prune deletes it. moved: a page whose identity changed, so its path
 --   changed. absent: a URL that answers 404 or 410. uncrawled: a link to
 --   an in-scope URL with no page; the page flag is uncrawled_internal.
 --   dangling: a link to a removed page; the page flag is dangling_inbound.
 --   pass: one finalise, index or verify job over the mirror. tier: the
 --   fetch tier a page's response came from (http, browser, stealth).
+--   layout: the mirror's root holds the managed files (rovo.toml,
+--   crawl-report.json, index.md, index.jsonl, links.jsonl, llms.txt,
+--   .rovo/) and three namespaces beside them: pages/ (collected pages
+--   only, one directory per host), _removed/ and _indexes/. Any other
+--   file at the root, such as .git/, is the operator's and is left alone.
+--   host segment: the directory under pages/ that holds one host's pages,
+--   named from the identity's host as the guidance of MovePage states
+--   (the bracketed IPv6 form as written: [::1]:8080 gives ---1-_8080).
+--   device name: CON, PRN, AUX, NUL, COM1 to COM9 or LPT1 to LPT9,
+--   matched ignoring case on the part of a segment before its first ".".
 --   docs/project/terminology.md is the glossary.
 --
 -- Black box functions (pure): normalise_url, hostname_of, scheme_of,
@@ -51,8 +64,10 @@
 -- rewrite_destinations, digest, keywords_of, frontmatter_of,
 -- page_file_current, index_entries, link_index_entries,
 -- directory_indexes_for, llms_summary, find_broken_links,
--- verification_failures, gate_flag, casefold, ends_with, last_segment,
--- has_segment. Their contracts are stated where they are used.
+-- verification_failures, gate_flag, casefold, ends_with, page_root,
+-- segments_below, directory_segments_below, stem_before_first_dot. Their
+-- contracts are stated
+-- where they are used.
 use "./convert.allium" as convert
 
 ------------------------------------------------------------
@@ -77,8 +92,9 @@ external entity SyncRun {
 ------------------------------------------------------------
 
 -- The one URL scope of a mirror. It serves the crawl, path assignment and
--- link classification alike, so a link is uncrawled exactly when the crawl
--- would fetch its target. The root builds it from the resolved
+-- link classification alike: a link is uncrawled when its target is within
+-- the crawl's bounds, whether or not depth or robots let the crawl fetch
+-- it. The root builds it from the resolved
 -- configuration and the profile at run start; start URLs are always in
 -- scope and define the default hosts and prefixes. It carries the root and
 -- start URLs so that the crawl seeds discovery from the scope it was given.
@@ -94,10 +110,12 @@ value CrawlScope {
     meaningful_query_params: List<String>
     locale_codes: Set<String>           -- from the profile: the segments that are locales
 
-    -- Identity: lower-case scheme and host, default port dropped, dot
-    -- segments resolved, a trailing index.html folded into "/", only
+    -- Identity: lower-case scheme and host, a host's trailing "." dropped
+    -- (example.com. and example.com are one identity), default port
+    -- dropped, dot segments resolved, a trailing index.html folded into "/", only
     -- meaningful (never tracking) query parameters kept and sorted, the
-    -- fragment dropped, a trailing slash kept.
+    -- fragment dropped, a trailing slash kept. A URL normalise_url cannot
+    -- normalise (a port out of range, say) has no identity: null.
     identity_of(url): normalise_url(url, meaningful_query_params)
 
     host_allowed(url): hostname_of(identity_of(url)) in allowed_hosts
@@ -137,8 +155,14 @@ value CrawlScope {
 }
 
 -- The YAML block at the top of every page file. Keys are sorted and absent
--- values are omitted. It carries no wall-clock time: fetch times live in
--- the manifest, so an unchanged page's file never changes.
+-- values are omitted. Decided: it is a strict subset of YAML, one
+-- key: <JSON value> line per key, the value JSON-encoded, which is the
+-- only form rovo writes and the only form verify reads; any other form,
+-- valid YAML included, does not parse (invalid_page_file). It carries no
+-- wall-clock time and none of the site's
+-- validators: fetch times, etag and last_modified live in the manifest,
+-- so an unchanged page's file never changes. Decided: sitemap_lastmod
+-- stays in it, so a sitemap lastmod that moves rewrites the page file.
 value Frontmatter {
     source_url: String
     title: String
@@ -153,16 +177,18 @@ value Frontmatter {
     description: String?
     canonical_url: String?
     breadcrumbs: List<String>?
-    etag: String?
-    last_modified: String?
     sitemap_lastmod: String?
     version: String?
     locale: String?
 }
 
 -- One line of index.jsonl, and the source of index.md and llms.txt lines.
+-- Every path an index records is mirror-relative, so a page's path starts
+-- with pages/<host>/. Every field comes from the manifest's page and its
+-- links, never from the page file; BuildIndexes states the line encoding.
+-- The site's validators (etag, last_modified) are not among its fields.
 value IndexEntry {
-    path: String
+    path: String                        -- the page's mirror-relative path, under pages/<host>/
     identity: String
     source_url: String
     title: String
@@ -173,10 +199,9 @@ value IndexEntry {
     low_confidence: Boolean
     quality_flags: Set<convert/QualityFlag>
     content_digest: String
-    last_modified: String?
     version: String?
     locale: String?
-    word_count: Integer
+    word_count: Integer                 -- words the quality measurement counted outside code (quality.output.words)
     outbound_internal: Integer
     inbound_internal: Integer
 }
@@ -186,18 +211,28 @@ value IndexEntry {
 value LinkIndexEntry {
     url: String                         -- the identity, without fragment
     kind: LinkKind
-    path: String?                       -- when a written page holds the URL
-    cited_by: List<String>              -- sorted paths of the pages that link to it
+    path: String?                       -- when a written page holds the URL; mirror-relative, under pages/<host>/
+    cited_by: List<String>              -- sorted mirror-relative paths of the pages that link to it
 }
 
--- A generated per-directory index (_index.md).
+-- A generated per-directory index. A directory below a host's top level,
+-- pages/<host>/<dir>, is indexed at _indexes/<host>/<dir>.md, its path
+-- lower-cased: pages/docs.example/api gives _indexes/docs.example/api.md
+-- (was api/_index.md) and pages/docs.example/api/v2 gives
+-- _indexes/docs.example/api/v2.md. Directories that differ only in case
+-- form one group and share one index, named in lower case. A host's top
+-- level never gets a directory index: index.md lists its pages. The file's
+-- text is "# <heading>", then its nearest indexed descendants, then its
+-- entries, as BuildIndexes states.
 value DirectoryIndex {
-    directory: String
-    heading: String
-    entries: List<IndexEntry>
+    directory: String                   -- the full directory path, lower-cased, e.g. pages/docs.example/api
+    path: String                        -- the index file, _indexes/<host>/<dir>.md
+    heading: String                     -- <host>/<dir>: directory without its pages/ prefix, e.g. docs.example/api
+    entries: List<IndexEntry>           -- the pages directly in the directory, in path order
 }
 
--- A relative link in a page file that reaches no file or no anchor.
+-- A relative link in a page file that reaches no file or no anchor, or a
+-- page file that is missing (href "", reason missing_file).
 value BrokenLink {
     from_path: String
     href: String
@@ -230,9 +265,9 @@ enum VerificationReason {
     | quality_drift | broken_link | index_stale
 }
 
--- Why a page was removed: it answered 404 or 410 (absent), it redirected
--- out of scope, it fell outside a narrowed scope, or its URL now resolves
--- to another page (merged).
+-- Why a page was removed: it answered 404 or 410, or no longer answers
+-- HTML (absent), it redirected out of scope, it fell outside a narrowed
+-- scope, or its URL now resolves to another page (merged).
 enum RemovalReason { absent | redirected_out | out_of_scope | merged }
 
 -- What one settled fetch delivers.
@@ -273,7 +308,7 @@ entity Mirror {
 entity Page {
     mirror: Mirror
     identity: String
-    path: String                        -- relative .md path; changes only when the identity moves
+    path: String                        -- mirror-relative .md path under pages/<host>/; changes when the identity moves, at a revival and back at its retirement
     canonical_url: String?              -- what the page declared, when it did
     source_url: String                  -- the URL whose response was converted
     title: String
@@ -293,6 +328,7 @@ entity Page {
     content_digest: String              -- of the published body; serves change detection and the frontmatter
     previous_digest: String?            -- content_digest before this run touched the page; null when new or revived
     moved_from: String?                 -- the old path while a move awaits finalisation
+    revived_from: String?               -- a revived page's removed path, where its archived copy is, until finalisation
     etag: String?
     last_modified: String?
     sitemap_lastmod: String?
@@ -437,30 +473,37 @@ entity MirrorPass {
 }
 
 -- The generated indexes: index.md for people, index.jsonl for machines,
--- llms.txt for agents, _index.md per large directory, links.jsonl for every
--- URL the pages cite. Regenerated from scratch by every pass that writes
+-- llms.txt for agents, a file under _indexes/<host>/ per large directory,
+-- links.jsonl for every URL the pages cite. Regenerated from scratch by every pass that writes
 -- them.
 entity Index {
     mirror: Mirror
     entries: List<IndexEntry>           -- one per written page, sorted by path
     link_entries: List<LinkIndexEntry>  -- sorted by URL
     directory_indexes: List<DirectoryIndex>
-    summary: String                     -- the llms.txt blockquote: the start page's description
+    summary: String                     -- the llms.txt blockquote, as llms_summary gives it (BuildIndexes)
 }
 
 ------------------------------------------------------------
 -- Config
 ------------------------------------------------------------
 
+-- The page path template is fixed at "pages/{host}/{path}" and is not a
+-- parameter: no configuration layer sets it, so {version} and {locale}
+-- never shape a page path (the version label still does, through
+-- assign_path, outside the template, and both still reach the frontmatter
+-- and index.jsonl). max_path_chars is the mirror's own parameter, held
+-- within its range by MaxPathCharsInRange; it is not a rovo.toml key.
+-- prune is a rovo.toml key, [mirror] prune: the resolved configuration's
+-- prune (rovo.allium Configuration), false by default.
 config {
-    max_path_chars: Integer = 200
+    max_path_chars: Integer = 200                  -- the whole mirror-relative path, pages/<host>/ included; within [128, 240]
     collision_hash_chars: Integer = 6
     keywords_per_page: Integer = 8
     keywords_min: Integer = 5
-    hierarchical_index_threshold: Integer = 200    -- pages in a directory before it gets its own _index.md
-    llms_txt_cap: Integer = 2000                   -- pages listed one by one before directories are listed instead
+    hierarchical_index_threshold: Integer = 200    -- pages in a directory before it gets its own file under _indexes/
+    llms_txt_cap: Integer = 2000                   -- past it (written pages > cap), llms.txt lists an indexed directory as one line
     prune: Boolean = false                         -- delete a removed page's file instead of archiving it
-    path_template: String = "{path}"               -- placeholders {path} {host} {version} {locale}
 }
 
 ------------------------------------------------------------
@@ -549,9 +592,10 @@ rule RejectDuplicateCandidate {
         -- honoured). The first store's content stands; this candidate's
         -- requested URL, redirect hops and source URL still become aliases
         -- of the stored page, and a written page the requested URL held
-        -- is merged into it, exactly as a store would have done, so the
-        -- order in which the two URLs were fetched never changes the
-        -- mirror.
+        -- is merged into it, exactly as a store would have done. Decided:
+        -- when the two URLs' content differs, the content of the one
+        -- fetched first stands, so the mirror is deterministic for a given
+        -- frontier order, not for every order.
 }
 
 rule RewriteKnownPage {
@@ -591,6 +635,7 @@ rule MovePage {
     requires: not exists target or target.status = removed
     let old_path = previous.path
     let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     let stale = Alias{mirror: candidate.mirror, url: identity}
     ensures:
         if exists target:
@@ -610,17 +655,110 @@ rule MovePage {
         -- A removed record already holding the new identity is replaced:
         -- the live page supersedes it and its archived copy is deleted. An
         -- alias the new identity held is dropped, since a page's identity
-        -- is never an alias. assign_path strips the scope prefix, names a directory URL
-        -- "index", drops .html, .htm and .aspx, appends the version label
-        -- the profile maps, keeps [A-Za-z0-9._-] in each segment and
-        -- replaces the rest with "-", avoids reserved device names, and
-        -- applies path_template. A candidate path held by another page
-        -- (compared case-insensitively), reserved (index.md, index.jsonl,
-        -- links.jsonl, llms.txt, crawl-report.json, rovo.toml, _index.md,
-        -- _removed/, .rovo/) or longer than max_path_chars becomes a stem
-        -- cut to max_path_chars - 10, "-", and the first
-        -- collision_hash_chars hex of the identity's digest; the suffix
-        -- depends on the identity alone, never on crawl order.
+        -- is never an alias. Decided: an alias URL rechecked
+        -- (crawl/Enqueue) that now serves its own page moves the page it
+        -- aliased here, as any requested URL whose known page answers
+        -- under a new identity does.
+        --
+        -- assign_path gives "pages/", the host segment, "/" and a relative
+        -- path. The host segment is the identity's host lower-cased, with a
+        -- trailing "." dropped, every character outside [a-z0-9.-] replaced
+        -- with "-", the device-name rewrite below applied, and a non-default
+        -- port appended as "_<port>" (":" is illegal on Windows, and "_"
+        -- appears in no sanitised host): example.com. gives example.com,
+        -- con gives con-, con:8080 gives con-_8080 (the device rule runs
+        -- before the port is appended), and [::1]:8080 gives ---1-_8080 (the
+        -- rule reads an IPv6 host in its bracketed form, as written). A
+        -- host too long to leave room for a page within max_path_chars has
+        -- its pages refused (RefuseUnplaceableCandidate). Two hosts that
+        -- sanitise alike share a host segment, and the collision step below
+        -- keeps their paths apart. The relative path strips the scope
+        -- prefix, names a directory URL "index" (so the scope root is
+        -- pages/<host>/index.md; the root index.md is outside pages/ and
+        -- never collides with it), drops a trailing .html, .htm or .aspx
+        -- (ignoring case), names a last segment that drop leaves empty
+        -- "index" as for a directory URL (under the prefix "/", /guide/.html
+        -- gives pages/<host>/guide/index.md and /.html gives
+        -- pages/<host>/index.md), keeps [A-Za-z0-9._-] in each segment and
+        -- replaces the rest with "-", drops empty segments (so "//"
+        -- collapses), applies the segment rewrites below, appends the
+        -- version label as the next paragraph says, and last appends ".md"
+        -- unless the rewritten last segment already ends in ".md" exactly,
+        -- in lower case, so an existing ".md" is not doubled and any other
+        -- case is: README.md stays README.md, while README.MD gives
+        -- README.MD.md.
+        --
+        -- The version label stays in the page path, outside the fixed
+        -- template "pages/{host}/{path}", and only when the identity
+        -- carries the profile's version_param: the label is that value,
+        -- form-decoded first (application/x-www-form-urlencoded: "+" is a
+        -- space and %XX is decoded, so ?view=a%2Fb is a/b, labelled a-b),
+        -- mapped through version_map, or, when unmapped, the decoded value,
+        -- either one with every character outside [A-Za-z0-9._-] replaced
+        -- with "-". The rewritten last segment, less a final ".md" (exact,
+        -- in lower case) when it has one, gets "@" and the label, then
+        -- ".md": /foo?view=graph-rest-beta gives foo@beta.md, the scope
+        -- root with ?view=x gives index@x.md, /README.md?view=x gives
+        -- README@x.md, and con?view=x gives con-@x.md (the rewrites run
+        -- first). The separator is "@" because sanitising replaces it in
+        -- every segment, so no unlabelled path holds one and a labelled
+        -- path never meets an unlabelled one's spelling; it is legal on
+        -- every file system the mirror serves and in a relative link. An
+        -- identity without the parameter gets no label, even when the
+        -- profile sets version_default.
+        --
+        -- Segment rewrites inside pages/<host>/. Each reads one sanitised
+        -- segment alone and they apply together, so neither the crawl order
+        -- nor their own order matters; where two rewrite the same character
+        -- they agree. A trailing run of "." becomes "-", so a segment made
+        -- only of dots becomes all "-". A leading "." becomes "-" (.git/ gives
+        -- -git/, .rovo/ gives -rovo/), so no page is hidden. A directory
+        -- segment equal, ignoring case, to a managed root file name
+        -- (llms.txt, index.jsonl, links.jsonl, crawl-report.json, rovo.toml)
+        -- has its last "." replaced with "-" (llms.txt/guide gives
+        -- llms-txt/guide.md). A directory segment ending in .md (ignoring
+        -- case) has its final "." replaced with "-" (a.md/x gives a-md/x.md
+        -- and A.MD/x gives A-MD/x.md), since a page file is never also a
+        -- directory. A segment whose part before its first "." is a device
+        -- name (CON, PRN, AUX, NUL, COM1 to COM9, LPT1 to LPT9), ignoring
+        -- case, has "-" appended to that part, before the first ".", since
+        -- Windows reserves a name by that part: con gives con- (the page
+        -- con-.md), con.txt gives con-.txt, and NUL.json/x gives
+        -- NUL-.json/x.md.
+        --
+        -- No segment equal to _removed is rewritten any more: the archive
+        -- is _removed/ at the mirror's root, a sibling of pages/, so no page
+        -- path can reach it, nor _indexes/, .rovo/ or a managed root file.
+        -- No name is reserved inside pages/<host>/: _index.md and index.md
+        -- there are ordinary page names.
+        --
+        -- Decided: each directory segment below pages/<host>/ is then
+        -- folded, ignoring case, onto the spelling that a path a page
+        -- holds (this page's own included) already uses for that
+        -- directory, so a directory has one spelling across
+        -- the manifest, the tree, index.jsonl and links: with
+        -- pages/<host>/sub/a.md held, /Sub/b gives pages/<host>/sub/b.md,
+        -- and a page at sub/x.md whose URL becomes /Sub/x keeps sub/x.md.
+        -- Where held paths already use several spellings of one directory,
+        -- the spelling of the held path that sorts first by code point is
+        -- taken; existing pages are not moved.
+        -- The last segment, the page file's name, keeps its own spelling
+        -- and meets the collision test below (UniquePagePathIgnoringCase).
+        --
+        -- A candidate path held by another page (compared ignoring case,
+        -- because a case-insensitive file system holds API/ and api/ as one
+        -- directory) or longer than max_path_chars becomes a stem cut to
+        -- max_path_chars - 10, "-", and the first collision_hash_chars hex of
+        -- the identity's digest; the suffix depends on the identity alone,
+        -- never on crawl order. When that suffixed path is itself held
+        -- (ignoring case) or too long, the suffix is the full 64-hex digest
+        -- instead, with the stem cut so the result still fits max_path_chars.
+        -- max_path_chars counts the whole mirror-relative path, pages/<host>/
+        -- included, since that is what meets a file system's limits. A cut
+        -- never shortens pages/<host>/: an option whose prefix and suffix do
+        -- not fit is unusable. When the full-digest path is unusable too,
+        -- assign_path is null: the candidate is refused
+        -- (RefuseUnplaceableCandidate) and nothing in the mirror changes.
 }
 
 -- Default stated here (veto at review): a removed page that answers again
@@ -636,12 +774,15 @@ rule ReviveRemovedPage {
     requires: not exists previous
     requires: exists target and target.status = removed
     let archived_path = target.path
+    let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     ensures:
         target.status = written
         target.removed_at = null
         target.removal_reason = null
         target.redirect_target = null
-        target.path = assign_path(candidate.mirror, identity)
+        target.path = new_path
+        target.revived_from = archived_path
         target.previous_digest = null
         target.first_seen = now
         ArchivedCopyDeleted(mirror: candidate.mirror, path: archived_path)
@@ -658,10 +799,12 @@ rule StoreNewPage {
     requires: not exists target
     let content = candidate.content
     requires: content != null
+    let new_path = assign_path(candidate.mirror, identity)
+    requires: new_path != null
     ensures:
         Page.created(
             mirror: candidate.mirror, identity: identity,
-            path: assign_path(candidate.mirror, identity),
+            path: new_path,
             canonical_url: content.canonical_url, source_url: candidate.source_url,
             title: content.title, description: content.description,
             method: content.method, tier: candidate.tier,
@@ -672,7 +815,7 @@ rule StoreNewPage {
             locale: candidate.mirror.scope.locale ?? content.declared_locale,
             version: version_label(candidate.mirror.profile, identity),
             raw_digest: candidate.raw_digest,
-            content_digest: digest(content.body), previous_digest: null, moved_from: null,
+            content_digest: digest(content.body), previous_digest: null, moved_from: null, revived_from: null,
             etag: candidate.etag, last_modified: candidate.last_modified,
             sitemap_lastmod: candidate.sitemap_lastmod,
             processing_signature: candidate.mirror.processing_signature,
@@ -687,9 +830,29 @@ rule StoreNewPage {
         -- The page is created with provisional content fields; the shared
         -- RefreshPage rule below sets them for every stored candidate, new
         -- or known, so there is one definition of what a store writes.
-        -- version_label maps the identity's version parameter through the
-        -- profile's version map and is null when the profile has no
-        -- version parameter.
+        -- version_label is null when the profile has no version_param.
+        -- When the identity carries that parameter, it is the label
+        -- assign_path appends (MovePage's guidance: the form-decoded
+        -- value mapped through version_map, or sanitised when unmapped);
+        -- when it does not, it is the profile's version_default, which is
+        -- only ever this recorded Page.version and never touches the path.
+}
+
+-- A candidate that needs a path (a new page, a move or a revival) and
+-- gets none from assign_path is refused: it is discarded, so the crawl
+-- fails its entry and the run reports the URL as failed. The page a move
+-- would have moved keeps its identity and path, a removed record stays
+-- removed, no alias is recorded and no links are queued.
+rule RefuseUnplaceableCandidate {
+    when: candidate: PageCandidate.created
+    requires: candidate.status = pending and candidate.outcome = converted
+    let identity = candidate.mirror.scope.page_identity(candidate.source_url, candidate.content?.canonical_url)
+    let target = Page{mirror: candidate.mirror, identity: identity}
+    requires: not exists target or target.status = removed
+    requires: assign_path(candidate.mirror, identity) = null
+    ensures:
+        candidate.status = accepted
+        CandidateDiscarded(candidate: candidate, reason: "no free path")
 }
 
 -- Shared effects of every store. The page's links are dropped and
@@ -798,7 +961,13 @@ rule RecordUnchanged {
         -- A not-modified answer or an unchanged raw document. The page
         -- file is untouched; the stored measurement is carried, not
         -- re-measured. Taking the entry's sitemap lastmod means the same
-        -- lastmod does not force a refetch again.
+        -- lastmod does not force a refetch again; a lastmod that moved
+        -- reaches the frontmatter, so PublishPage rewrites the page file
+        -- (Frontmatter). The new etag and
+        -- last_modified are kept in the manifest only (Frontmatter). The
+        -- page's stored links are queued again by the crawl
+        -- (crawl/RefollowUnchangedLinks, on PageStored) unless the run
+        -- turns that off; no LinksFound is raised here.
 }
 
 rule DiscardUnchangedWithoutPage {
@@ -807,7 +976,7 @@ rule DiscardUnchangedWithoutPage {
     requires: not exists known_page(candidate.mirror, candidate.requested_identity)
     ensures:
         candidate.status = accepted
-        CandidateDiscarded(candidate: candidate)
+        CandidateDiscarded(candidate: candidate, reason: "no page to confirm")
 }
 
 -- Default stated here (veto at review): a 404 or 410 removes the written
@@ -853,31 +1022,74 @@ rule AcceptRedirectedOutWithoutPage {
 ------------------------------------------------------------
 
 -- Every removal goes through here: the page keeps its record and path,
--- its aliases and links go, and its file is archived under _removed/ at
--- the same relative path, or deleted when prune is set.
+-- its aliases and links go, and its file is archived, or deleted when
+-- prune is set. A page revived in this run is retired at the path it was
+-- revived from, where its archived copy is, unless another page now holds
+-- that path; then the copy moves to the page's new path. The archive mirrors pages/:
+-- the file at pages/<host>/<relative path> is archived at
+-- _removed/<host>/<relative path>, and that is the archived copy
+-- ArchivedCopyDeleted names by the page's path.
 rule RetirePage {
     when: PageRetired(page, reason, redirect_target?, candidate?)
     requires: page.status = written
+    let old_path_held =
+        page.revived_from != null
+        and page.mirror.pages.any(p => p != page and casefold(p.path) = casefold(page.revived_from))
+    let retired_path = if page.revived_from = null or old_path_held: page.path else: page.revived_from
     ensures:
         page.status = removed
         page.removed_at = now
         page.removal_reason = reason
         page.redirect_target = redirect_target
         page.moved_from = null
+        page.revived_from = null
+        page.path = retired_path
         for a in page.aliases:
             not exists a
         for l in page.outbound_links:
             not exists l
         if config.prune:
-            PageFileDeleted(mirror: page.mirror, path: page.path)
+            PageFileDeleted(mirror: page.mirror, path: retired_path)
         else:
-            PageFileArchived(mirror: page.mirror, path: page.path)
+            if old_path_held:
+                ArchivedCopyMoved(mirror: page.mirror, from_path: page.revived_from, to_path: retired_path)
+            PageFileArchived(mirror: page.mirror, path: retired_path)
         PageRemoved(mirror: page.mirror, page: page, reason: reason, candidate: candidate)
 
     @guidance
         -- Pages that linked here keep their links until the next
         -- finalisation re-resolves them as dangling. The first removal is
         -- kept: a removed page is never reported removed again.
+        --
+        -- Decided: the file effects (PageFileMoved, PageFileArchived,
+        -- PageFileDeleted, ArchivedCopyDeleted, ArchivedCopyMoved) are
+        -- recorded when their rule fires at intake and applied in the
+        -- finalise pass, in the order raised and idempotently, before any
+        -- PublishPage. Pending
+        -- effects compose per page path: a page moved, once or more, and
+        -- then retired in the same run is archived from the path it was
+        -- last published at to _removed/<host>/<the path it was retired
+        -- at>, or under prune that file is deleted; a removed page revived
+        -- and retired again in the same run keeps its archived copy, the
+        -- PageFileArchived cancelling the pending ArchivedCopyDeleted of
+        -- that path and archiving nothing. Decided: a removed page revived
+        -- at a new path (its old one no longer free) and retired again in
+        -- the same run likewise keeps its existing _removed/ copy, its
+        -- last published bytes: its record returns to the old path, the
+        -- path that copy is at (revived_from), so the PageFileArchived of
+        -- that path cancels the pending ArchivedCopyDeleted, the
+        -- never-published new path is not archived, nothing moves on disk
+        -- and the record and its copy agree (RemovedAreaKeepsPath).
+        -- Decided: when another page has taken that old path in the same
+        -- run, the record keeps its new path and the kept copy moves from
+        -- _removed/<host>/<old path> to _removed/<host>/<new path>
+        -- (ArchivedCopyMoved), which cancels the pending ArchivedCopyDeleted
+        -- of the old path; the PageFileArchived of the never-published new
+        -- path archives nothing, so record and copy still agree and
+        -- UniquePagePathIgnoringCase holds. Under prune nothing moves: the
+        -- pending ArchivedCopyDeleted deletes the copy. A directory under
+        -- pages/ or _removed/ that an effect leaves empty is removed, the
+        -- namespace root (pages/ or _removed/) included.
 }
 
 ------------------------------------------------------------
@@ -970,6 +1182,7 @@ rule LinkToUncrawledPage {
 rule LinkToExternalPage {
     when: DestinationFound(pass, page, target, fragment?)
     let identity = page.mirror.scope.identity_of(resolve_url(page.source_url, target))
+    requires: identity != null
     requires: not exists known_page(page.mirror, identity)
     requires: not exists Page{mirror: page.mirror, identity: identity}
     requires: not page.mirror.scope.within_bounds(identity)
@@ -979,9 +1192,18 @@ rule LinkToExternalPage {
     )
 }
 
+-- A destination whose identity identity_of cannot compute (a port out of
+-- range, say) satisfies none of the four rules above: it records no Link,
+-- feeds no link flag, and rewrite_destinations leaves it as written, byte
+-- for byte.
+
 -- The body is the converted body with each internal destination replaced
 -- by a relative path plus its fragment (a self-link with a fragment becomes
--- a bare fragment) and every other destination left absolute. Every other
+-- a bare fragment) and every other destination left absolute. The relative
+-- path runs from the linking file to the target file within pages/, so a
+-- link to another host's page climbs to pages/ and descends again
+-- (pages/a.example/guide/x.md links to pages/b.example/y.md as
+-- ../../b.example/y.md). Every other
 -- byte, code samples included, is untouched. Link flags, keywords and the
 -- low-confidence verdict are recomputed from scratch.
 rule FinalisePageBody {
@@ -1025,6 +1247,7 @@ rule PublishPage {
             page.last_changed = now
         page.previous_digest = page.content_digest
         page.moved_from = null
+        page.revived_from = null
         if not page_file_current(page):
             PageFileWritten(mirror: page.mirror, page: page)
         PageFinalised(
@@ -1054,8 +1277,12 @@ rule FinishLinkPass {
     @guidance
         -- find_broken_links lists every relative destination in a page
         -- file that leaves the mirror, reaches no file, or names a
-        -- fragment absent from the target file; a missing page file is
-        -- itself broken. After a complete finalisation it is empty; a
+        -- fragment absent from the target file, unless the page's internal
+        -- Link to that file records the fragment unresolved
+        -- (fragment_resolved false: the anchor is absent upstream, and
+        -- unresolved_fragment already reports it). A missing page file is
+        -- one BrokenLink: from_path the page's path, href "" and reason
+        -- missing_file. After a complete finalisation it is empty; a
         -- non-empty list means a file could not be written.
 }
 
@@ -1094,20 +1321,79 @@ rule BuildIndexes {
 
     @guidance
         -- index_entries makes one IndexEntry per written page in path
-        -- order. index.md groups entries under one heading per top-level
-        -- directory and marks low-confidence pages; a directory holding
-        -- more than hierarchical_index_threshold pages (counted directly,
-        -- not recursively) gets its own _index.md, linked from its
-        -- parent's index, so no directory index is orphaned. llms.txt
-        -- lists every page up to llms_txt_cap; past it, a directory that
-        -- has its own _index.md is listed as one link, and root pages are
-        -- always listed. The summary is the description of the page whose
-        -- identity or alias matches a start URL, else the first page by
-        -- path. links.jsonl holds one LinkIndexEntry per cited identity,
+        -- order, every field from the manifest: word_count is the number
+        -- of words the quality measurement counted outside code (the
+        -- length of quality.output.words), and outbound_internal and
+        -- inbound_internal count the page's internal links over
+        -- Mirror.links.
+        --
+        -- The Markdown indexes (index.md, llms.txt and the directory
+        -- indexes) are blocks of lines, one blank line between two
+        -- blocks; an empty block is left out. A page line is
+        -- "- [<title>](<link>)", followed by " (low confidence)" when the
+        -- page is low_confidence; a directory-index line is
+        -- "- [<heading>](<link>)". A title entering link text has each
+        -- "\", "[" and "]" escaped with a backslash, and each newline or
+        -- run of whitespace in it becomes one space. Nearest first means
+        -- the shallower directory first, then by path.
+        --
+        -- index.md is "# Index", then for each host segment in name order
+        -- "## <host>" and the host's top-level pages (directly under
+        -- pages/<host>/) in path order, then for each top-level directory
+        -- of that host in name order "### <dir>", the directory indexes at
+        -- or below it, nearest first, then every page below it in path
+        -- order, the pages of a directory with its own index included.
+        -- The <dir> of "### <dir>" is the directory's name lower-cased,
+        -- and the directories are ordered by it, so top-level directories
+        -- that differ only in case share one heading. A mirror with no page
+        -- writes "# Index" alone.
+        --
+        -- A directory below a host's top level holding more than
+        -- hierarchical_index_threshold pages (counted directly, not
+        -- recursively, directories that differ only in case counted as
+        -- one) gets its own file under _indexes/<host>/, named as
+        -- DirectoryIndex states. Its text is "# <heading>", then a line
+        -- for each of its nearest indexed descendants, nearest first: the
+        -- indexes of the directories below its own, skipping any
+        -- directory without an index of its own
+        -- (_indexes/<host>/api.md links _indexes/<host>/api/v2.md, or
+        -- _indexes/<host>/api/v2/ref.md when api/v2 has no index), then a
+        -- line for each of its own pages in path order. index.md links
+        -- every directory index, so none is orphaned. A host's top level
+        -- gets no directory index.
+        --
+        -- llms.txt is "# <host>" of the first page by path ("# Index" for
+        -- an empty mirror), then "> <summary>" unless the summary is
+        -- empty, then one page line per page in path order. Past
+        -- llms_txt_cap, when the written pages number more than the cap,
+        -- a directory that has its own directory index is listed as one
+        -- directory-index line, in the place of its first page in path
+        -- order, instead of its pages; a host's top-level pages and the
+        -- pages of a directory without an index of its own are still
+        -- listed one by one.
+        --
+        -- llms_summary is the description of the page whose identity, or
+        -- one of whose aliases, is the identity of a start URL (the first
+        -- such start URL in the scope's order), else of the page the root
+        -- URL's identity or alias names, else of the first page by path;
+        -- the empty string for an empty mirror.
+        --
+        -- links.jsonl holds one LinkIndexEntry per cited identity,
         -- without fragment, sorted by URL, with the kind link resolution
-        -- gave it and the citing pages' paths sorted. Stale _index.md
-        -- files outside the removed area are deleted. Index files are
-        -- written only when their text would differ.
+        -- gave it and the citing pages' paths sorted. index.jsonl and
+        -- links.jsonl hold one JSON object per line: keys sorted, compact
+        -- separators ("," and ":"), non-ASCII characters written as
+        -- themselves, a set as a sorted list, an enum value (kind, each
+        -- quality flag) as its name, an absent optional value as null,
+        -- and a line feed after every line, so an empty mirror
+        -- writes an empty file.
+        --
+        -- Every path an index holds is mirror-relative (pages/<host>/...),
+        -- and every link it holds is relative to the index file: index.md
+        -- and llms.txt link down into pages/ and _indexes/, a file under
+        -- _indexes/<host>/ links up and back down into pages/<host>/.
+        -- Stale files under _indexes/ are deleted. Index files are written
+        -- only when their text would differ.
 }
 
 ------------------------------------------------------------
@@ -1131,9 +1417,13 @@ rule VerifyPages {
     @guidance
         -- verification_failures is offline and never contacts the site. It
         -- reports: a written page whose file is missing (missing_file); a
-        -- Markdown file outside the removed area and the generated indexes
-        -- that the manifest does not know (unmanaged_file); a page file
-        -- without the required frontmatter keys or that does not parse
+        -- Markdown file under pages/ that the manifest does not know, or
+        -- under _indexes/ that BuildIndexes would not write
+        -- (unmanaged_file), while anything else at the mirror's root that
+        -- is not a managed file (.git/, a README) is the operator's and is
+        -- never reported; a page file
+        -- without the required frontmatter keys or whose frontmatter does
+        -- not parse as one key: <JSON value> line per key (Frontmatter)
         -- (invalid_page_file); a body whose digest differs from the
         -- frontmatter's or the manifest's content_digest
         -- (digest_mismatch); a gate that fails on the current body against
@@ -1156,20 +1446,47 @@ invariant UniquePageIdentity {
 }
 
 -- Paths are unique ignoring case, so the mirror is portable to
--- case-insensitive file systems.
+-- case-insensitive file systems; a directory's spelling is shared by
+-- every path through it (assign_path, MovePage's guidance).
 invariant UniquePagePathIgnoringCase {
     for a in Pages:
         for b in Pages:
             a != b and a.mirror = b.mirror implies casefold(a.path) != casefold(b.path)
 }
 
+-- Every page path lies in its host's namespace, pages/<host>/, where
+-- page_root(identity) is "pages/", the host segment and "/", so no page
+-- path can reach a managed root file, _removed/, _indexes/ or .rovo/.
+-- segments_below(path, root) lists the segments of path after root, and
+-- directory_segments_below all of them but the last. Inside the namespace
+-- no segment is empty or hidden, none ends in ".", and no directory
+-- segment is, ignoring case, a managed root file name or ends in ".md".
+-- No segment under pages/, the host segment included, is a device name:
+-- stem_before_first_dot(s) is the part of s before its first ".", or s.
 invariant PagePathsAvoidManagedNames {
     for p in Pages:
-        ends_with(p.path, ".md")
-        and p.path != "index.md"
-        and last_segment(p.path) != "_index.md"
-        and not has_segment(p.path, "_removed")
-        and not has_segment(p.path, ".rovo")
+        starts_with(p.path, page_root(p.identity))
+        and ends_with(p.path, ".md")
+        and segments_below(p.path, "pages/").all(s =>
+            casefold(stem_before_first_dot(s)) not in {
+                "con", "prn", "aux", "nul",
+                "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
+                "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9" })
+        and segments_below(p.path, page_root(p.identity)).all(s =>
+            s != "" and not starts_with(s, ".") and not ends_with(s, "."))
+        and directory_segments_below(p.path, page_root(p.identity)).all(d =>
+            casefold(d) not in { "llms.txt", "index.jsonl", "links.jsonl", "crawl-report.json", "rovo.toml" }
+            and not ends_with(casefold(d), ".md"))
+}
+
+-- max_path_chars counts the whole mirror-relative path, pages/<host>/
+-- included. Its range leaves room for pages/, a host segment and the
+-- full-digest fallback ("-", 64 hex and ".md" make 68) and stays under the
+-- common 255-byte name and 260-char path limits. It is the mirror's own
+-- parameter, not a rovo.toml key. A page that still cannot fit is refused
+-- (RefuseUnplaceableCandidate).
+invariant MaxPathCharsInRange {
+    config.max_path_chars >= 128 and config.max_path_chars <= 240
 }
 
 invariant OneAliasPerUrl {
@@ -1234,26 +1551,35 @@ surface MirrorContents {
 
     @guarantee PageFileProvenance
         -- Every page file starts with YAML frontmatter whose keys are
-        -- sorted. It always carries source_url, title, content_digest,
+        -- sorted, written one key: <JSON value> line per key (Frontmatter);
+        -- a hand edit into any other form is reported invalid_page_file. It always carries source_url, title, content_digest,
         -- quality_score, low_confidence, quality_flags, tier, method,
         -- profile and keywords; description, canonical_url, breadcrumbs,
-        -- etag, last_modified, sitemap_lastmod, version and locale appear
-        -- only when they have a value. The content digest covers the body
-        -- after the frontmatter only, so a frontmatter edit never moves
-        -- it. No page file carries a wall-clock time.
+        -- sitemap_lastmod, version and locale appear only when they have a
+        -- value. The content digest covers the body after the frontmatter
+        -- only, so a frontmatter edit never moves it. No page file carries
+        -- a wall-clock time or the site's validators (etag and
+        -- last_modified), which are kept in the mirror's state under .rovo/
+        -- alone.
 
     @guarantee RelativeLinksOnly
         -- A link to a written page is a relative path from the linking
         -- file, plus its fragment, so the mirror links to itself and
         -- documentation outside the mirror can link to a page file and a
-        -- heading fragment. A fragment is defined by the anchors the
-        -- target file holds. Every other link stays absolute.
+        -- heading fragment. Page files live under pages/<host>/, so a link
+        -- between hosts climbs to pages/ (../../other.host/x.md) and a
+        -- generated index links down into pages/. A fragment is defined by
+        -- the anchors the target file holds. Every other link stays
+        -- absolute.
 
     @guarantee UnchangedRunIsStable
         -- A sync against an unchanged site rewrites no page file and no
         -- index file: change detection, keywords, frontmatter and indexes
         -- are pure functions of the page bodies, links and configuration,
-        -- and no generated file carries a wall-clock time. A diff of the
+        -- and no generated file carries a wall-clock time or the site's
+        -- validators, so a validator that moves over an unchanged body
+        -- rewrites nothing; a sitemap lastmod that moves is a change
+        -- upstream and rewrites its page's frontmatter. A diff of the
         -- mirror after a sync therefore shows only what changed upstream.
 
     @guarantee DeterministicIndexes
@@ -1266,9 +1592,18 @@ surface MirrorContents {
         -- code blocks are never rewritten or verified.
 
     @guarantee RemovedAreaKeepsPath
-        -- A removed page's file is archived under _removed/ at the same
-        -- relative path unless prune deletes it, and the page keeps its
-        -- record and path, so a return restores it in place.
+        -- A removed page's file is archived under _removed/, a sibling of
+        -- pages/ at the mirror's root that mirrors it: pages/<host>/<path>
+        -- is archived at _removed/<host>/<path> unless prune deletes it,
+        -- and the page keeps its record and path, so a return restores it
+        -- in place.
+
+    @guarantee FixedLayout
+        -- Collected pages live under pages/<host>/ only and never beside a
+        -- managed file or another tool's file; the managed files (rovo.toml,
+        -- crawl-report.json, index.md, index.jsonl, links.jsonl, llms.txt
+        -- and .rovo/) stay at the mirror's root with _removed/ and
+        -- _indexes/. The layout is fixed: no configuration changes it.
 
     @guarantee OwnershipIsADeclaration
         -- Saving ownership records the operator's statement and nothing
@@ -1293,15 +1628,20 @@ surface PageIntake {
             p.sitemap_lastmod
             p.processing_signature
             p.low_confidence
+            for l in p.outbound_links:
+                l.target_identity
 
     provides:
         CandidateDelivered(run, mirror, requested_identity, source_url, redirect_hops, redirect_target?, depth, outcome, content?, tier, etag?, last_modified?, sitemap_lastmod?, raw_digest)
 
     @guarantee EveryCandidateIsSettled
         -- Every delivered candidate is accepted or marked a duplicate in
-        -- the same step, and exactly one of PageStored, CandidateDuplicate,
+        -- the same step, and at most one of PageStored, CandidateDuplicate,
         -- CandidateDiscarded or PageRemoved follows it, so the run can
-        -- settle the frontier entry it came from.
+        -- settle the frontier entry it came from. Exactly one follows
+        -- every candidate but those AcceptAbsentWithoutPage and
+        -- AcceptRedirectedOutWithoutPage accept, which raise none: their
+        -- entry is already settled by crawl/DisposeFetch.
 
     @guarantee ConvertedContentCarriesFetchFlags
         -- A converted candidate's content already carries the fetch flags

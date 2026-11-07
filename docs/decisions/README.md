@@ -34,6 +34,7 @@ Product behaviour itself is stated in the specifications under `docs/specs/`
 | [0010](0010-project-managed-allium-cli.md) | A project-managed Allium binary |
 | [0011](0011-skill-reference-material.md) | Skill reference material beside the skills |
 | [0012](0012-rovo-is-a-documentation-mirror.md) | rovo is a documentation mirror |
+| [0013](0013-mirror-state-on-disk.md) | The mirror's state is JSON under `.rovo/`, written atomically |
 
 ## The numbering
 

@@ -1,6 +1,11 @@
-"""The rovo command line. It imports the API; the API never imports it."""
+"""The rovo command line. It imports the API; the API never imports it.
 
-from typing import Annotated
+Each mirror command imports the private modules inside its own body, so `rovo --version`
+loads no runtime dependency beyond typer.
+"""
+
+from pathlib import Path
+from typing import Annotated, Literal
 
 import typer
 
@@ -37,3 +42,144 @@ def main(
 def version_command() -> None:
     """Print the version."""
     typer.echo(f"rovo {rovo.__version__}")
+
+
+@app.command("init")
+def init_command(
+    site_url: Annotated[
+        str, typer.Argument(metavar="SITE_URL", help="The documentation page to start from.")
+    ],
+    out_dir: Annotated[
+        Path, typer.Argument(metavar="OUT_DIR", help="The directory the mirror is made in.")
+    ],
+    profile: Annotated[
+        str | None,
+        typer.Option("--profile", help="A catalogue profile; by default the URL's host picks."),
+    ] = None,
+) -> None:
+    """Create a mirror: write rovo.toml and an empty manifest. Nothing is fetched."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.init(site_url, out_dir, profile).number)
+
+
+@app.command("sync")
+def sync_command(  # noqa: PLR0913  One parameter per sync option.
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+    *,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Discover, list the pages it would fetch and fetch none of them."
+        ),
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Confirm a root URL changed since the last run.")
+    ] = False,
+    json_events: Annotated[
+        bool, typer.Option("--json", help="Print progress as one JSON event a line.")
+    ] = False,
+    url: Annotated[
+        list[str] | None,
+        typer.Option("--url", metavar="URL", help="Name a URL to sync; repeatable."),
+    ] = None,
+    path: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--path", metavar="PATH", help="Name a written page's mirror path; repeatable."
+        ),
+    ] = None,
+    set_: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--set",
+            metavar="SECTION.FIELD=VALUE",
+            help="Override one rovo.toml key, as a TOML value; repeatable.",
+        ),
+    ] = None,
+) -> None:
+    """Fetch the mirror's pages, publish them as Markdown and write crawl-report.json."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.fetch import HttpxFetcher  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.pace import SystemTimer  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._report import event_line  # noqa: PLC0415  Loaded only when the command runs.
+
+    timer = SystemTimer()
+    with HttpxFetcher(clock=timer) as fetcher:
+        code = _commands.sync(
+            out_dir,
+            fetcher=fetcher,
+            clock=timer,
+            dry_run=dry_run,
+            confirmed=yes,
+            urls=tuple(url or ()),
+            paths=tuple(path or ()),
+            overrides=tuple(set_ or ()),
+            json_events=json_events,
+            progress=(lambda event: typer.echo(event_line(event))) if json_events else None,
+        )
+    raise typer.Exit(code.number)
+
+
+@app.command("fetch")
+def fetch_command(
+    url: Annotated[str, typer.Argument(metavar="URL", help="The page to fetch.")],
+    tier: Annotated[
+        Literal["http", "browser", "stealth"] | None,
+        typer.Option("--tier", help="Fetch at this tier only; by default render_mode decides."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            metavar="PATH",
+            help="A rovo.toml to read: its shared sections, then its [fetch] section.",
+        ),
+    ] = None,
+) -> None:
+    """Print one page's Markdown. Nothing is written."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.fetch import HttpxFetcher  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._crawl.pace import SystemTimer  # noqa: PLC0415  Loaded only when the command runs.
+    from rovo._mirror.model import Tier  # noqa: PLC0415  Loaded only when the command runs.
+
+    timer = SystemTimer()
+    with HttpxFetcher(clock=timer) as fetcher:
+        code = _commands.fetch(
+            url,
+            fetcher=fetcher,
+            clock=timer,
+            tier=None if tier is None else Tier(tier),
+            config_path=config,
+        )
+    raise typer.Exit(code.number)
+
+
+@app.command("verify")
+def verify_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Check the mirror on disk offline: print each finding and the gate tallies."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.verify(out_dir).number)
+
+
+@app.command("index")
+def index_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Rebuild index.md, index.jsonl, links.jsonl, llms.txt and _indexes/ offline."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.index(out_dir).number)
+
+
+@app.command("report")
+def report_command(
+    out_dir: Annotated[Path, typer.Argument(metavar="OUT_DIR", help="The mirror's directory.")],
+) -> None:
+    """Print the mirror's last crawl-report.json."""
+    from rovo import _commands  # noqa: PLC0415  Loaded only when the command runs.
+
+    raise typer.Exit(_commands.report(out_dir).number)

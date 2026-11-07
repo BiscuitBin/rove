@@ -20,8 +20,9 @@
 -- Excludes
 --   Fetching, rendering and the fetch tier (crawl); where a page is stored,
 --   its path, its frontmatter, link rewriting and the link flags (mirror);
---   library choices (HTML parsers, converter backends, fallback extractor
---   names), which are one black box each; per-transform DOM mechanics,
+--   library choices (HTML parsers, converter backends), which are one
+--   black box each (the fallback extractor excepted: ExtractNeverEmptyHanded
+--   names trafilatura and its pinned range); per-transform DOM mechanics,
 --   which a golden corpus owns once the code exists.
 --
 -- Dependencies
@@ -139,6 +140,7 @@ value QualityResult {
 -- The main content of one page, as extraction found it, with the metadata
 -- read from the document.
 value ExtractedContent {
+    source_url: String              -- the page URL extract was given; normalize tells a same-page link by it
     html: String                    -- the extracted main content, chrome stripped
     title: String                   -- first h1 in the content, else og:title, else <title>, else the URL
     description: String             -- meta description, else the first prose paragraph cut at config.description_max_chars
@@ -186,7 +188,15 @@ contract Fidelity {
         -- extract tries the profile's content selection, then the fallback
         -- extractor, then the whole document body, so it always returns
         -- content; method records which one succeeded. It strips the
-        -- profile's chrome and nothing else.
+        -- profile's chrome and nothing else. The fallback extractor runs
+        -- only when the profile's selection matches nothing, and it is
+        -- main-content extraction as trafilatura implements it, in the
+        -- release range pyproject.toml pins (trafilatura>=2.3.1,<3): what it
+        -- keeps as the main content is its own choice, and moving that pin
+        -- past the range, or changing the library, is a change to this
+        -- specification. When it returns content, method is fallback and
+        -- the page is flagged extractor_fallback (GatesMeasureExtractedContent);
+        -- when it returns none, extract takes the whole document body.
 
     @invariant NeverDropCarriedContent
         -- Every construct in the extracted main content reaches the body
@@ -211,15 +221,19 @@ contract Fidelity {
         -- embed becomes a one-line note keeping its URL or label (flag
         -- interactive_omitted); links inside code become their text;
         -- line-number gutters leave code; form controls go and button
-        -- labels stay; layout tables unwrap; footnote back-links go; images
-        -- keep only src, alt, title and id; custom elements keep only id,
-        -- class and the tab language. A table kept as HTML is flagged
+        -- labels stay; layout tables unwrap; footnote back-links go; an
+        -- image keeps the attributes SanitizedMeansInert keeps (src, alt,
+        -- title and id among them) and no other; a custom element keeps
+        -- those plus class and the tab-language attributes data-tab,
+        -- data-language and language. A table kept as HTML is flagged
         -- html_table_kept. Any other lost construct raises fidelity_loss.
 
     @invariant SanitizedMeansInert
         -- There is one definition of sanitised. A sanitised island keeps
         -- structural and linking attributes (rowspan, colspan, id, scope,
-        -- href, src, alt, title, open) and drops every other attribute;
+        -- href, src, alt, title, open), and on a custom element also class,
+        -- data-tab, data-language and language (DeclaredReductions), and
+        -- drops every other attribute;
         -- drops javascript: and vbscript: targets and every data: URL
         -- except an image source; drops script and style subtrees; never
         -- removes text; and holds no blank line, so Markdown keeps it as
@@ -239,7 +253,9 @@ contract Fidelity {
         -- exactly one level-one heading (synthesised from the title when
         -- the content has none, extra ones demoted), renders heading ids
         -- in the profile's anchor style, keeps every source id as an
-        -- anchor, and ends with exactly one LF.
+        -- anchor, and ends with exactly one LF. Decided: a source id is an
+        -- id on an element inside the extracted content; the selected
+        -- content root's own id is not one, so it reaches no anchor.
 
     @invariant ScoreIsAFraction
         -- The gate weights sum to one, so score lies between 0 and 1, and
@@ -265,7 +281,11 @@ contract Fidelity {
         -- suffixes or anchor islands; embeds -> placeholders; sup, sub, kbd
         -- and mark -> kept inline HTML; math -> TeX delimiters or an
         -- island; footnotes -> [^n] with definitions; details -> an island
-        -- with Markdown inside. Element counts compare normalised against
+        -- with Markdown inside. Decided: only a same-page reference becomes
+        -- a footnote: a link that is a bare #id, or whose target with its
+        -- fragment dropped is the page's own URL (ExtractedContent.source_url,
+        -- its fragment dropped); a link to another page stays a link even
+        -- when its fragment matches a local footnote id. Element counts compare normalised against
         -- output, never raw against output, because tab expansion adds
         -- headings by design. When maintainers review a golden change, the
         -- output that keeps more of the page wins.
@@ -293,8 +313,8 @@ enum QualityFlag {
     | uncrawled_internal | unresolved_fragment | dangling_inbound
 }
 
--- How the main content was found. A fallback extractor is one black box;
--- its name is a library choice and stays out of the specification.
+-- How the main content was found. The fallback extractor is the library
+-- ExtractNeverEmptyHanded names.
 enum ExtractionMethod { profile | fallback | whole_body }
 
 -- How a heading's id is written: a {#id} attribute suffix, or an inline

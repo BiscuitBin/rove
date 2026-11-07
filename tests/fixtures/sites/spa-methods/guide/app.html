@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Example form</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Each request is synchronous, so all three settle before the page's load event.
+      function ask(method, path) {
+        var request = new XMLHttpRequest();
+        try {
+          request.open(method, path, false);
+          request.send(method === "POST" ? "name=reader" : null);
+          return request.status === 200 ? request.responseText : "status " + request.status;
+        } catch (error) {
+          return null;
+        }
+      }
+      var main = document.createElement("main");
+      var heading = document.createElement("h1");
+      heading.textContent = ["Request", "methods"].join(" ");
+      main.appendChild(heading);
+      var data = ask("GET", "data.json");
+      var head = ask("HEAD", "ping.txt");
+      var post = ask("POST", "submit.txt");
+      [
+        "The data request " + (data === null ? "failed" : "answered " + JSON.parse(data).greeting.toLowerCase()) + ".",
+        "The head request " + (head === null ? "failed" : "was answered") + ".",
+        "The form request " + (post === null ? "was refused" : "was sent") + "."
+      ].forEach(function (text) {
+        var paragraph = document.createElement("p");
+        paragraph.textContent = text;
+        main.appendChild(paragraph);
+      });
+      document.getElementById("root").appendChild(main);
+    </script>
+  </body>
+</html>

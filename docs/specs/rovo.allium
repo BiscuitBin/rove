@@ -44,11 +44,11 @@
 --
 -- Black box functions (pure): is_http_url, directory_exists,
 -- profile_for, initial_scope, scope_of, policy_of, effective_policy,
--- owner_request_problem, resolve_config, tier_installed, normalise_url,
--- hostname_of, resolve_targets, scope_hash, signature_of, host_reports,
--- discovered_count, summarise, most_severe, latest_report, manifest_exists,
--- page_files_readable, fetch_one, tool_version. Their contracts are stated
--- where they are used.
+-- owner_request_problem, resolve_config, resolve_fetch_config,
+-- tier_installed, normalise_url, hostname_of, resolve_targets, scope_hash,
+-- signature_of, host_reports, discovered_count, summarise, most_severe,
+-- latest_report, manifest_exists, page_files_readable, fetch_one,
+-- tool_version. Their contracts are stated where they are used.
 use "./crawl.allium" as crawl
 use "./mirror.allium" as mirror
 use "./convert.allium" as convert
@@ -57,11 +57,27 @@ use "./convert.allium" as convert
 -- Value Types
 ------------------------------------------------------------
 
--- The resolved configuration of one mirror: built-in defaults, then
--- rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then flags, later
--- layers winning key by key. Invalid when the file is unreadable, a key is
--- unknown or a value is bad, a profile name the catalogue lacks included;
--- problems names every bad key path.
+-- The resolved configuration of one mirror: built-in defaults (config's
+-- render_mode, max_depth, fail_on_low_quality, refollow_unchanged_links and
+-- prune among them), then rovo.toml, then ROVO_<SECTION>__<FIELD> variables, then
+-- flags, later layers winning key by key. Invalid when the file is
+-- unreadable, a key is unknown or a value is bad, a profile name the
+-- catalogue lacks included; problems names every bad key path. The mirror's
+-- layout is fixed (mirror.allium: pages under pages/<host>/, the template
+-- "pages/{host}/{path}"), so path_template is not a key and a layer that
+-- sets it names an unknown key; max_path_chars is the mirror's own
+-- parameter, not a key, and lies within [128, 240] (MaxPathCharsInRange).
+-- prune is a key, mirror.allium's prune, in rovo.toml's own [mirror]
+-- section (mirror.prune, ROVO_MIRROR__PRUNE): the mirror uses the
+-- resolved value, and the built-in default is the mirror's (false).
+-- Decided: rovo fetch resolves its own Configuration
+-- (resolve_fetch_config): the built-in defaults, then, when --config names
+-- a rovo.toml, that file's shared sections, then its optional [fetch]
+-- section, whose keys override the shared ones key by key; no ROVO_
+-- variables. [fetch] may hold render_mode and profile only, since
+-- rovo.toml has no politeness keys to override; any other key in it is
+-- unknown and makes the configuration invalid, as in any section. A
+-- mirror's own resolve_config accepts a [fetch] section and ignores it.
 value Configuration {
     valid: Boolean
     problems: List<String>
@@ -80,6 +96,8 @@ value Configuration {
     render_mode: crawl/RenderMode
     stealth_mode: crawl/StealthMode
     max_age: Duration?
+    refollow_unchanged_links: Boolean   -- crawl.refollow_unchanged_links: re-queue an unchanged page's stored links
+    prune: Boolean                      -- mirror.prune: delete a removed page's file instead of archiving it (mirror/config.prune)
     fail_on_low_quality: Boolean
     unblocking_provider: String?        -- reserved; any value is a configuration error
 
@@ -96,7 +114,7 @@ value SyncOptions {
     interactive: Boolean                -- a person is at the terminal
     json_events: Boolean                -- progress as JSON lines on stdout
     urls: List<String>                  -- operator-named URLs; empty for a full run
-    paths: List<String>                 -- operator-named page paths; empty for a full run
+    paths: List<String>                 -- operator-named mirror-relative page paths (pages/<host>/...); empty for a full run
     owner_test: crawl/OwnerTestOptions?
 
     targeted: urls.count > 0 or paths.count > 0
@@ -129,7 +147,9 @@ value QualitySummary {
 }
 
 -- One row of the report's changes: a page path and its URL, or a URL alone
--- for a failure. A move carries both paths.
+-- for a failure. A move carries both paths. Every path the report names,
+-- here, in the low-confidence rows and in the broken links, is
+-- mirror-relative, so a page's path starts with pages/<host>/.
 value Change {
     kind: ChangeKind
     url: String
@@ -241,6 +261,13 @@ entity CrawlReport {
 
 config {
     report_percentile: Decimal = 0.10
+
+    -- Built-in defaults: the first layer of Configuration, before rovo.toml
+    render_mode: crawl/RenderMode = never
+    max_depth: Integer = 10
+    fail_on_low_quality: Boolean = false
+    refollow_unchanged_links: Boolean = true
+    prune: Boolean = mirror/config.prune
 }
 
 ------------------------------------------------------------
@@ -327,13 +354,18 @@ rule RefuseOffHostTarget {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.any(u => not is_http_url(u) or hostname_of(u) not in settings.allowed_hosts)
+    requires: options.urls.any(u => not is_http_url(u) or hostname_of(u) not in scope.allowed_hosts)
     ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "invalid or off-host target")
 
     @guidance
-        -- A named URL must be http(s) on an allowed host. Path prefixes
-        -- and include and exclude patterns are waived for it.
+        -- A named URL must be http(s) on an allowed host. Decided: the
+        -- allowed hosts are the resolved scope's (scope_of), the first
+        -- seed's host when the configuration leaves allowed_hosts empty,
+        -- never the raw configuration value; every later refusal and
+        -- StartSync test the same hosts. Path prefixes and include and
+        -- exclude patterns are waived for it.
 }
 
 rule RefuseUnknownTargetPath {
@@ -342,14 +374,15 @@ rule RefuseUnknownTargetPath {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.any(p => p not in target.page_paths)
     ensures: SyncRefused(operator: operator, target: target, options: options, settings: settings, reason: "unknown target path")
 
     @guidance
-        -- A named path must be a written page's relative .md path; a
-        -- removed page's path is refused.
+        -- A named path must be a written page's mirror-relative .md path,
+        -- pages/<host>/ included; a removed page's path is refused.
 }
 
 rule RefuseMissingEngine {
@@ -358,8 +391,9 @@ rule RefuseMissingEngine {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (settings.needs_browser and not tier_installed(browser))
@@ -368,7 +402,16 @@ rule RefuseMissingEngine {
 
     @guidance
         -- A configured but missing engine is refused before any request;
-        -- render_mode = never needs no engine.
+        -- render_mode = never, the default, needs no engine, so a default
+        -- sync is never refused here. Decided: tier_installed(browser)
+        -- holds when the playwright package and its Chromium binary are
+        -- both installed, so a sync that may render (render_mode auto or
+        -- always) fails fast rather than at its first render. The message
+        -- names the missing piece, the package or the browser binary, and
+        -- the two ways forward: install it (playwright install chromium),
+        -- or set render_mode = never. Decided, for now: no stealth engine
+        -- exists, so tier_installed(stealth) is false and a configured
+        -- stealth_mode = on is always refused here (an open question below).
 }
 
 -- owner_request_problem returns the first problem of an owner-testing
@@ -384,15 +427,19 @@ rule RefuseMissingEngine {
 -- supplied; never both disabling a control and supplying its value;
 -- interactive challenges only with an interactive operator, rendering
 -- enabled, protection_escalation and an installed browser; access naming
--- only selected hosts. Confirmation cannot waive any of this.
+-- only selected hosts. Confirmation cannot waive any of this. Decided, for
+-- now: with an owner_test, a configuration's robots = ignore is accepted
+-- and ignored; robots is relaxed only by disabled_controls holding robots
+-- (effective_policy, StartSync).
 rule RefuseInvalidOwnerRequest {
     when: OperatorRequestsSync(operator, out_dir, options)
     let target = mirror/Mirror{out_dir: out_dir}
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let scope = scope_of(settings, profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name))
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (not settings.needs_browser or tier_installed(browser))
@@ -447,8 +494,10 @@ rule StartSync {
     requires: directory_exists(out_dir) and exists target
     let settings = resolve_config(out_dir)
     requires: settings.valid and settings.has_seeds and settings.unblocking_provider = null
+    let profile = profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name)
+    let scope = scope_of(settings, profile)
     requires: not settings.root_changed(target.recorded_root_url) or options.confirmed
-    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in settings.allowed_hosts)
+    requires: options.urls.all(u => is_http_url(u) and hostname_of(u) in scope.allowed_hosts)
     requires: options.paths.all(p => p in target.page_paths)
     requires:
         (not settings.needs_browser or tier_installed(browser))
@@ -464,8 +513,6 @@ rule StartSync {
     let owned = options.owner_test?.hosts ?? {}
     let run_id = next_run_id(target)
     let kind = if target.is_populated: update else: initial
-    let profile = profile_for(settings.root_url ?? settings.start_urls.first, settings.profile_name)
-    let scope = scope_of(settings, profile)
     let targets = resolve_targets(target, scope, options.urls, options.paths)
     ensures:
         target.profile = profile
@@ -493,7 +540,8 @@ rule StartSync {
             owned_hosts: owned, requested_owner_test: options.owner_test, policy: policy,
             dry_run: options.dry_run, interactive: options.interactive,
             render_mode: settings.render_mode, stealth_mode: settings.stealth_mode,
-            max_age: settings.max_age, targets: targets
+            max_age: settings.max_age,
+            refollow_unchanged_links: settings.refollow_unchanged_links, targets: targets
         )
 
     @guidance
@@ -512,7 +560,10 @@ rule StartSync {
         -- for every number) and applies only this request's owner options:
         -- a disabled control clears its flag, a disabled rate or
         -- concurrency becomes null, a disabled breaker pause becomes zero;
-        -- the challenge timeout defaults to crawl's. resolve_targets
+        -- the challenge timeout defaults to crawl's. Decided, for now: the
+        -- configuration's robots key never reaches it, so an owner
+        -- request's robots = ignore in rovo.toml changes nothing; only
+        -- disabled_controls holding robots sets robots = ignore. resolve_targets
         -- normalises each named URL and maps each named path to the
         -- identity of the page that holds it. next_run_id is one more than
         -- the highest run id the mirror has seen. The run kind is update
@@ -555,7 +606,7 @@ rule TallyDiscoveryProblem {
 
 rule AnnounceBackoff {
     when: crawl/HostBackedOff(host, until)
-    ensures: ProgressReported(operator: host.run.operator, event: host_backoff, host: host.name, until: until)
+    ensures: ProgressReported(operator: host.run.operator, event: host_backoff, host: host.name, until: until, url: null)
 }
 
 rule AnnounceTrip {
@@ -564,12 +615,35 @@ rule AnnounceTrip {
     requires: exists report and report.status = open
     ensures:
         report.breaker_tripped = true
-        ProgressReported(operator: host.run.operator, event: breaker_tripped, host: host.name, until: null)
+        ProgressReported(operator: host.run.operator, event: breaker_tripped, host: host.name, until: null, url: null)
 }
 
 rule AnnounceOwnerWarning {
     when: crawl/OwnerTestingWarningIssued(operator, hosts, policy)
-    ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null)
+    ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null, url: null)
+
+    @guidance
+        -- Decided, for now: the warning's text goes to standard error on
+        -- every owner-testing run (here) and every owner refusal
+        -- (OwnerRefusalWarned, ReportRefusal), with or without
+        -- json_events; under json_events a run also emits this
+        -- owner_testing_warning event, which a refusal does not.
+}
+
+-- Decided: start is raised once, when the run is created.
+rule AnnounceStart {
+    when: run: crawl/Run.created
+    ensures: ProgressReported(operator: run.operator, event: start, host: null, until: null, url: null)
+}
+
+-- Decided: page is raised once per frontier row a fetch settles, naming
+-- the row's host and its URL. page means a fetch settled: a walk
+-- StopWalkOnTrippedHost stops has fetched, so it raises page, while a row
+-- skipped without a fetch (SkipTrippedHost, SkipTrippedHostAfterReady,
+-- BreakerTrips, SelectBatch) raises none.
+rule AnnouncePage {
+    when: walk: crawl/LadderWalk.status transitions_to settled
+    ensures: ProgressReported(operator: walk.host.run.operator, event: page, host: walk.host.name, until: null, url: walk.entry.identity)
 }
 
 rule TallyRemoval {
@@ -616,7 +690,7 @@ rule CloseRun {
         report.report_status = if run.status = interrupted: interrupted else: finished
         report.error = run.error
         report.unresolved_urls = run.unresolved_urls
-        report.per_host = host_reports(run.hosts, run.policy)
+        report.per_host = host_reports(run.hosts)
         report.discovered = discovered_count(run)
         report.fetched = run.fetch_attempts
         report.bytes_fetched = run.bytes_fetched
@@ -628,7 +702,10 @@ rule CloseRun {
 
     @guidance
         -- host_reports makes one HostReport per host, sorted by name, with
-        -- robots_ignored from the policy and block_rate over the host's
+        -- effective_policy that host's request policy (crawl's
+        -- Host.policy: the run's policy for a selected owned host of an
+        -- owner-testing run, the standard policy for every other host),
+        -- robots_ignored from that policy and block_rate over the host's
         -- settled fetches. discovered_count is the number of frontier rows
         -- after discovery. Finalisation runs after an interrupted run too,
         -- so links and indexes stay consistent with whatever was stored.
@@ -668,7 +745,7 @@ rule RankAndWriteReport {
         report.status = written
         report.finished_at = now
         ReportWritten(report: report)
-        ProgressReported(operator: run.operator, event: done, host: null, until: null)
+        ProgressReported(operator: run.operator, event: done, host: null, until: null, url: null)
         CommandExited(operator: run.operator, code: code)
 
     @guidance
@@ -693,6 +770,12 @@ rule InterruptSync {
     let run = crawl/Run{target: target, status: running}
     requires: exists run and run.status = running
     ensures: run.interrupt_requested = true
+
+    @guidance
+        -- Decided: an interrupt after the run has ended, in finalisation or
+        -- while the report is assembled, finds no running run; the runtime
+        -- takes it as RuntimeFails with the error "KeyboardInterrupt: ",
+        -- and RecordCrashAfterRun writes the report and exits partial.
 }
 
 -- The runtime raises this on the operator's behalf when an uncaught error
@@ -726,6 +809,16 @@ rule RecordCrashAfterRun {
         report.error = error
         report.report_status = interrupted
         ReportReady(run: run)
+
+    @guidance
+        -- Decided: a crash after the run has saved the manifest and the
+        -- frontier only if finalisation had finished before it: a crash in
+        -- finalisation saves neither, so the disk keeps the last finished
+        -- finalisation's state, while a crash as the report is assembled
+        -- comes after this run's finalisation saved both.
+        -- The run's record still joins the mirror's run history with the
+        -- run's own status, so next_run_id moves past it and the next sync
+        -- takes the next id (crawl's RunIdentityIsUnique).
 }
 
 ------------------------------------------------------------
@@ -757,8 +850,10 @@ rule ReportVerification {
 
     @guidance
         -- Verify is offline and never contacts the site. Gate tallies over
-        -- the mirror are printed with the findings and never change the
-        -- exit code.
+        -- the mirror are always printed, after the findings and whether or
+        -- not there is any: one "<gate> <pages>" line per gate that failed
+        -- on any written page when it was measured, sorted by gate. They
+        -- never change the exit code.
 }
 
 rule RebuildIndex {
@@ -766,6 +861,12 @@ rule RebuildIndex {
     let target = mirror/Mirror{out_dir: out_dir}
     requires: exists target and page_files_readable(target)
     ensures: mirror/PassRequested(operator: operator, mirror: target, kind: index)
+
+    @guidance
+        -- page_files_readable holds when every written page's file exists
+        -- and decodes as UTF-8. The index pass reads nothing else from the
+        -- page files: every index field comes from the manifest, so a
+        -- hand-edited page file does not move its index entry.
 }
 
 rule RefuseRebuildIndex {
@@ -781,8 +882,8 @@ rule FinishIndexCommand {
     ensures: CommandExited(operator: operator, code: ok)
 
     @guidance
-        -- The indexes are rebuilt offline from the manifest and the page
-        -- files; links are not re-resolved.
+        -- The indexes are rebuilt offline from the manifest, the page
+        -- files only checked readable; links are not re-resolved.
 }
 
 rule ShowReport {
@@ -808,7 +909,7 @@ rule RefuseShowReport {
 ------------------------------------------------------------
 
 rule RefuseOwnerTestingFetch {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test != null or tier = stealth or not is_http_url(url)
     ensures: CommandExited(operator: operator, code: usage)
 
@@ -817,18 +918,43 @@ rule RefuseOwnerTestingFetch {
         -- standard run, saved ownership and an explicit owner-testing sync.
 }
 
-rule RefuseMissingFetchTier {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+rule RefuseFetchOnBadConfig {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test = null and tier != stealth and is_http_url(url)
-    requires: tier != null and tier != http and not tier_installed(tier)
+    let settings = resolve_fetch_config(config_path)
+    requires: not settings.valid or settings.unblocking_provider != null
     ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- No request is made. An unreadable or unparsable file, an
+        -- unknown section or key ([fetch]'s included) or a bad value is
+        -- refused as a sync's configuration is, every bad key path named
+        -- on standard error.
+}
+
+rule RefuseMissingFetchTier {
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
+    requires: owner_test = null and tier != stealth and is_http_url(url)
+    let settings = resolve_fetch_config(config_path)
+    requires: settings.valid and settings.unblocking_provider = null
+    requires: (tier = browser or (tier = null and settings.needs_browser)) and not tier_installed(browser)
+    ensures: CommandExited(operator: operator, code: usage)
+
+    @guidance
+        -- Decided: as RefuseMissingEngine, before any request and with
+        -- the same message, only when the walk could render: --tier
+        -- browser whenever the engine is missing, and no --tier under an
+        -- effective render_mode of auto or always. --tier http never
+        -- renders, so it is never refused here, whatever render_mode says.
 }
 
 rule FetchOneUrl {
-    when: OperatorFetchesUrl(operator, url, tier?, owner_test?)
+    when: OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
     requires: owner_test = null and tier != stealth and is_http_url(url)
-    requires: tier = null or tier = http or tier_installed(tier)
-    let result = fetch_one(url, tier, resolve_config(""))
+    let settings = resolve_fetch_config(config_path)
+    requires: settings.valid and settings.unblocking_provider = null
+    requires: tier = http or (tier = null and not settings.needs_browser) or tier_installed(browser)
+    let result = fetch_one(url, tier, settings)
     ensures:
         if result.ok:
             PagePrinted(operator: operator, body: result.body)
@@ -836,11 +962,23 @@ rule FetchOneUrl {
 
     @guidance
         -- Prints the Markdown of one page to stdout and writes nothing
-        -- into a mirror. Without a configuration it uses built-in defaults
-        -- and the profile the catalogue picks by host. Every request,
+        -- into a mirror. Without --config it uses built-in defaults and
+        -- the profile the catalogue picks by host. Every request,
         -- redirect and browser subrequest respects robots, the limiter,
-        -- Retry-After and the standard policy; http may render for
-        -- JavaScript, never to bypass a block. A robots refusal,
+        -- Retry-After and the standard policy. Decided: with --tier the
+        -- walk runs that tier only; without one the effective render_mode
+        -- means what it means for a sync: always starts at the browser,
+        -- auto starts at http and climbs to the browser only when the
+        -- page needs rendering, never to bypass a block, and never is http
+        -- only. Decided: with --config the file's [scope] decides which
+        -- redirects are followed, by a sync's in-scope test; without it
+        -- the scope is the URL's own host. Decided, for now: with --config
+        -- the URL itself is fetched even when the file's [scope] does not
+        -- admit it, [scope] bounding only redirects; with no profile named
+        -- in [conversion] or [fetch] the profile is the built-in default's,
+        -- the catalogue's pick for the fetched URL's host, else generic,
+        -- not the file's first seed's; and the file's robots and
+        -- stealth_mode are read and ignored, never refused. A robots refusal,
         -- challenge, block or failed fetch prints no page and exits
         -- partial.
 }
@@ -880,7 +1018,7 @@ surface MirrorCommands {
         OperatorVerifies(operator, out_dir)
         OperatorRebuildsIndex(operator, out_dir)
         OperatorShowsReport(operator, out_dir)
-        OperatorFetchesUrl(operator, url, tier?, owner_test?)
+        OperatorFetchesUrl(operator, url, tier?, owner_test?, config_path?)
 
     @guarantee InitExitCodes
         -- 0: a starter configuration and an empty manifest are written and
@@ -904,8 +1042,8 @@ surface MirrorCommands {
         -- index: 0 when rebuilt, 2 when a page file cannot be read.
         -- report: 0 when shown, 2 when there is no report. fetch: 0 when
         -- a page was printed, 1 when the fetch failed or was refused by
-        -- the site, 2 for owner options, the stealth tier, a missing
-        -- engine or a non-http URL.
+        -- the site, 2 for owner options, the stealth tier, an invalid
+        -- configuration, a missing engine or a non-http URL.
 
     @guarantee ReportOnEveryExit
         -- Once the output directory holds a mirror, every sync, including
@@ -916,8 +1054,19 @@ surface MirrorCommands {
     @guarantee ProgressOnRequest
         -- With json_events, progress arrives as one JSON event per line on
         -- stdout: start, page, host_backoff, breaker_tripped,
-        -- owner_testing_warning and done. A dry run still prints its
-        -- frontier as plain text.
+        -- owner_testing_warning and done, each with its host, until and
+        -- url, null where the rule raising it gives none. start comes once
+        -- when the run is created (AnnounceStart); page once per frontier
+        -- row a fetch settles, with the row's host and URL (AnnouncePage);
+        -- host_backoff (AnnounceBackoff), breaker_tripped (AnnounceTrip)
+        -- and owner_testing_warning (AnnounceOwnerWarning) as crawl raises
+        -- them; done last, as the report is written (RankAndWriteReport).
+        -- url is null on every event but page. Without json_events
+        -- ProgressReported has no sink: nothing is printed for it; the
+        -- owner warning's text still goes to standard error
+        -- (AnnounceOwnerWarning). A dry
+        -- run still prints its frontier as plain text, as crawl's DryRun
+        -- lists it: one identity per line, in next_pending order.
 
     @guarantee RefusalsInOrder
         -- A sync is refused once, for its first problem, in the order the
@@ -927,7 +1076,9 @@ surface MirrorCommands {
     @guarantee OwnershipSavedThroughTheMirror
         -- Saving an ownership declaration is the mirror's
         -- OperatorSavesOwnership; it never starts a run and never relaxes
-        -- a standard run.
+        -- a standard run. Decided, for now: it and a sync's owner_test are
+        -- reached through the internal API only, with no command-line
+        -- spelling (an open question below).
 }
 
 -- The report as the operator reads it.
@@ -981,3 +1132,10 @@ surface ReportView {
         -- report, the log or any page file; the requested owner options
         -- are serialised without them.
 }
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Which engine, and which dependency, should back the stealth tier? Until decided, no stealth engine is installed: tier_installed(stealth) is false, so a sync whose configuration sets stealth_mode = on is refused before any request (RefuseMissingEngine, exit 2) and no stealth attempt is ever made."
+open question "Which command should MirrorCommands provide to save or revoke an ownership declaration, and how should a sync request name each owner-testing option? Until decided, both are reached only through the internal API (OperatorSavesOwnership, SyncOptions.owner_test): the command line offers neither, and rovo fetch gains no owner option."

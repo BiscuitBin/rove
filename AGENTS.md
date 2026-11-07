@@ -5,9 +5,13 @@ This file is the single source of truth for the whole repository. The provider f
 `.codex/`) point here and add no permissions.
 
 rovo is a Python API and a Typer command, `rovo`, in one distribution. The product is
-a documentation mirror, specified under `docs/specs/` and not yet implemented
-(decision 0012); nothing may invent beyond the specification: today's API
-(`rovo.__version__`) and command (`rovo --version`, `rovo version`) are placeholders.
+a documentation mirror, specified under `docs/specs/` and implemented slice by slice
+(decision 0012, tickets T09 onward); nothing may invent beyond the specification:
+today `rovo init` and `rovo sync` mirror the pages linked from the seeds and named by the
+sites' sitemaps and llms.txt, rendering in a browser when configured, and write the
+mirror's indexes, `rovo index` rebuilds them, `rovo verify` checks the mirror on disk,
+`rovo report` prints the last report, `rovo fetch` prints one page, the public API is still only the placeholder
+`rovo.__version__`, and `rovo --version` and `rovo version` print it.
 New behaviour arrives only through a ticket or a decision record, and is stated in an
 Allium specification under `docs/specs/` before it is built: the specifications decide
 *what* the code does and win wherever the code and a specification disagree; this file
@@ -18,8 +22,11 @@ file or the user's request.
 ## Project map
 
 - `src/rovo/` holds the package: the API in `src/rovo/__init__.py`, the command line in
-  `src/rovo/cli.py`.
-- `tests/` holds the pytest suite; `tests/fixtures/` holds the lint positive controls.
+  `src/rovo/cli.py`, and the private modules `_convert`, `_mirror`, `_crawl`, `_config`,
+  `_report`, `_commands` (`init`, `sync`, `verify`, `index`, `report` and `fetch`), `_exit` (the exit codes) and
+  `_unfinished`.
+- `tests/` holds the pytest suite; `tests/fixtures/` holds the lint positive controls and,
+  under `sites/`, the static sites the end-to-end tests in `tests/e2e/` serve.
 - `scripts/` holds the first-run script and the wheel smoke.
 - `docs/` is the handbook, registered in `docs/manifest.yml`; `docs/decisions/` holds
   the decision records; `docs/specs/` holds the Allium specifications: the root

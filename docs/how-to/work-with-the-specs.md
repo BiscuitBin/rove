@@ -10,8 +10,9 @@ requires: []
 
 The Allium specifications under `docs/specs/` decide what rovo does. Four modules
 specify the product, a documentation mirror
-([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)); none of it is
-implemented yet, and the placeholder API and command stand outside them. This page is
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)); it is
+implemented slice by slice, one ticket each under `tickets/`, and the placeholder API
+and `version` command stand outside them. This page is
 the procedure; [Specifications](../explanation/specifications.md) is the reasoning.
 
 ## Find the module that owns the behaviour
@@ -68,10 +69,13 @@ derive their tests from them with `propagate`.
 ## Handle an open question
 
 An `open question` block records a product decision nobody has made yet. The modules
-carry five: three in `convert` (the tab-expansion gate, hidden content that is not a
-tab panel, the fidelity corpus) and two in `crawl` (sitemap children on other hosts,
-retiring a URL that fails on every sync). None is permission to invent an answer in
-code; each states the behaviour that holds until it is decided.
+carry eleven: three in `convert` (the tab-expansion gate, hidden content that is not a
+tab panel, the fidelity corpus), six in `crawl` (sitemap children on other hosts,
+retiring a URL that fails on every sync, concurrency across hosts, subresources from
+origins outside the allowed hosts, the signals that mark a challenge, how the owner
+answers a challenge) and two in `rovo` (the stealth engine, the owner command line).
+None is permission to invent an answer in code; each states the behaviour that holds
+until it is decided.
 
 - If your change depends on an unanswered decision, raise it rather than answer in code.
 - If a new gap appears, add an `open question` rather than guess.

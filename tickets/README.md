@@ -31,6 +31,19 @@ snapshot.
 | T05 | Integration: the first green `just check` from a fresh clone and in CI | `T05-integration.md` | T01, T02, T03, T04 | none | done |
 | T06 | Renovate over every pin, behind an authorised app install | `T06-renovate.md` | T05 | none | open |
 | T07 | Allium gate: the placeholder module, the spec recipes, the Allium skills, the specification workflow | `T07-allium-gate.md` | T05 | none | done |
+| T08 | Product foundation: the state-on-disk decision, the runtime dependencies, the private package skeleton, the end-to-end harness | `T08-foundation.md` | T07 | none | done |
+| T09 | Tracer bullet: rovo init creates a mirror, rovo sync mirrors its seed page | `T09-tracer-init-sync-one-page.md` | T08 | none | open |
+| T10 | Links and scope: rovo sync follows links within the crawl scope and rewrites them between page files | `T10-links-and-scope.md` | T09 | none | open |
+| T11 | Indexes: every finalisation writes index.md, the directory indexes, llms.txt, index.jsonl and links.jsonl, and rovo index rebuilds them | `T11-indexes.md` | T10 | none | open |
+| T12 | Robots and politeness: rovo sync reads robots.txt per origin, paces each host, retries with backoff and Retry-After, and exits partial on a failure | `T12-robots-politeness.md` | T11 | none | open |
+| T13 | Discovery: rovo sync reads sitemaps and llms.txt, records what they name, keeps the sitemap budgets, and --dry-run lists what it would fetch | `T13-discovery.md` | T12 | none | open |
+| T14 | Incremental sync: a second rovo sync fetches known pages conditionally, keeps what did not change, reuses unchanged sitemaps, honours max_age and rewrites nothing on an unchanged site | `T14-incremental.md` | T13 | none | open |
+| T15 | Page lifecycle: rovo sync removes and archives absent pages, follows redirects within the scope, moves and merges pages with their aliases, revives returning pages, settles duplicates and retires pages a narrowed scope no longer admits | `T15-lifecycle.md` | T14 | none | open |
+| T16 | Errors and the report: rovo sync skips non-HTML answers, refuses in the specified order with a refused report, survives an interrupt or a crash with a report, ranks every exit code, prints --json progress, reads ROVO_ variables and --set flags, and rovo report shows the last report | `T16-errors-report.md` | T15 | none | open |
+| T17 | Conversion quality: every quality gate and flag, islands for what Markdown cannot carry, every tab panel, the mslearn and devsite profiles, fail_on_low_quality and rovo verify | `T17-quality-gates.md` | T16 | none | open |
+| T18 | Blocks and the breaker: block verdicts, blocked and skipped rows, the per-host breaker, host retirement on a long Crawl-delay or Retry-After, and exit 3 | `T18-blocks-breaker.md` | T17 | none | open |
+| T19 | The browser tier: render reasons, escalation from http to the browser, learned tiers, render_mode, the missing-engine refusal and rovo fetch | `T19-browser-tier.md` | T18 | none | open |
+| T20 | Owner testing: saved ownership, the owner-request refusal and warning, the relaxed policy on owned hosts, follow-up runs, breaker escalation and interactive challenges | `T20-owner-testing.md` | T19 | none | open |
 
 ## Dependency graph
 
@@ -38,7 +51,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18 ─ T19 ─ T20
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -53,6 +66,88 @@ T00 ─┬─ T01 ─┐
 - **T07** brings in the Allium machinery the other Biscuit repositories carry: the
   specification gate, the seven Allium skills and the specification workflow, around a
   root module that declares no behaviour yet.
+- **T08** is slice 0 of the product's implementation (T08 to T20, on
+  `full-final-prototype`): decision 0013 on the mirror's state on disk, the runtime
+  dependencies, the private package skeleton with its import-direction test, and the
+  end-to-end harness. It implements no specification behaviour.
+- **T09** is slice 1, the tracer bullet: `rovo init` creates a mirror and `rovo sync`
+  fetches the seed page over HTTP, converts it with the generic profile, publishes it
+  with its frontmatter and writes `crawl-report.json`. It fixes the patterns later
+  slices follow: the module layout, the seams, the state files, configuration
+  resolution, and the obligation-named and end-to-end tests.
+- **T10** is slice 2: `rovo sync` follows links. Each stored page's links are enqueued
+  within the crawl scope and fetched in later batches, and every finalisation rewrites
+  a link to a written page as a relative path between page files, across hosts under
+  `pages/<host>/` too; every other link stays absolute.
+- **T11** is slice 3: the indexes. Every finalisation builds them from the written
+  pages and their links and writes `index.md`, `_indexes/<host>/<dir>.md` for each
+  directory over the threshold, `llms.txt`, `index.jsonl` and `links.jsonl` at the
+  mirror's root, deterministically; `rovo index` rebuilds them offline from the
+  manifest.
+- **T12** is slice 4: politeness. `rovo sync` reads each origin's robots.txt before
+  anything else there (a refused or unreachable one disallows that origin and is
+  reported), paces each host name by its rate and the longest Crawl-delay its origins
+  declare, retries a failed request with backoff and Retry-After, and exits 1 when a
+  page fails or robots.txt could not be read.
+- **T13** is slice 5: discovery. `rovo sync` reads each allowed host's declared and
+  conventional sitemaps (an index's children only on the host that served it) and its
+  `llms.txt`, records every URL they name as an observation, admits the in-scope ones
+  within the sitemap caps and the page budget, reports a declared sitemap that fails,
+  and `rovo sync --dry-run` lists the rows it would fetch without fetching a page.
+- **T14** is slice 6: incremental sync. A second `rovo sync` sends each known page's and
+  each saved sitemap's validators, keeps a page answered 304 or whose raw document did
+  not change, reconverts one that changed or that `max_age` forces, reuses a sitemap
+  answered 304 from its snapshot in `.rovo/sitemaps.json`, and rewrites no page file and
+  no index file on an unchanged site.
+- **T15** is slice 7: the page lifecycle. A page that answers 404 or 410 or redirects
+  out of scope is removed and its file archived under `_removed/<host>/`, mirroring
+  `pages/`; redirects within the scope are followed (robots.txt, sitemaps and
+  `llms.txt` included), a page whose identity moves is moved with its old URLs as
+  aliases, a canonical naming another page merges it, two URLs resolving to one page in
+  one run leave one page and a duplicate row, a removed page that answers again is
+  revived in place, a page a narrowed scope no longer admits is retired at the next
+  finalisation, and the report lists every removal.
+- **T16** is slice 8: errors and the report. A non-HTML answer settles its row
+  `skipped_not_html` instead of stopping the sync; a bad configuration, a changed root
+  without `--yes`, an off-host `--url` and an unknown `--path` are refused in the
+  specified order, each with a refused `crawl-report.json` and no request; an
+  interrupted or crashed sync publishes what it stored and still writes its report;
+  every exit code is ranked; `--json` prints progress events; `ROVO_<SECTION>__<FIELD>`
+  variables and `--set` flags layer over `rovo.toml`; and `rovo report` prints the last
+  report.
+- **T17** is slice 9: conversion quality. A page holding a complex table, a block
+  definition list, `details`, math or a non-heading `id` anchor converts with each
+  carried as a sanitised island instead of stopping the sync; every tab panel reaches
+  the body under a profile with a tab selection; the `devsite` profile converts end to
+  end and `mslearn`'s selection is unit-tested while its sitemap filter and version
+  label wait on the maintainer; every gate and normalisation flag is raised;
+  `fail_on_low_quality` exits 4; and `rovo verify` reports drift on disk offline.
+- **T18** is slice 10: blocks and the breaker. A 401, 403 or 429 page is classified
+  hard and reported in `blocked_urls` instead of stopping the sync; a host whose blocks
+  breach the threshold trips its breaker, its remaining rows are skipped and listed in
+  `skipped_urls`, `--json` prints a `breaker_tripped` event, and the sync exits 3; a
+  Crawl-delay or a Retry-After past `retry_after_cap` on robots.txt, a declared sitemap
+  or a page retires the host the same way; a page whose main text falls under the
+  host's baseline, or a login wall, is converted with `soft_block_suspected`.
+- **T19** is slice 11: the browser tier. Under `render_mode = "auto"` a page whose
+  http answer is an SPA shell or asks for JavaScript is rendered in the browser, every
+  request the render causes made by the crawl under robots.txt and the host's limiter,
+  stored with tier `browser`, counted in the report and remembered for its path
+  pattern, so the next sync starts it at the browser; `"always"` renders every page and
+  `"never"` stores the http answer flagged `render_needed`; a sync that needs a missing
+  engine is refused; `rovo fetch` prints one page's Markdown and writes nothing; and
+  `just e2e-browser` renders a JavaScript-only fixture page in Chromium.
+- **T20** is slice 12, the last: owner testing. An operator who saved an ownership
+  declaration for a host and has a finished standard run can run an owner-testing sync
+  of that host: the warning that ownership is self-declared is shown before any
+  request, the preceding run's unresolved URLs on the selected hosts are the seeds, and
+  only links on those hosts that are unseen or unresolved (`owner_link_needed`) are
+  followed, never a full recrawl, under the relaxed policy the owner options select and on those hosts alone, the
+  breaker climbs a tier before it trips, a challenge waits for the owner, and the report
+  records the declaration, the lineage and the effective policy; an invalid owner
+  request is refused with exit 2 and no request; no `NotInThisSlice` raise is left.
+  Until the maintainer answers, the owner options are reached in process only and the
+  stealth tier has no engine.
 
 ## How to pick up a ticket
 

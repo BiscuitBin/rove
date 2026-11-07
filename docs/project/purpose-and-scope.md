@@ -15,17 +15,27 @@ requires: []
 
 ## What it does today
 
-The product is specified under `docs/specs/` and not yet implemented: rovo turns a
-product's documentation website into a local, self-linking Markdown mirror that
+The product is specified under `docs/specs/` and its implementation is under way: rovo
+turns a product's documentation website into a local, self-linking Markdown mirror that
 re-syncs with one command and reports how well every page converted
-([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). What exists in
-code is a gated skeleton around a placeholder: the API exports `rovo.__version__` and
-nothing else, and the command answers `rovo --version` and `rovo version`. Around that
-placeholder the repository already runs everything a real change will need: lint and
-type gates with positive controls, a coverage floor, a wheel built and smoke-installed
-offline on every `just check`, the documentation and agent contracts, and CI. The
-implementation tickets replace the placeholder and land on a gate that already proves
-everything around it.
+([decision 0012](../decisions/0012-rovo-is-a-documentation-mirror.md)). What works
+today is a thin path: `rovo init` creates a mirror, and `rovo sync` fetches the
+seed pages robots.txt allows over HTTP, then the pages they link to within the crawl
+scope, converts each to Markdown with its profile, publishes it as a page file
+whose links to other mirrored pages are relative, writes the mirror's indexes and writes
+`crawl-report.json`; `rovo verify` checks the mirror on disk offline, `rovo index`
+rebuilds the indexes offline, and `rovo report` prints the last report; a sync naming
+`--url` or `--path` targets syncs those pages alone. A blocked page is reported, and a
+host whose breaker trips or that is retired gets no further request and makes the sync
+exit 3. Under `render_mode = "auto"` or `"always"` a page that needs JavaScript is
+rendered in headless Chromium (the `browser` extra) and its tier is learned, and
+`rovo fetch URL` prints one page's Markdown and writes nothing. Owner testing, a
+relaxed follow-up sync of hosts the operator declares as their own, is reached in
+process only until its command-line spelling is decided. The API still exports `rovo.__version__` and nothing else. Around the
+product the repository runs everything a change needs: lint and type gates with
+positive controls, a coverage floor, a wheel built and smoke-installed offline on every
+`just check`, the documentation and agent contracts, and CI. Each implementation ticket
+lands on a gate that already proves everything around it.
 
 ## What it deliberately does not do
 

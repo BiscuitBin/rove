@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Islands | Example docs</title>
+  </head>
+  <body>
+    <header>Example docs</header>
+    <main>
+      <h1>Islands</h1>
+      <p>This page holds the constructs that Markdown cannot carry on its own.</p>
+      <h2>Spanning table</h2>
+      <table>
+        <thead>
+          <tr><th>Region</th><th>Zone</th></tr>
+        </thead>
+        <tbody>
+          <tr><td rowspan="2" onclick="track()">North</td><td style="color: red">north-one</td></tr>
+          <tr><td>north-two</td></tr>
+        </tbody>
+      </table>
+      <h2>Table without a header</h2>
+      <table>
+        <tr><td>alpha</td><td>one</td></tr>
+        <tr><td>beta</td><td>two</td></tr>
+      </table>
+      <h2>Terms</h2>
+      <dl>
+        <dt>Mirror</dt>
+        <dd>
+          <p>A local copy of a documentation site.</p>
+          <ul>
+            <li>pages</li>
+            <li>indexes</li>
+          </ul>
+        </dd>
+      </dl>
+      <h2>Advanced</h2>
+      <details>
+        <summary>Advanced options</summary>
+        <ul>
+          <li>first option</li>
+          <li>second option</li>
+        </ul>
+      </details>
+      <h2>Formula</h2>
+      <math><mi>x</mi><mo>=</mo><mn>2</mn></math>
+      <p>Keep the <span id="note">note about mirrors</span> in mind when you read on.</p>
+      <h2>Code</h2>
+      <pre><code class="language-python">print("islands")</code></pre>
+    </main>
+  </body>
+</html>

@@ -15,7 +15,9 @@ the documentation contract, listed under Look up.
 This repository builds one pure-Python distribution, `rovo`: an importable package,
 `rovo`, which is the Python API, and a Typer command of the same name. Its behaviour is
 specified in Allium under `docs/specs/` before it is built: four modules specify a
-documentation mirror, and none of it is implemented yet.
+documentation mirror, implemented slice by slice: today `rovo init` creates a mirror and
+`rovo sync` mirrors its seed pages and the pages they link to within the scope and
+writes the mirror's indexes, which `rovo index` rebuilds.
 
 ## Start here
 
@@ -44,6 +46,7 @@ documentation mirror, and none of it is implemented yet.
 
 - [Commands](reference/commands.md)
 - [Command-line reference](reference/cli.md)
+- [The mirror on disk](reference/mirror.md)
 - [API reference](reference/api.md)
 - [Configuration](reference/configuration.md)
 - [Testing](reference/testing.md)
