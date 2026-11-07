@@ -147,10 +147,12 @@ first two path segments) to start at the browser, kept as `tier_hints` in
 HTTP only). A render makes no request of its own: its navigation is made as an HTTP
 try is (robots.txt, redirects, the host's limiter, the `rovo/<version>` user agent),
 and each request the page makes is made the same way only to an allowed host whose
-robots.txt allows it, once, its `Retry-After` pausing the host that answered it (after
-any redirect; the host it was sent to when that one is not open), under that host's
-policy, for at most `retry_after_cap`, never retiring a host or feeding a breaker; any
-other request, one to a CDN included, is aborted. The navigation's
+robots.txt allows it, once, the `Retry-After` of a retryable answer (an error, a 429 or
+a 5xx) pausing the host that answered it (after any redirect; the host it was sent to
+when that one is not open), under that host's policy, for at most `retry_after_cap`,
+never retiring a host or feeding a breaker, and any other answer's `Retry-After`
+pausing nothing; a request whose method is not GET or HEAD is aborted, never sent, and
+any other request, one to a CDN included, is aborted. The navigation's
 own answer is an HTTP answer's equal for `Retry-After`: it pauses the host (the render is
 never retried), counts toward `retry_after_honored` and, past `retry_after_cap`, retires
 the host. A walk that climbed counts its `render_escalations` whatever its outcome,

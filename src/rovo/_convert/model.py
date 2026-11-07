@@ -204,6 +204,7 @@ def _ratio_passes(output: int, expected: int) -> bool:
 class ExtractedContent:
     """The main content of one page, as extraction found it."""
 
+    source_url: str  # The page URL extract was given; normalize tells a same-page link by it.
     html: str
     title: str
     description: str
@@ -276,7 +277,7 @@ class ConvertConfig:
     description_max_chars: int
 
 
-# convert.allium's config block (convert.allium 346 to 368), the one copy in code.
+# convert.allium's config block (convert.allium 353 to 375), the one copy in code.
 CONFIG = ConvertConfig(
     text_coverage_gate=0.97,
     ratio_gate=0.98,

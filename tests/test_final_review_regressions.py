@@ -139,7 +139,7 @@ MALFORMED = ("http://[", "http://[::1/x", "https://[bad]host/")
 
 @pytest.mark.parametrize("href", MALFORMED)
 def test_b3_a_malformed_href_in_content_nav_canonical_or_footnote_is_kept(href: str) -> None:
-    """ExtractNeverEmptyHanded (convert.allium 186): extract always returns content.
+    """ExtractNeverEmptyHanded (convert.allium 187): extract always returns content.
 
     The malformed href is left as it is in the content, skipped among the navigation
     targets, no canonical URL, and no footnote reference; the link text stays.
@@ -177,7 +177,7 @@ def test_b3_a_page_with_a_malformed_href_is_stored_not_crashed_on(tmp_path: Path
 
 
 def test_b2_c3_math_with_a_tex_annotation_keeps_its_own_and_descendant_ids() -> None:
-    """BodyShape (convert.allium 249 to 255): every source id is kept as an anchor.
+    """BodyShape (convert.allium 250 to 258): every source id is kept as an anchor.
 
     The ids of the math element and of its descendants are held before the TeX.
     """
@@ -209,7 +209,7 @@ def test_b2_c3_block_math_keeps_its_id_on_a_line_of_its_own() -> None:
 
 
 def test_c1_profile_selected_content_has_its_chrome_stripped() -> None:
-    """ExtractedContent.html is the content, chrome stripped (convert.allium 143, 189-190).
+    """ExtractedContent.html is the content, chrome stripped (convert.allium 144, 190-191).
 
     A nav inside the selected element leaves the body and counts as navigation outside
     the content, so its links still reach the navigation targets.
@@ -230,7 +230,7 @@ def test_c1_profile_selected_content_has_its_chrome_stripped() -> None:
 
 
 def test_b2_an_empty_unknown_section_is_refused_by_fetch_and_sync(tmp_path: Path) -> None:
-    """RefuseFetchOnBadConfig (rovo.allium 926 to 929): an unknown section is refused.
+    """RefuseFetchOnBadConfig (rovo.allium 929 to 932): an unknown section is refused.
 
     An empty table has no key, so it is checked as a section of its own.
     """
@@ -260,7 +260,7 @@ def test_b2_an_empty_known_section_stays_valid(tmp_path: Path) -> None:
 def test_c1_fetch_without_config_follows_a_same_host_redirect_into_another_directory(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """FetchOneUrl guidance (rovo.allium 970 to 972): the scope is the URL's own host.
+    """FetchOneUrl guidance (rovo.allium 973 to 975): the scope is the URL's own host.
 
     Without --config, a redirect to another directory of that host is followed and the
     page printed.
@@ -337,7 +337,7 @@ def test_b2_the_fetcher_keeps_the_bytes_as_they_arrived() -> None:
 def test_b2_a_binary_subrequest_is_fulfilled_byte_identical(
     stub_playwright: Scenario, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AttemptTier (crawl.allium 1738 to 1755): a subrequest keeps its bytes.
+    """AttemptTier (crawl.allium 1738 to 1759): a subrequest keeps its bytes.
 
     It is served through the http session, and its bytes reach the browser unchanged,
     not re-encoded from decoded text.

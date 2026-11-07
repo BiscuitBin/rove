@@ -3,15 +3,15 @@
 Each obligation test is named after the id `just plan-spec crawl` emits (at 941e02d,
 unchanged in id at 39c1f9c), dots and hyphens as underscores, and its docstring quotes
 the obligation. A `rule_failure` test makes exactly one `requires` clause false. No
-recogniser ships (crawl.allium open question 2670) and no prompt ships (open question
-2671): every challenge verdict here is constructed, and the owner answers through the
+recogniser ships (crawl.allium open question 2674) and no prompt ships (open question
+2675): every challenge verdict here is constructed, and the owner answers through the
 ChallengePrompt seam, `FakeChallengePrompt`, which steps a SteppingTimer instead of
 sleeping and never reads standard input. The guarantees: no offer at http, outside
 owner testing, to a non-interactive run, on an unselected host, after a redirect to an
 unselected host, or twice in a walk; a resolved challenge re-requests the same tier at
 try 1 and a fresh response decides the page; an abandoned or timed-out one keeps the
 blocked result and climbs no further; an interrupt abandons a waiting challenge; and,
-under the one-row-at-a-time interim (crawl.allium open question 2668), nothing else is
+under the one-row-at-a-time interim (crawl.allium open question 2672), nothing else is
 requested and the breaker is not fed while a challenge waits (T20 item 9, decided).
 """
 
@@ -618,7 +618,7 @@ def test_no_other_request_and_no_breaker_feed_while_a_challenge_waits(
 ) -> None:
     """T20 item 9, decided: a challenge never waits while its host trips.
 
-    Under the one-row-at-a-time interim (crawl.allium open question 2668), while the
+    Under the one-row-at-a-time interim (crawl.allium open question 2672), while the
     seed's challenge waits no other row is fetched and the waiting walk's host breaker
     has not been fed by it, so no rule can trip the host under it. The run's challenge
     verdict is constructed: classify_block is wrapped to call the challenge page a

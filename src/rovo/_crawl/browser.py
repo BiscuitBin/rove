@@ -23,6 +23,7 @@ from rovo._crawl.model import CONFIG, SiteResponse
 
 # The status a browser follows to the URL an answer's content came from.
 _FOUND = 302
+_SENT_METHODS = frozenset({"GET", "HEAD"})  # Any other method is aborted, never sent.
 
 
 class Answer(Protocol):
@@ -88,12 +89,14 @@ class PlaywrightEngine:
     Playwright starts and Chromium launches at the first render, once per engine; each
     render opens a page in the engine's one context, whose every request is routed: it
     is fulfilled from the crawl's answer, or aborted, and never let through to the
-    network. An answer whose content came from another URL (a redirect the crawl
-    followed) is fulfilled as a redirect to that URL, and the browser's request for it
-    is fulfilled with the answer itself, so the page stands at the URL its content came
-    from. The load state is `load` (decided, AttemptTier guidance), waited for at most
-    `CONFIG.render_max_wait`. A launch that fails fails every render; a sync or fetch
-    that may render is refused up front when `missing_browser_piece` names one.
+    network. A request whose method is not GET or HEAD is aborted unasked, so the crawl
+    never fetches it (crawl.allium 1748 to 1750). An answer whose content came from
+    another URL (a redirect the crawl followed) is fulfilled as a redirect to that URL,
+    and the browser's request for it is fulfilled with the answer itself, so the page
+    stands at the URL its content came from. The load state is `load` (decided,
+    AttemptTier guidance), waited for at most `CONFIG.render_max_wait`. A launch that
+    fails fails every render; a sync or fetch that may render is refused up front when
+    `missing_browser_piece` names one.
     """
 
     def __init__(self) -> None:
@@ -115,6 +118,9 @@ class PlaywrightEngine:
 
         def route(routed: Any) -> None:  # noqa: ANN401  A playwright Route, typed by playwright.
             requested = routed.request.url
+            if routed.request.method not in _SENT_METHODS:
+                routed.abort()
+                return
             served = held.pop(requested, None) or answer(
                 requested, navigation=routed.request.is_navigation_request()
             )

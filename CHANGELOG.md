@@ -257,3 +257,9 @@ policy.
   as anchors, where they were dropped.
 - A browser render's subrequest is fulfilled with the bytes the site sent, so fonts,
   images, WebAssembly and stylesheets in another charset reach the page unchanged.
+- A browser render's request whose method is not GET or HEAD (a form or script POST,
+  PUT, PATCH, DELETE or OPTIONS) is aborted and never sent, where it was fetched as a
+  GET; GET and HEAD requests are fetched through rovo as before.
+- Only a same-page reference becomes a footnote: a bare `#id`, or a link whose target
+  without its fragment is the page's own URL. A link to another page stays a link even
+  when its fragment names one of the page's own notes, where it became `[^n]`.

@@ -1,11 +1,11 @@
-"""The generated indexes (mirror.allium 1283 to 1391): BuildIndexes and RebuildIndexes.
+"""The generated indexes (mirror.allium 1287 to 1395): BuildIndexes and RebuildIndexes.
 
 Every index is a pure function of the written pages, their links and the config, and no
 index carries a wall-clock time, so rebuilding from unchanged input rewrites nothing. The
 index pass reads no page body: every field comes from the manifest, and the page files
 are only checked to be readable. Paths an index records are mirror-relative
 (`pages/<host>/...`); links are relative to the index file. The exact text of each file
-and the JSON Lines encoding are BuildIndexes' guidance (mirror.allium 1316 to 1390),
+and the JSON Lines encoding are BuildIndexes' guidance (mirror.allium 1320 to 1394),
 which docs/reference/mirror.md restates.
 """
 

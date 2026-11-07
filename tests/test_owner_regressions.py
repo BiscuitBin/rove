@@ -1,7 +1,7 @@
 """Regression tests for T20's weed and review findings, one per divergence or gap.
 
 Each is hash-pinned in .allium-loop/T20-owner-testing.json. No recogniser ships
-(crawl.allium open question 2670) and no prompt ships (open question 2671): a challenge
+(crawl.allium open question 2674) and no prompt ships (open question 2675): a challenge
 verdict is constructed by wrapping classify_block, and the owner answers through the
 ChallengePrompt seam, FakeChallengePrompt, which steps a SteppingTimer instead of
 sleeping and never reads standard input.

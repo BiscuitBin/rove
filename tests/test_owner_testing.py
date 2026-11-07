@@ -11,7 +11,7 @@ before the first request, ExplicitOwnerTestingOnly, RelaxationsAreRecorded and
 SecretsNeverSerialised, the breaker tier as an owner run's starting tier, the lineage
 of runs.json and save_ownership. Owner testing is reached in process only
 (`_commands.save_ownership`, `_commands.sync(owner_test=...)`; rovo.allium open
-question 1138): no test drives the command line for it. Nothing here sleeps or reads
+question 1141): no test drives the command line for it. Nothing here sleeps or reads
 standard input: time is a FixedClock or a SteppingTimer and `interactive` is passed.
 The challenge rules are in tests/test_owner_challenges.py, which shares the helpers.
 """
@@ -270,7 +270,7 @@ def challenged_attempt(
 ) -> FetchAttempt:
     """A constructed attempt of `walk` whose verdict is a challenge (no recogniser ships).
 
-    The verdict is built here, never by classify_block: crawl.allium open question 2670
+    The verdict is built here, never by classify_block: crawl.allium open question 2674
     leaves the challenge signals unspecified, so the rules are exercised on constructed
     attempts (the maintainer's answer, spec 39c1f9c).
     """
@@ -926,7 +926,7 @@ def test_invariant_BreakerNeverPassesHighestTier(tmp_path: Path) -> None:
 
     After every climb the breaker's tier is a usable tier: with no stealth tier usable it
     climbs http to browser and trips there; with stealth_mode = on (constructed: no
-    stealth engine is installed, rovo.allium open question 1137) it climbs to stealth
+    stealth engine is installed, rovo.allium open question 1140) it climbs to stealth
     and trips there; a standard run's breaker trips at http and never climbs.
     """
     run, _ = owner_started(tmp_path / "browser")
@@ -1401,7 +1401,7 @@ def test_rule_failure_RefuseInvalidOwnerRequest_6(
     requires: a configured browser or stealth tier is installed: a missing engine is
     refused first (RefuseMissingEngine), in owner mode. A stealth-needing owner request
     (stealth_mode = on with protection escalation) is refused so, with no request: no
-    stealth engine is installed (rovo.allium open question 1137).
+    stealth engine is installed (rovo.allium open question 1140).
     """
     options = owner_options(protection_escalation=True)
     for key, value in (("render_mode", '"auto"'), ("stealth_mode", '"on"')):

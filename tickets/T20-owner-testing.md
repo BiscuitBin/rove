@@ -308,6 +308,13 @@ green; the Allium loop's witness record says `PASS`; both adversarial reviews ha
 | `tests/test_owner_regressions.py` | new | one test per divergence weed or an adversarial review finds; hash-pinned in this slice's ledger; first, weed tick 1's intentional gap 3: `await_challenge`'s resolved and timed-out branches through `drive_run` via the challenge seam; then weed's code bug at `fc9ad9f`: a render with no DOM after a redirected navigation is an error whose `source_url` is the URL last requested, so the answering host's breaker is fed; then review T20-2 r4: a NaN or infinite `rate_per_host` refused, a redirected subrequest's `Retry-After` read under the answering host's own policy, and a lineage longer than the recursion limit rebuilt |
 | `tests/test_answering_host.py` | new | the five `FeedAnsweringBreaker` obligations (spec `fc9ad9f`) and the redirect guarantees: a redirected answer judged, paused, counted and retired by the host that answered, its breaker fed, discovery's `judged` host, the non-redirect case unchanged; at `53687d9` (item 15), a render subrequest redirected to another host pauses that host under its own policy and cap, never the requested host, never retiring a host or feeding a breaker, and the requested host stands in when the answering host is not open; no e2e module shares its name |
 | `tests/e2e/test_answering_host_sync.py` | new | the redirect scenario end to end: owned `127.0.0.1` redirects to unselected `localhost`, which answers 429 past the cap and is retired; over the committed `robots-disallow` and `one-page` sites |
+| `src/rovo/_convert/model.py`, `src/rovo/_convert/fidelity.py` | shared, own lines | final review F2 (spec `9149df7`): `ExtractedContent.source_url`, set by `extract` to the URL it was given; `_footnotes` turns only a same-page reference into `[^n]` (a bare `#id`, or a target whose URL without its fragment is `source_url` without its fragment) |
+| `src/rovo/_crawl/browser.py` | shared, own lines | final review F3 (spec `9149df7`): `PlaywrightEngine.render`'s route aborts a request whose method is not GET or HEAD before asking the crawl, so it is never sent |
+| `src/rovo/_convert/profiles.py`, `src/rovo/_crawl/model.py`, `src/rovo/_mirror/finalise.py`, `src/rovo/_mirror/indexes.py`, `src/rovo/_mirror/intake.py`, `src/rovo/_mirror/links.py`, `src/rovo/_mirror/model.py`, `src/rovo/_mirror/urls.py` | shared, own lines | docstring spec citations remapped to `9149df7` (`ai_tmp/review/final/spec-answers/line-map.md`); no code |
+| `tests/test_final_review_regressions.py` | new | the final whole-branch review's regression tests (19), hash-pinned in this slice's ledger; citations remapped to `9149df7` |
+| `tests/test_final_review_answers.py` | new | final review F2 and F3 (spec `9149df7`) as guarantee tests: same-page references become footnotes, a link to another page whose fragment names a local note stays a link, a non-GET render request is aborted and never reaches the crawl, GET and HEAD are still answered; hash-pinned |
+| `tests/e2e/test_subrequest_methods_sync.py`, `tests/fixtures/sites/spa-methods/` | new | final review F3 end to end in a real Chromium: a page's GET and HEAD are fetched through rovo, its POST is aborted and never reaches the server |
+| `tests/test_convert.py` | shared, own lines (re-propagated) | `test_entity_fields_ExtractedContent` (T09) gains `source_url` (spec `9149df7`), ledger note |
 | `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_owner_testing_and_dry_runs_stop` (T09), `test_owner_testing_runs_stop` (T09, re-propagated by the T16 follow-up) and `test_enqueue_page_links_owner_branch_stops` (T10) become their behaviour, renamed (`test_an_owner_request_without_its_authority_is_a_defect`, `test_owner_testing_runs_prepare_their_follow_up_and_discover_nothing`, `test_enqueue_page_links_owner_branch_admits_only_owned_needed_links`), with ledger notes naming their origin slices and old names; the module docstring no longer says a branch raises the guard |
 | `tests/test_blocks.py` | shared, own lines (re-propagated) | `test_rule_failure_BreakerTrips_3` (T18, 882), whose escalating half expects `NotInThisSlice("BreakerEscalates")` (911 to 913), asserts the climb there instead, ledger note |
 | `tests/test_fetch_command.py` | shared, own lines (re-propagated) | `test_surface_provides_MirrorCommands` (T19, hash-pinned by `.allium-loop/T19-browser-tier.json`): help printed as plain text whatever the environment says about colour (`typer.rich_utils.FORCE_TERMINAL` patched false, as `tests/test_cli.py`'s fixture does), since on GitHub Actions Typer's ANSI codes split `Usage: rovo fetch`; ledger note naming T19 and the reason |
@@ -315,8 +322,8 @@ green; the Allium loop's witness record says `PASS`; both adversarial reviews ha
 | `tests/test_crawl.py`, `tests/test_report.py`, `tests/test_targeted_run.py`, `tests/test_mirror.py`, `tests/test_commands.py` | shared, own lines (re-propagated) | only a test the red run shows red because `runs.json` gained its lineage fields, the report its owner fields, or `effective_policy` its second argument, each with only that expectation moved and a ledger note naming its slice; in `tests/test_crawl.py`, `test_entity_fields_FetchAttempt` (T12) and `test_entity_fields_Host` (T09) gain the fields `fc9ad9f` adds (hash-tracked by this slice's ledger) |
 | `tests/fakes.py` | shared, own lines | `FakeChallengePrompt`; an `OwnerTestOptions` builder if two test files need one; hash-tracked |
 | `tests/e2e/test_owner_sync.py` | new | the end-to-end scenarios (Acceptance criteria) over `serve_site("robots-disallow")`, a real `HttpxFetcher` and a `SteppingTimer`, in process; no unit test is named `test_owner_sync.py` |
-| `docs/reference/cli.md` | shared, own lines | `rovo sync`'s refusals gain the invalid owner request; 362 to 365 lose "a branch a later slice implements (owner testing)"; a short owner-testing section: what it does, that it is reached in process only until the maintainer answers, the warning, exit 1 for unresolved URLs and 2 for a refusal; that a redirected answer pauses or retires the host that answered it and feeds that host's breaker (spec `fc9ad9f`); that a render subrequest's `Retry-After` pauses the host that answered it (spec `53687d9`) |
-| `docs/reference/mirror.md` | shared, own lines | `runs.json`'s four lineage fields (144 to 149); `declared_owned_hosts` set by saving ownership (97); the report's owner fields and per-host policy; 467 to 468 lose the later-slice sentence |
+| `docs/reference/cli.md` | shared, own lines | `rovo sync`'s refusals gain the invalid owner request; 362 to 365 lose "a branch a later slice implements (owner testing)"; a short owner-testing section: what it does, that it is reached in process only until the maintainer answers, the warning, exit 1 for unresolved URLs and 2 for a refusal; that a redirected answer pauses or retires the host that answered it and feeds that host's breaker (spec `fc9ad9f`); that a render subrequest's `Retry-After` pauses the host that answered it (spec `53687d9`), only for a retryable answer, and that a request whose method is not GET or HEAD is aborted (spec `9149df7`) |
+| `docs/reference/mirror.md` | shared, own lines | `runs.json`'s four lineage fields (144 to 149); `declared_owned_hosts` set by saving ownership (97); the report's owner fields and per-host policy; 467 to 468 lose the later-slice sentence; footnotes are same-page references only (spec `9149df7`) |
 | `docs/reference/configuration.md` | shared, own lines | that no `rovo.toml` key relaxes a policy and `robots = "ignore"` is refused for a standard sync, only if the page does not already say so |
 | `docs/reference/testing.md` | shared, own lines | `FakeChallengePrompt`, the new test modules and the owner e2e module |
 | `docs/project/purpose-and-scope.md`, `docs/project/repository-map.md`, `docs/explanation/architecture.md` | shared, own lines | purpose-and-scope 32 to 33 (no branch stops a sync any more; owner testing exists, in process only); the new test files |
@@ -328,10 +335,10 @@ green; the Allium loop's witness record says `PASS`; both adversarial reviews ha
 `uv.lock`, `pyproject.toml`, `pytest.ini`, `.coveragerc`, `ruff.toml`, `mypy.ini`,
 `Justfile`, `scripts/wheel_smoke.py` (no module is added, so the package-file count stays
 twenty-nine), `src/rovo/__init__.py`, `src/rovo/cli.py`, `src/rovo/_exit.py`,
-`src/rovo/_unfinished.py`, `src/rovo/_crawl/browser.py`, `src/rovo/_crawl/fetch.py`,
+`src/rovo/_unfinished.py`, `src/rovo/_crawl/fetch.py`,
 `src/rovo/_crawl/sitemaps.py`, `src/rovo/_mirror/state.py` (it already persists
-`declared_owned_hosts`), `src/rovo/_convert/`, `tests/e2e/conftest.py`,
-`tests/fixtures/sites/`, `tests/test_import_direction.py`, `docs/manifest.yml`,
+`declared_owned_hosts`), `tests/e2e/conftest.py`,
+`tests/fixtures/sites/` (but `spa-methods`), `tests/test_import_direction.py`, `docs/manifest.yml`,
 `docs/decisions/` and `docs/specs/` are read, not changed. A file not in this table that
 turns out to need a change is added to the table in the same change with its reason, or
 handed back if it is a decision record, a specification or a dependency.
@@ -853,6 +860,33 @@ headed by its commit.
   `--config`, a fetched URL outside the file's `[scope]` is still fetched; `[scope]`
   bounds only redirects. Recorded in `.allium-loop/T19-browser-tier.json` and
   `tickets/T19-browser-tier.md`.
+- **The final review's answers: ANSWERED** (the maintainer's answers F1 to F4 to the
+  final whole-branch review's hand-backs, 2026-11-06, spec `9149df7`,
+  `ai_tmp/review/final/spec-answers/answers.md`; no obligation added, removed or
+  renumbered, `entity-fields.ExtractedContent` gains `source_url`). All decided, none a
+  new open question:
+  - **F1, page-file frontmatter: ANSWERED, decided** (`mirror.allium` 157 to 162, 1554
+    to 1555). Frontmatter is `key: <JSON value>` lines; a hand-edited non-JSON value is
+    `invalid_page_file`. Spec wording matching the code; no code change.
+  - **F2, footnotes (convert B1): ANSWERED, decided** (`convert.allium` 143, 284 to
+    288). `ExtractedContent.source_url` is the URL `extract` was given, and only a
+    same-page reference becomes `[^n]`: a bare `#id`, or a link whose target without its
+    fragment is the page URL without its fragment. A link to another page stays a link
+    even when its fragment names a local note. Built in `_convert/fidelity.py`.
+  - **F3, render subrequest methods (crawl B1): ANSWERED, decided** (`crawl.allium`
+    1748 to 1750). A render request whose method is not GET or HEAD is aborted, never
+    sent; GET and HEAD are fetched through rovo as before. Built in
+    `_crawl/browser.py`; the T19-pinned `Answers` seam in `tests/test_browser_engine.py`
+    already carried the request's method, so it was not widened.
+  - **F4, clarifications: ANSWERED, decided** (spec wording only). Only a retryable
+    answer's `Retry-After` (an error, a 429 or a 5xx) pauses a host for a render
+    subrequest, as `_Render.__call__` does; a crash while the report is assembled has
+    saved the manifest and frontier only if finalisation finished before it
+    (`rovo.allium` 814 to 818); the content root's own id is not a source id
+    (`BodyShape`, as T09 decided). No code change.
+  At `9149df7` the eleven open questions sit at `convert.allium` 493 to 495,
+  `crawl.allium` 2670 to 2675 and `rovo.allium` 1140 and 1141; the line numbers cited
+  elsewhere in this ticket are those of the spec each paragraph names.
 - **The specification's open questions.** All eleven stay **OPEN**: `convert.allium` 486
   to 488 and `crawl.allium` 2666, 2667 and 2669 are not on this slice's path; 2668
   (batch concurrency) is, only as the interim that makes item 9 unreachable; the four

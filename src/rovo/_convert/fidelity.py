@@ -1,4 +1,4 @@
-"""The Fidelity operations (convert.allium 179): pure, no clock, no network, no file.
+"""The Fidelity operations (convert.allium 180): pure, no clock, no network, no file.
 
 `extract` parses a whole document with lxml and selects the content by the profile's
 selection (`profiles.SELECTIONS`); `normalize` and `convert` work on the extracted
@@ -203,6 +203,7 @@ def extract(html: str, url: str, profile: Profile) -> ExtractedContent:
     _absolutise(content, url)
     kept = _words(content.get_text(" "))
     return ExtractedContent(
+        source_url=url,
         html=content.decode_contents(),
         title=_title(soup, content, url),
         description=_description(soup, content),
@@ -252,7 +253,7 @@ def normalize(content: ExtractedContent, profile: Profile) -> NormalizedContent:
     panels = _expand_tabs(tree, selection.tabs)
     if _reduce(tree):
         flags.add(QualityFlag.interactive_omitted)
-    _construct_families(tree, selection)
+    _construct_families(tree, selection, content.source_url)
     _one_level_one_heading(tree, content.title)
     uncarryable = _uncarryable(tree)
     for element in uncarryable:
@@ -696,6 +697,11 @@ def _parts(url: str) -> SplitResult | None:
         return None
 
 
+def _unfragmented(parts: SplitResult | None) -> str | None:
+    """The URL of `parts` with its fragment dropped; None for a URL urlsplit cannot take."""
+    return None if parts is None else parts._replace(fragment="").geturl()
+
+
 def _scheme(url: str) -> str:
     """The URL's scheme as urlsplit reads it; empty for a URL it cannot take."""
     parts = _parts(url)
@@ -907,7 +913,7 @@ def _owner_table(cell: Tag) -> Tag | None:
     return found if isinstance(found, Tag) else None
 
 
-def _construct_families(tree: BeautifulSoup, selection: Selection) -> None:
+def _construct_families(tree: BeautifulSoup, selection: Selection, page_url: str) -> None:
     """Callouts to GFM alerts, math with TeX to TeX, footnotes to `[^n]` (the guidance)."""
     for selector, kind in selection.callouts:
         for callout in tree.select(selector):
@@ -927,11 +933,15 @@ def _construct_families(tree: BeautifulSoup, selection: Selection) -> None:
             ids = [_attribute(element, "id") for element in [math, *math.find_all(id=True)]]
             math.replace_with(*_id_holders(tree, ids, block=display == "block"), tex)
     for section in tree.select(_FOOTNOTE_SECTIONS):
-        _footnotes(tree, section)
+        _footnotes(tree, section, page_url)
 
 
-def _footnotes(tree: BeautifulSoup, section: Tag) -> None:
-    """Each reference to a note of the section becomes `[^n]`, each note `[^n]: text`.
+def _footnotes(tree: BeautifulSoup, section: Tag, page_url: str) -> None:
+    """Each same-page reference to a note of the section becomes `[^n]`, each note `[^n]: text`.
+
+    A reference is same-page when it is a bare `#id` or its target without its fragment
+    is `page_url` without its fragment (convert.allium 284 to 288); a link to another
+    page stays a link even when its fragment names a local note.
 
     A reference's or a note's id stays an anchor (BodyShape): an empty element holding
     it, which becomes an anchor island, before the reference or on a line before the note.
@@ -939,8 +949,12 @@ def _footnotes(tree: BeautifulSoup, section: Tag) -> None:
     notes = [note for note in section.find_all("li", id=True) if isinstance(note, Tag)]
     numbers = {_attribute(note, "id"): index for index, note in enumerate(notes, start=1)}
     for link in tree.find_all("a", href=True):
-        parts = _parts(_attribute(link, "href") or "")
-        number = None if parts is None else numbers.get(parts.fragment)
+        href = _attribute(link, "href") or ""
+        parts = _parts(href)
+        same_page = parts is not None and (
+            href.startswith("#") or _unfragmented(parts) == _unfragmented(_parts(page_url))
+        )
+        number = numbers.get(parts.fragment) if parts is not None and same_page else None
         if number is None or not isinstance(link, Tag) or _within(link, section):
             continue
         parent = link.parent

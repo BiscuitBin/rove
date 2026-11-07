@@ -7,7 +7,7 @@ owned host is not. The two hosts are two names for the loopback interface: the o
 site is served as 127.0.0.1, the other as localhost, so they are distinct host names
 (a port alone never makes one). The other host's start URL is a page its robots.txt
 disallows, so every sync knows its origin and the baseline reads only its robots.txt.
-Owner testing has no command-line spelling (rovo.allium open question 1138): rovo init
+Owner testing has no command-line spelling (rovo.allium open question 1141): rovo init
 runs through CliRunner, the syncs and save_ownership in process over the real
 HttpxFetcher on a SteppingTimer, which never sleeps. Not `test_answering_host.py`, which
 the unit suite already names.

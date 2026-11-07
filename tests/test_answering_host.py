@@ -280,7 +280,7 @@ def test_a_redirected_retry_after_past_the_cap_retires_the_answering_host(
 
 
 def test_a_redirected_retry_after_is_counted_on_the_answering_host(tmp_path: Path) -> None:
-    """CountRetryAfter (crawl.allium 1894 to 1909): counted on B, under B's policy.
+    """CountRetryAfter (crawl.allium 1898 to 1913): counted on B, under B's policy.
 
     A ignores Retry-After (owned, relaxed); B, unselected, honours it: the redirected
     503's Retry-After counts on B, the same answer from A itself counts nowhere.
@@ -299,7 +299,7 @@ def test_a_redirected_retry_after_is_counted_on_the_answering_host(tmp_path: Pat
 
 
 def test_a_redirected_retry_pauses_the_answering_host(tmp_path: Path) -> None:
-    """HttpRetry (crawl.allium 1840 to 1864): the pause falls on B under B's policy.
+    """HttpRetry (crawl.allium 1844 to 1868): the pause falls on B under B's policy.
 
     The redirected 503 with a Retry-After is retried: the walk's request again (a second
     http try of the seed), B paused until now + retry_wait under B's standard policy (at
@@ -326,7 +326,7 @@ def test_a_redirected_retry_pauses_the_answering_host(tmp_path: Path) -> None:
 
 
 def test_a_redirected_render_retry_after_pauses_the_answering_host(tmp_path: Path) -> None:
-    """PauseHostOnRenderRetryAfter (crawl.allium 1915 to 1927): B paused, not A.
+    """PauseHostOnRenderRetryAfter (crawl.allium 1919 to 1931): B paused, not A.
 
     A render's navigation answer redirected to B with a Retry-After under the cap pauses
     B as HttpRetry's wait would, under B's policy; A, which ignores Retry-After, is not

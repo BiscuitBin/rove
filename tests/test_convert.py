@@ -448,8 +448,13 @@ def test_value_equality_ExtractedContent() -> None:
 
 
 def test_entity_fields_ExtractedContent() -> None:
-    """Verify all declared fields on ExtractedContent are present with correct types."""
+    """Verify all declared fields on ExtractedContent are present with correct types.
+
+    Re-propagated by T20 at spec 9149df7 (origin T09): source_url, the page URL extract
+    was given (convert.allium 143, the final-review answer F2).
+    """
     extracted = extract(PAGE, SEED, profiles.GENERIC)
+    assert extracted.source_url == SEED
     assert isinstance(extracted.html, str)
     assert "Example docs" not in extracted.html  # the header is outside the content
     assert extracted.title == PAGE_HEADINGS[0]  # the first h1 beats <title>

@@ -152,7 +152,7 @@ class MirrorConfig:
     prune: bool
 
 
-# mirror.allium's config block (mirror.allium 495 to 503), the one copy in code.
+# mirror.allium's config block (mirror.allium 499 to 507), the one copy in code.
 CONFIG = MirrorConfig(
     max_path_chars=200,
     collision_hash_chars=6,
@@ -561,7 +561,7 @@ class Link:
 
 @dataclass(frozen=True, kw_only=True)
 class CandidateDelivered:
-    """The trigger the crawl raises through PageIntake (mirror.allium 1627)."""
+    """The trigger the crawl raises through PageIntake (mirror.allium 1633)."""
 
     run_id: int
     mirror: Mirror
@@ -652,7 +652,7 @@ class Index:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexBuildDue:
-    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1269, 1287)."""
+    """The trigger FinishLinkPass and RebuildIndexes raise (mirror.allium 1273, 1291)."""
 
     pass_: MirrorPass
 
@@ -666,7 +666,7 @@ class IndexFilesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class IndexesWritten:
-    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1314)."""
+    """The trigger BuildIndexes raises when it completes the pass (mirror.allium 1318)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -675,7 +675,7 @@ class IndexesWritten:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksFound:
-    """The trigger RefreshPage raises (mirror.allium 896): the stored page's targets."""
+    """The trigger RefreshPage raises (mirror.allium 900): the stored page's targets."""
 
     candidate: PageCandidate
     page: Page
@@ -686,7 +686,7 @@ class LinksFound:
 
 @dataclass(frozen=True, kw_only=True)
 class LinksRewritten:
-    """The trigger FinishLinkPass raises (mirror.allium 1268)."""
+    """The trigger FinishLinkPass raises (mirror.allium 1272)."""
 
     mirror: Mirror
     pass_: MirrorPass
@@ -696,7 +696,7 @@ class LinksRewritten:
 
 @dataclass(frozen=True, kw_only=True)
 class PageFinalised:
-    """The trigger PublishPage raises (mirror.allium 1247)."""
+    """The trigger PublishPage raises (mirror.allium 1251)."""
 
     pass_: MirrorPass
     page: Page

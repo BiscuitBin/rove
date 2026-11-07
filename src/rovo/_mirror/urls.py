@@ -117,7 +117,7 @@ def digest(text: str) -> str:
 
 
 def version_label(profile: "Profile", identity: str) -> str | None:
-    """Page.version for the identity (StoreNewPage guidance, mirror.allium 829 to 834).
+    """Page.version for the identity (StoreNewPage guidance, mirror.allium 833 to 838).
 
     Null when the profile has no version_param; the path's label (`_path_label`) when the
     identity carries it; otherwise the profile's version_default.
@@ -129,7 +129,7 @@ def version_label(profile: "Profile", identity: str) -> str | None:
 
 
 def _path_label(profile: "Profile", identity: str) -> str | None:
-    """The label assign_path appends (MovePage guidance, mirror.allium 688 to 704).
+    """The label assign_path appends (MovePage guidance, mirror.allium 692 to 708).
 
     Only an identity carrying the profile's version_param has one: the value mapped
     through version_map, else the raw value, either one with every character outside
@@ -147,7 +147,7 @@ def _path_label(profile: "Profile", identity: str) -> str | None:
 
 
 def assign_path(mirror: "Mirror", identity: str, mover: "Page | None" = None) -> str | None:
-    """The page path for an identity, per MovePage's guidance (mirror.allium 659 to 755).
+    """The page path for an identity, per MovePage's guidance (mirror.allium 663 to 759).
 
     "pages/", the host segment, "/" and a relative path. The relative path strips the
     scope prefix, drops .html, .htm and .aspx (ignoring case), names a directory URL or

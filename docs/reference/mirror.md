@@ -275,7 +275,9 @@ named language; otherwise each panel under a heading one level below the group's
 naming its label. Other hidden content is kept as it is. A callout the profile selects
 becomes a GFM alert (`> [!NOTE]`). `sup`, `sub`, `kbd` and `mark` stay inline HTML;
 math with a TeX annotation becomes TeX between `$` (or `$$` for a block); footnotes
-become `[^n]` with their definitions, without their back-links; a definition list whose
+become `[^n]` with their definitions, without their back-links, but only a same-page
+reference (a bare `#id`, or a link to the page's own URL with a fragment) becomes
+`[^n]`: a link to another page stays a link even when its fragment names a local note; a definition list whose
 definitions are inline becomes bold term lines.
 
 Conversion also makes these reductions on purpose: an `iframe`, `embed` or `object`

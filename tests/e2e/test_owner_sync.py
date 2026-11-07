@@ -3,7 +3,7 @@
 Each scenario runs `rovo init` through CliRunner, then a standard sync, the baseline, in
 process: robots.txt disallows the seed, so run 1 finishes with the seed skipped_robots
 and unresolved. Owner testing has no command-line spelling (rovo.allium open question
-1138), so ownership is saved with `rovo._commands.save_ownership` and the owner sync is
+1141), so ownership is saved with `rovo._commands.save_ownership` and the owner sync is
 `rovo._commands.sync(owner_test=...)`, over the real HttpxFetcher on a SteppingTimer,
 which never sleeps; the requests are read off the server's log. Nothing reads standard
 input. Not `test_owner_testing.py`, which the unit suite already names.
