@@ -79,7 +79,7 @@ fifth needs the stores, reaches the network once for the two DuckDB extensions, 
 accepts `--rows N` to build from the first N rows. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
-build needs roughly 30 GB there: the corpus file, the five stores, the nine format
+build needs roughly 32 GB there: the corpus file, the five stores, the nine format
 stores and the two extensions, the download cache and the insert benchmark's four
 row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the base
 store and its clone. Rerunning a script wipes and rebuilds
