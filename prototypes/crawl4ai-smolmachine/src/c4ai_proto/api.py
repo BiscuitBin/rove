@@ -8,6 +8,8 @@ from typing import Any
 
 
 MAX_REASON = 300
+# Everything here goes to the VM on loopback, with the token: a configured proxy must not see it.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class ApiError(Exception):
@@ -32,7 +34,7 @@ def _request(
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  http to localhost
+        with _OPENER.open(req, timeout=timeout) as resp:
             decoded = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode(errors="replace")

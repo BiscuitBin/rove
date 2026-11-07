@@ -36,7 +36,7 @@ def open_existing() -> Machine | None:
     try:
         return Machine.open(MACHINE_NAME, LOCAL)
     except SmolError as exc:
-        if "NOT_FOUND" in str(exc) or "not found" in str(exc).lower():
+        if exc.code == "NOT_FOUND":
             return None
         raise
 

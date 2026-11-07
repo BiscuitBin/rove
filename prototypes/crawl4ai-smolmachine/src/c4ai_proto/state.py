@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,14 @@ def load(state_dir: Path | None = None) -> dict[str, Any] | None:
     p = path(state_dir)
     if not p.exists():
         return None
-    p.chmod(0o600)  # A file written before saves were owner-only is tightened here.
-    return json.loads(p.read_text())
+    try:
+        p.chmod(0o600)  # A file written before saves were owner-only is tightened here.
+        data = json.loads(p.read_text())
+    except (OSError, ValueError) as exc:
+        # As absent, so `vm destroy` still recovers; `vm up` refuses rather than deletes.
+        print(f"warning: ignoring unreadable state file {p}: {exc}", file=sys.stderr)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def save(data: dict[str, Any], state_dir: Path | None = None) -> Path:

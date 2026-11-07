@@ -61,7 +61,7 @@ def _open_or_fail(port: int, saved: dict | None) -> Machine | None:
 @vm.command("up")
 def vm_up(
     state_dir: StateDir = None,
-    port: Annotated[int | None, typer.Option("--port", help="Host port, used when creating.")] = None,
+    port: Annotated[int | None, typer.Option("--port", min=1, max=65535, help="Host port, used when creating.")] = None,
 ) -> None:
     """Create the machine, or reconnect to it, then wait for /health."""
     saved = state.load(state_dir)
@@ -73,22 +73,22 @@ def vm_up(
     if reconnect and wanted is not None and wanted != published:
         msg = f"{m.MACHINE_NAME} publishes port {published}, not {wanted}; `c4ai vm destroy` to change it"
         _fail(msg, mach, published, saved)
+    if mach is not None and not reconnect:
+        # The registry is host-global but the state file is per checkout: never delete from here.
+        msg = f"{m.MACHINE_NAME} exists but no token is saved here; `c4ai vm destroy` to replace it"
+        _fail(msg, mach, port, saved)
     try:
         if reconnect:
             typer.echo(f"{m.MACHINE_NAME} exists ({mach.state()}); connecting")
             mach = m.connect_existing()
         else:
-            if mach is not None:
-                typer.echo(f"{m.MACHINE_NAME} exists but no token is saved; deleting and recreating")
-                mach.delete()
-                mach = None
             token = secrets.token_hex(32)
             saved = {"machine": m.MACHINE_NAME, "port": port, "token": token, "image": m.IMAGE}
             typer.echo(f"state file: {state.save(saved, state_dir)}")
             typer.echo(f"creating {m.MACHINE_NAME} from {m.IMAGE} (pulls ~2.9 GB unless cached)")
             mach = m.create(token, port)
         typer.echo(f"state={mach.state()}; waiting for /health")
-    except SmolError as exc:
+    except (SmolError, OSError) as exc:
         _fail(exc, mach, port, saved)
     try:
         m.wait_for_health(port)
@@ -195,9 +195,9 @@ def fetch(
             text = json.dumps(result, indent=2)
         else:
             result = api.markdown(base, saved["token"], url, filt.value)
-            if not result.get("success") or result.get("markdown") is None:
+            text = result.get("markdown")
+            if not result.get("success") or not isinstance(text, str) or not text.strip():
                 _die(f"fetch failed: {result.get('error') or 'no Markdown in the response'}")
-            text = result["markdown"]
     except api.ApiError as exc:
         _die(exc)
     if out:

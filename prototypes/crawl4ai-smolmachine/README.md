@@ -169,7 +169,9 @@ pulled image is a host-side cache, not per machine. `vm down` took between 0.7 s
 10 s; the slow one followed a crawl, presumably a longer workload drain. A `vm down` issued
 3 s into a 10 s fetch took 10 s and the fetch completed with exit 0, which fits that drain.
 
-`vm up --port` applies only when creating. A different port on an existing machine is
+`vm up` never deletes. The machine registry is host-global while the state file is per
+checkout, so an existing machine with no token saved here is refused with a pointer to
+`vm destroy`. `vm up --port` applies only when creating. A different port on an existing machine is
 refused, because the published port is fixed at create:
 
 ```text
@@ -255,6 +257,8 @@ Facts from the fetch runs:
   `results[0].success` tells, so `--json` checks that. `/md` answers 502 for the same page,
   with a multi-line Python traceback as its detail, which the command collapses to a
   bounded single line.
+- An empty Markdown answer exits 1, since ticket 03 exits 0 only when a page was printed.
+  A page whose `fit` filter removes everything therefore fails; `--filter raw` is the retry.
 - A target page's own HTTP error is not a fetch failure: in one run a page that answered
   400 printed its error body as Markdown and exited 0, and `/md` exposes no status code. A
   fetch tier built on this needs `/crawl`'s `status_code` to tell the two apart.

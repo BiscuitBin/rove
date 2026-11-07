@@ -45,6 +45,9 @@ def main() -> int:
             extra_env[k] = v
     existing = m.open_existing()
     saved = state.load()
+    if existing is not None and extra_env:
+        print(f"--env applies only when creating; {m.MACHINE_NAME} exists: `c4ai vm destroy` first")
+        return 2
     if existing is not None:
         print(f"machine {m.MACHINE_NAME} exists in state {existing.state()}; reusing it")
         token = (saved or {}).get("token", "")
