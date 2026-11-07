@@ -1,7 +1,11 @@
 """The smol wrapper: constants, create/open/connect, the Scrapy install and the state block.
 
 Nothing here deletes a machine, and nothing uses a `with` block: `Machine.__exit__` deletes.
+The one delete is `vm destroy` in `cli.py`.
 """
+
+from pathlib import Path
+from typing import Any
 
 from smol import ConnectOptions, ExecOptions, Machine, MachineConfig, ResourceSpec, SmolError
 
@@ -17,13 +21,16 @@ LOCAL = ConnectOptions(target="local")
 RESOURCES = ResourceSpec(network=True, cpus=4, memory_mb=4096, storage_gb=20, overlay_gb=10)
 INSTALL_TIMEOUT_S = 600.0
 CHECK_TIMEOUT_S = 60.0
+# Written to the machine and the state file at create: the name alone cannot tell a replacement.
+GENERATION_LABEL = "scrapyproto-generation"
 
 
-def create() -> Machine:
+def create(generation: str | None = None) -> Machine:
     """Create and boot the machine; returns once the guest agent is up. Raises if the name is taken."""
     config = MachineConfig(
         name=MACHINE_NAME,
         image=IMAGE,
+        labels={GENERATION_LABEL: generation} if generation else None,
         resources=RESOURCES,
         persistent=True,
         detach=True,
@@ -42,10 +49,27 @@ def open_existing() -> Machine | None:
         raise
 
 
-def connect_existing() -> Machine:
+def owned(saved: dict[str, Any] | None) -> bool:
+    """Whether a loaded state file records the generation this name holds now; unknown is not owned.
+
+    Absent on both sides means ticket 01's machine and its state file, made before the label.
+    """
+    if saved is None or saved.get("machine") != MACHINE_NAME:
+        return False
+    try:
+        found = [s.labels.get(GENERATION_LABEL) for s in Machine.list(LOCAL) if s.name == MACHINE_NAME]
+    except SmolError:
+        return False
+    return found == [saved.get("generation")]
+
+
+def connect_existing(state_dir: Path | None = None) -> Machine:
     """Reopen the named machine, starting it if stopped; never one this checkout does not own."""
-    if state.load() is None:
-        msg = f"{MACHINE_NAME}: no state file at {state.path()}, another checkout's? Refusing to connect."
+    if not owned(state.load(state_dir)):
+        msg = (
+            f"{MACHINE_NAME}: no state file at {state.path(state_dir)} records this machine, "
+            "another checkout's? Refusing to connect."
+        )
         raise RuntimeError(msg)
     return Machine.connect(MACHINE_NAME, LOCAL)
 
@@ -69,29 +93,39 @@ def install_scrapy(mach: Machine) -> str:
     return r.stdout.strip()[-800:]
 
 
-def state_block(mach: Machine | None, open_error: str | None = None) -> str:
+def _one_line(reason: object) -> str:
+    return " ".join(str(reason).split())
+
+
+def state_block(mach: Machine | None, open_error: str | None = None, state_dir: Path | None = None) -> str:
     """The full state, printed at the end of every command; every field is always present."""
     lines = [f"machine:    {MACHINE_NAME}"]
     running = False
     if open_error:
-        lines.append(f"state:      error: {open_error}")
+        lines.append(f"state:      error: {_one_line(open_error)}")
     elif mach is None:
         lines.append("state:      (no machine)")
     else:
         try:
             current = mach.state()
         except SmolError as exc:
-            lines.append(f"state:      error: {exc}")
+            lines.append(f"state:      error: {_one_line(exc)}")
         else:
             running = current == "running"
             lines.append(f"state:      {current}")
-    if running:
+    if running and owned(state.load(state_dir)):
         try:
-            lines.append(f"scrapy:     {scrapy_version(mach)}")
+            # A fresh process's `open` handle cannot exec ("expected started, got not started"), so
+            # this one call attaches: only to a machine this checkout owns, only when running. A stop
+            # landing between the state read above and here makes this connect boot it; the SDK has
+            # no attach that does not start, and the README states the limit.
+            lines.append(f"scrapy:     {scrapy_version(Machine.connect(MACHINE_NAME, LOCAL))}")
         except (SmolError, RuntimeError) as exc:
-            lines.append(f"scrapy:     error: {exc}")
+            lines.append(f"scrapy:     error: {_one_line(exc)}")
+    elif running:
+        lines.append("scrapy:     unknown (not this checkout's machine, so not attached)")
     else:
         lines.append("scrapy:     unknown (the machine is not running)")
-    present = "present" if state.path().exists() else "absent"
-    lines.append(f"state file: {present} ({state.path()})")
+    present = "present" if state.path(state_dir).exists() else "absent"
+    lines.append(f"state file: {present} ({state.path(state_dir)})")
     return "\n".join(lines)

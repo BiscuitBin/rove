@@ -248,5 +248,69 @@ ticket text stays as written.
 - The main path then reran on the existing machine: 2.0 s, no `pip`, no fetch, ending stopped.
   That run exercises the connect path only; the changed `create` path and the refusal were
   checked with the SDK stubbed, never live.
-- Ownership is still only the state file's presence, so a stale file can accept a machine that
-  another checkout recreated. Ticket 02 inherits this.
+- Ownership was then only the state file's presence. Ticket 02 replaced that with a generation
+  label on the machine, matched against the state file.
+
+### Ticket 02: the lifecycle
+
+Each command below ran as a fresh process (`uv run --offline scrapyproto vm ...`) on the
+`scrapy-proto` that ticket 01 left stopped. All exited 0, with no `pip` run and no network.
+Every command ends with the same four-field block.
+
+`vm up`, from stopped:
+
+```text
+scrapy-proto exists (stopped); connecting
+[time] stopped to running: 0.24s
+[time] scrapy check, no pip run: 0.39s
+---- state ----
+machine:    scrapy-proto
+state:      running
+scrapy:     2.20.0
+state file: present (.../ai_tmp/scrapy-duckdb/state.json)
+```
+
+`vm status` afterwards prints the same block, with `scrapy: 2.20.0` read from the guest. `vm down`:
+
+```text
+[time] stop: 0.01s
+---- state ----
+machine:    scrapy-proto
+state:      stopped
+scrapy:     unknown (the machine is not running)
+state file: present (.../ai_tmp/scrapy-duckdb/state.json)
+```
+
+`vm status` on the stopped machine prints that block without the `[time]` line.
+
+**Warm `up`.** Stopped to `running` took 0.12 s and the Scrapy check 0.32 s on the second `up`.
+The first took 0.24 s and 0.39 s. Earlier runs before the review gave 0.12 to 0.18 s. These time
+`Machine.connect` and `state()` only. Interpreter and `uv run` start-up were not measured.
+
+**What the review changed.** One adversarial review (gpt-6-astra) raised three findings, all
+judged valid and fixed:
+
+- The block attached to, and ran `scrapy version` in, a machine this checkout did not own. It
+  now attaches only to an owned, running machine.
+- `vm down` stopped the machine with no ownership check. It now refuses as `up` does.
+- Ownership was only the state file naming the machine. `up` now writes a random generation to
+  a machine label and to the state file, and ownership compares the two via `Machine.list`.
+  Ticket 01's machine has no label (`Machine.list` shows `{}`) and its state file has no
+  generation, so absent on both sides still counts as owned. A state file whose generation does
+  not match is refused live, exit 1 (`error: scrapy-proto exists but no state file here records
+  this machine ...`). Since ticket 03 reuses this machine, a real create that writes the label
+  is not exercised by tickets 02 to 05.
+
+Remaining limit:
+
+- `vm status` and every command's final block attach with `Machine.connect` to read Scrapy's
+  version only when the machine is running and this checkout's state file claims it; otherwise
+  the block says `unknown` and nothing attaches. A stop from another process landing between the
+  state read and that attach boots the machine again: the SDK has no attach that does not start.
+  Not measured.
+
+**`vm destroy` is deferred.** The ticket ends with `vm destroy`, but the run was refused by the
+agent's permission system as an irreversible deletion, and the maintainer chose to run it at the
+end of the prototype instead, once tickets 03 to 05 no longer need the guest's HTTP cache. Until
+then its code is read but not run, and ticket 03 reuses this machine rather than recreating it,
+so no second image pull or Scrapy install happens. The destroy sample is added when it runs.
