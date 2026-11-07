@@ -20,7 +20,7 @@ policy.
 - The product specification: four Allium modules under `docs/specs/` (`rovo`, `crawl`,
   `mirror`, `convert`) that specify rovo as a documentation mirror, elicited from the
   product brief with two prototype specifications as evidence, with the product's terms
-  in the terminology page (decision 0012). Nothing of it is implemented yet.
+  in the terminology page (decision 0012).
 - The product's foundation, with no specification behaviour yet: the runtime
   dependencies httpx, beautifulsoup4, lxml and markdownify and the `browser` extra
   (playwright); the private modules `_convert`, `_mirror`, `_crawl`, `_config` and
@@ -31,8 +31,8 @@ policy.
   writes `rovo.toml` and an empty manifest, and `rovo sync OUT_DIR` reads each allowed
   host's robots.txt, fetches the seed pages it allows over HTTP, converts each to
   Markdown with the generic profile, publishes it as a page file with sorted frontmatter
-  and writes `crawl-report.json`. Branches later slices implement stop the sync with
-  exit 1; the mirror's files are described in `docs/reference/mirror.md`.
+  and writes `crawl-report.json`; the mirror's files are described in
+  `docs/reference/mirror.md`.
   When a page's path and its short-digest fallback are both held, the page takes the
   full-digest path; when that is held too, the page is refused and reported as a failed
   URL (`no free path`), and the sync exits 1. A page path is never percent-decoded.
@@ -76,12 +76,12 @@ policy.
   origin, is listed under `discovery_problems` and makes the sync exit 1. Requests to
   one host name are spaced by `1 / rate_per_host` and the longest decimal `Crawl-delay`
   of its origins, with no burst (`Crawl-delay: 0` adds none; one past `retry_after_cap`,
-  however large, is never adopted and stops the sync as a later slice's branch). A
+  however large, is never adopted and retires the host). A
   transport error, a 429 or a 5xx is retried, robots.txt included, up to `http_attempts`
   tries with exponential backoff, jitter and `Retry-After` (seconds, however many, or an
   HTTP date, on any retryable answer); a page whose tries run out on a 5xx or a
   transport error is listed under `failed_urls` and makes the sync exit 1 (a 429 that
-  runs out stops the sync as a later slice's branch).
+  runs out is blocked).
 - `rovo sync` discovers pages beyond the seeds: for each allowed host, after its
   robots.txt, it reads the sitemaps robots.txt declares, then `/sitemap.xml` and
   `/sitemap_index.xml`, sitemap indexes' children only on the index's own host (at most
@@ -231,3 +231,29 @@ policy.
   a `Retry-After` (never retiring it or feeding a breaker), and a render that gave no
   DOM after a redirected navigation is an error from the URL the navigation last
   requested.
+
+### Fixed
+
+- `rovo fetch URL` without `--config` follows a redirect to any path on the URL's own
+  host, as specified, where it followed only those under the URL's directory.
+- An empty unknown section in `rovo.toml` (`[typo]`) is refused as `typo: unknown
+  section`, by `rovo sync` and by `rovo fetch --config`, where it was accepted; an
+  empty known section still sets nothing.
+- A crash while `crawl-report.json` is assembled or written is recorded in the report,
+  which is written `interrupted` with the error and the sync exits 1, where the error
+  escaped and the previous run's report was left in place.
+- No file the mirror moves, deletes or writes is reached through a symbolic link out of
+  the mirror directory: a page or archive under a symlinked `pages/<host>/` or
+  `_removed/` directory, or an index under a symlinked `_indexes/`, is refused with an
+  error, where the file outside the mirror was deleted, moved or overwritten.
+- A malformed URL in a page (`http://[`) no longer stops the sync or `rovo fetch`: a
+  link keeps its href as written, a navigation link or canonical URL that cannot be
+  resolved is dropped, and a link in an HTML island whose target cannot be read loses
+  it.
+- A page's chrome (by default `nav`, `header` and `footer`) is stripped from the
+  content the profile's selection found, not only from the whole body; a navigation
+  element stripped that way still counts among the page's navigation targets.
+- Math with a TeX annotation keeps the ids of the math element and of its descendants
+  as anchors, where they were dropped.
+- A browser render's subrequest is fulfilled with the bytes the site sent, so fonts,
+  images, WebAssembly and stylesheets in another charset reach the page unchanged.

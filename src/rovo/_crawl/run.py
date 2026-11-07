@@ -1592,7 +1592,7 @@ class _Render:
             error = (first.error if first is not None else None) or RENDER_FAILED
             source_url = identity if first is None else first.source_url
             return SiteResponse(status=0, source_url=source_url, markup="", size=size, error=error)
-        return dataclasses.replace(first, markup=dom, size=size)
+        return dataclasses.replace(first, markup=dom, size=size, content=b"")
 
 
 def prepare_attempt(attempt: FetchAttempt) -> bool:

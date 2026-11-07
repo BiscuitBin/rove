@@ -81,7 +81,8 @@ it from the committed `.allium` file through `tests/spec_values.py`. The loop le
 under `.allium-loop/` pins each generated test file's hash; a later change adds tests
 beside them rather than editing them. `tests/test_regressions.py` pins each divergence a
 weed or review found, `tests/test_slice_boundaries.py` the points where a slice stops
-with `NotInThisSlice`.
+with `NotInThisSlice`, and `tests/test_final_review_regressions.py` the divergences the
+final whole-branch review found.
 
 `tests/fakes.py` holds the seams' doubles: `FakeFetcher`, a URL-to-`SiteResponse` map
 that records every request and answers 404 for any other URL; `ScriptedFetcher`, which

@@ -37,7 +37,7 @@ from rovo._mirror.model import (
     RemovalReason,
     StoreOutcome,
 )
-from rovo._mirror.state import Clock, write_text
+from rovo._mirror.state import Clock, contained, write_text
 from rovo._mirror.urls import digest
 
 PAGES_DIRECTORY = "pages"
@@ -214,24 +214,24 @@ def apply_file_effects(mirror: Mirror) -> None:
     """
     root = mirror.out_dir
     for effect in mirror.file_effects:
-        source = root / (effect.source or effect.path)
+        source = contained(root, effect.source or effect.path)
         if effect.kind is FileEffectKind.archived and source.is_file():
-            target = root / archived_path(effect.path)
+            target = contained(root, archived_path(effect.path))
             target.parent.mkdir(parents=True, exist_ok=True)
             source.replace(target)
         elif effect.kind is FileEffectKind.deleted:
             source.unlink(missing_ok=True)
         elif effect.kind is FileEffectKind.archived_copy_deleted:
-            (root / archived_path(effect.path)).unlink(missing_ok=True)
+            contained(root, archived_path(effect.path)).unlink(missing_ok=True)
         elif effect.kind is FileEffectKind.archived_copy_moved:
             _move_archived_copy(root, effect.path, effect.source or effect.path)
 
 
 def _move_archived_copy(root: Path, path: str, to_path: str) -> None:
     """Move the archived copy of `path` to that of `to_path`, when it exists."""
-    copy = root / archived_path(path)
+    copy = contained(root, archived_path(path))
     if copy.is_file():
-        target = root / archived_path(to_path)
+        target = contained(root, archived_path(to_path))
         target.parent.mkdir(parents=True, exist_ok=True)
         copy.replace(target)
 
@@ -250,9 +250,9 @@ def delete_moved_files(mirror: Mirror) -> None:
         held_path = held.get(effect.path.casefold())
         if effect.kind is not FileEffectKind.moved or held_path == effect.path:
             continue
-        old = mirror.out_dir / effect.path
+        old = contained(mirror.out_dir, effect.path)
         if held_path is not None and _same_file(old, mirror.out_dir / held_path):
-            old.rename(mirror.out_dir / held_path)
+            old.rename(contained(mirror.out_dir, held_path))
         else:
             old.unlink(missing_ok=True)
     mirror.file_effects.clear()

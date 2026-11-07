@@ -38,7 +38,7 @@ from rovo._mirror.model import (
     PassKind,
     PassStatus,
 )
-from rovo._mirror.state import write_text
+from rovo._mirror.state import contained, write_text
 
 INDEX_MD = "index.md"
 INDEX_JSONL = "index.jsonl"
@@ -222,7 +222,7 @@ def write_index_files(mirror: Mirror, files: dict[str, str]) -> IndexFilesWritte
     root = mirror.out_dir
     _delete_stale(root / INDEXES_DIRECTORY, {root / name for name in files})
     for name, text in sorted(files.items()):
-        path = root / name
+        path = contained(root, name)
         if not _current(path, text):
             write_text(path, text)
     return IndexFilesWritten(mirror=mirror)

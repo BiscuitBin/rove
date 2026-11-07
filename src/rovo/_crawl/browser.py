@@ -124,8 +124,10 @@ class PlaywrightEngine:
                 held[served.source_url] = served
                 routed.fulfill(status=_FOUND, headers={"location": served.source_url})
             else:
-                routed.fulfill(
-                    status=served.status, body=served.markup, content_type=served.content_type
+                routed.fulfill(  # The bytes as they arrived; text only when there are none.
+                    status=served.status,
+                    body=served.content or served.markup,
+                    content_type=served.content_type,
                 )
 
         try:

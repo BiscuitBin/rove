@@ -149,9 +149,10 @@ first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
 `null` otherwise) and `owned_hosts` (sorted). A row written before these four fields
 existed lacks them and is never accepted as an owner-testing baseline. A run's id is one
 more than the highest id there.
-A sync that crashes after its run ended still records the run's row, though it saves
-neither the manifest nor the frontier, so its id is never reused; a refused sync records
-none.
+A sync that crashes after its run ended still records the run's row, so its id is never
+reused, though it saves neither the manifest nor the frontier unless its finalisation
+finished before the crash (a crash while the report is assembled); a refused sync
+records none.
 Both files are written only after the manifest, so a frontier row marked `done` always
 has its page in the manifest; a sync that stops before then saves neither. A dry run
 (`rovo sync --dry-run`) saves the manifest, the frontier with the rows its discovery
@@ -444,7 +445,10 @@ file change and before the manifest is saved, can leave the files ahead of the
 manifest: the next finalisation writes any written page whose file is missing. A
 directory under `pages/` or `_removed/` left empty is removed, `pages/` and `_removed/`
 included (the specification does not say whether an emptied directory stays; rovo
-removes it, as it does under `_indexes/`).
+removes it, as it does under `_indexes/`). Every file the finalisation or `rovo index`
+moves, deletes or writes lies under the mirror directory: a path whose directory a
+symbolic link leads out of it (a symlinked `pages/<host>/`, `_removed/` or `_indexes/`)
+is refused with an error before any file is touched.
 
 ## `crawl-report.json`
 

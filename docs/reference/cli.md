@@ -349,8 +349,9 @@ published, links and indexes are rewritten, and `crawl-report.json` is written w
 `"<ExceptionType>: <message>"` for an error, and exit 1; the next sync fetches the rows
 again. An error or an interrupt after the run (while finalising, saving or assembling
 the report) writes the report as it stands with that `error`, `report_status:
-interrupted` and exit 1; the manifest and the frontier are not saved, but the run is
-recorded in `.rovo/runs.json`, so the next sync takes the next run id.
+interrupted` and exit 1; the manifest and the frontier are saved only when the
+finalisation finished before it, and the run is recorded in `.rovo/runs.json`, so the
+next sync takes the next run id.
 
 It exits 2 and writes no report when `OUT_DIR` is not a directory, holds no manifest or
 holds one that does not parse. Otherwise a sync is refused, once, for the first of these
@@ -431,8 +432,8 @@ Print one page's Markdown. Nothing is written.
 `rovo fetch URL` fetches one page and prints its Markdown body, without frontmatter, on
 standard output, and exits 0. It needs no mirror. Without `--config` it uses the
 built-in defaults: the profile is the one the catalogue picks by the URL's host, the
-scope is the one `rovo init` would derive from the URL (it decides which redirects are
-followed), and `render_mode` is `"never"`. With `--config PATH` it reads that file's
+scope is the URL's own host, any path on it (it decides which redirects are followed),
+and `render_mode` is `"never"`. With `--config PATH` it reads that file's
 shared sections, then its `[fetch]` section, whose `render_mode` and `profile` override
 theirs ([the mirror reference](mirror.md#rovotoml) lists the keys); no `ROVO_` variable
 is read. The file's `[scope]` then decides which redirects are followed, by a sync's

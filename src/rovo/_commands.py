@@ -285,8 +285,8 @@ def fetch(  # noqa: PLR0913  The command's seams and its options.
     if missing is not None:
         return _refuse(f"fetch: the browser tier is not installed ({missing}); {_ENGINE_FIX}")
     profile = profile_named(settings.profile_name) or GENERIC
-    if config_path is None:
-        scope = initial_scope(url, profile)
+    if config_path is None:  # The URL's own host bounds the redirects, any path on it.
+        scope = replace(initial_scope(url, profile), path_prefixes=("/",))
     else:
         seeded = settings if settings.has_seeds else replace(settings, start_urls=(url,))
         scope = scope_of(seeded, profile)
@@ -452,7 +452,6 @@ def _start_sync(
         lineage_run,
         load_frontier,
         next_run_id,
-        record_run,
     )
     from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
         CrawlReport,
@@ -460,8 +459,6 @@ def _start_sync(
         ReportStatus,
         announce_backoff,
         announce_trip,
-        rank_and_write_report,
-        record_crash_after_run,
     )
 
     fetcher, clock, engine = seams
@@ -557,6 +554,29 @@ def _start_sync(
         engine=engine,
         on_owner_warning=warn,
     )
+    code = _ranked_after_run(report, result, clock)
+    if code is not None and progress is not None:
+        progress(ProgressEvent(event="done", host=None, until=None, url=None))
+    return ExitCode.partial if code is None else code
+
+
+def _ranked_after_run(
+    report: "CrawlReport", result: "CrawlResult", clock: "Timer"
+) -> ExitCode | None:
+    """The finalisation and the saves, then RankAndWriteReport's exit code.
+
+    RecordCrashAfterRun: an error or interrupt in either, after the run has ended, is
+    recorded on the open report, the run is recorded once in runs.json, and the report is
+    ranked and written as it stands; when the report is not open for the run, or the
+    written report fails again, the error propagates.
+    """
+    from rovo._crawl.run import record_run  # noqa: PLC0415  Only a sync loads the crawl.
+    from rovo._report import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
+        rank_and_write_report,
+        record_crash_after_run,
+    )
+
+    mirror = report.mirror
     saved = False
     try:
         saved = _after_run(report, result, clock)
@@ -565,12 +585,18 @@ def _start_sync(
     except (KeyboardInterrupt, Exception) as error:  # RecordCrashAfterRun's guidance.
         if not record_crash_after_run(mirror, result.run, report, _error_text(error)):
             raise
+        record_run(result.run)
+        saved = True
+    try:
+        return rank_and_write_report(report, result.run, clock)
+    except NotInThisSlice:
+        raise
+    except (KeyboardInterrupt, Exception) as error:  # While the report is assembled.
+        if not record_crash_after_run(mirror, result.run, report, _error_text(error)):
+            raise
         if not saved:
             record_run(result.run)
-    code = rank_and_write_report(report, result.run, clock)
-    if code is not None and progress is not None:
-        progress(ProgressEvent(event="done", host=None, until=None, url=None))
-    return ExitCode.partial if code is None else code
+        return rank_and_write_report(report, result.run, clock)
 
 
 def _after_run(report: "CrawlReport", result: "CrawlResult", clock: "Timer") -> bool:

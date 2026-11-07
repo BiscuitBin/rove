@@ -93,8 +93,8 @@ class TabSelection:
 class Selection:
     """What a content selection names: content (in order), chrome, breadcrumbs, tabs, callouts.
 
-    `chrome` is what whole-body extraction strips. Each callout pairs a selector with the
-    GFM alert kind it becomes, the first match winning.
+    `chrome` is what extraction strips from the content, whichever method found it. Each
+    callout pairs a selector with the GFM alert kind it becomes, the first match winning.
     """
 
     content: tuple[str, ...]

@@ -19,7 +19,7 @@ import dataclasses
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import SplitResult, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, CData, Comment, Doctype, Tag
 from bs4.element import NavigableString, PageElement
@@ -178,23 +178,25 @@ _PASSES: dict[QualityGate, Callable[[QualityResult], bool]] = {
 def extract(html: str, url: str, profile: Profile) -> ExtractedContent:
     """Realises convert.allium Fidelity.extract (ExtractNeverEmptyHanded).
 
-    The profile's content selection first; when it matches nothing, the profile's chrome
-    is stripped and the fallback extractor (`_fallback`) runs, else the whole body stands
-    in; `measure` flags either. Links and images in the content are made absolute against
-    the page URL; the breadcrumbs are the selection's.
+    The profile's content selection first; when it matches nothing, the fallback
+    extractor (`_fallback`) runs, else the whole body stands in; `measure` flags either.
+    The profile's chrome is stripped from the content whichever method found it. Links
+    and images in the content are made absolute against the page URL; the breadcrumbs
+    are the selection's.
     """
     soup = BeautifulSoup(html, "lxml")
     body = soup.body or soup
     selection = selection_of(profile)
     document_words = _words(body.get_text(" "))
     selected = _select(body, selection)
-    navigation = _navigation_targets(soup, selected, url)
-    breadcrumbs = _breadcrumbs(soup, selection)
     content: Tag | BeautifulSoup = body if selected is None else selected
+    chrome = content.select(selection.chrome)
+    navigation = _navigation_targets(soup, selected, url, chrome)
+    breadcrumbs = _breadcrumbs(soup, selection)
+    for element in chrome:
+        element.extract()
     method = ExtractionMethod.profile
     if selected is None:
-        for chrome in content.select(selection.chrome):
-            chrome.extract()
         found = _fallback(str(soup), url)
         method = ExtractionMethod.whole_body if found is None else ExtractionMethod.fallback
         content = content if found is None else found
@@ -264,7 +266,7 @@ def normalize(content: ExtractedContent, profile: Profile) -> NormalizedContent:
     targets = tuple(
         href
         for link in links
-        if (href := _attribute(link, "href")) and urlsplit(href).scheme in _WEB_SCHEMES
+        if (href := _attribute(link, "href")) and _scheme(href) in _WEB_SCHEMES
     )
     tables = tree.find_all("table")
     expected = ExpectedCounts(
@@ -619,17 +621,23 @@ def _breadcrumbs(soup: BeautifulSoup, selection: Selection) -> tuple[str, ...]:
 
 
 def _navigation_targets(
-    soup: BeautifulSoup, content: Tag | BeautifulSoup | None, url: str
+    soup: BeautifulSoup, content: Tag | None, url: str, chrome: Sequence[Tag]
 ) -> tuple[str, ...]:
-    """Absolute web hrefs of the page's navigation outside the content, order kept."""
+    """Absolute web hrefs of the page's navigation outside the content, order kept.
+
+    Navigation inside the selected content but within its chrome is stripped from the
+    content, so it is outside it.
+    """
     targets: list[str] = []
     for nav in soup.find_all("nav"):
-        if not isinstance(nav, Tag) or (content is not None and _within(nav, content)):
+        if not isinstance(nav, Tag) or (
+            content is not None and _within(nav, content) and not _in_any(nav, chrome)
+        ):
             continue
         for link in nav.find_all("a"):
             href = _attribute(link, "href")
-            absolute = urljoin(url, href) if href else ""
-            if urlsplit(absolute).scheme in _WEB_SCHEMES:
+            absolute = _joined(url, href) if href else None
+            if absolute is not None and _scheme(absolute) in _WEB_SCHEMES:
                 targets.append(absolute)
     return tuple(dict.fromkeys(targets))
 
@@ -648,7 +656,7 @@ def _absolutise(content: Tag | BeautifulSoup, url: str) -> None:
     ]:
         value = _attribute(element, name)
         if value and isinstance(element, Tag):
-            element[name] = urljoin(url, value)
+            element[name] = _joined(url, value) or value
 
 
 def _title(soup: BeautifulSoup, content: Tag | BeautifulSoup, url: str) -> str:
@@ -677,7 +685,29 @@ def _description(soup: BeautifulSoup, content: Tag | BeautifulSoup) -> str:
 
 def _canonical(soup: BeautifulSoup, url: str) -> str | None:
     href = _attribute(soup.find("link", attrs={"rel": "canonical"}), "href")
-    return urljoin(url, href) if href else None
+    return _joined(url, href) if href else None
+
+
+def _parts(url: str) -> SplitResult | None:
+    """Urlsplit's parts, or None for a URL it cannot take (an unclosed IPv6 bracket)."""
+    try:
+        return urlsplit(url)
+    except ValueError:
+        return None
+
+
+def _scheme(url: str) -> str:
+    """The URL's scheme as urlsplit reads it; empty for a URL it cannot take."""
+    parts = _parts(url)
+    return "" if parts is None else parts.scheme
+
+
+def _joined(base: str, href: str) -> str | None:
+    """`href` resolved against `base`, or None when it cannot be (a malformed URL)."""
+    try:
+        return urljoin(base, href)
+    except ValueError:
+        return None
 
 
 def _attribute(element: object, name: str) -> str | None:
@@ -892,8 +922,10 @@ def _construct_families(tree: BeautifulSoup, selection: Selection) -> None:
         if isinstance(annotation, Tag):
             tex = tree.new_tag(_TEX_ELEMENT)
             tex.string = annotation.get_text().strip()
-            tex[_TEX_DISPLAY_MARK] = _attribute(math, "display") or "inline"
-            math.replace_with(tex)
+            display = _attribute(math, "display") or "inline"
+            tex[_TEX_DISPLAY_MARK] = display
+            ids = [_attribute(element, "id") for element in [math, *math.find_all(id=True)]]
+            math.replace_with(*_id_holders(tree, ids, block=display == "block"), tex)
     for section in tree.select(_FOOTNOTE_SECTIONS):
         _footnotes(tree, section)
 
@@ -907,7 +939,8 @@ def _footnotes(tree: BeautifulSoup, section: Tag) -> None:
     notes = [note for note in section.find_all("li", id=True) if isinstance(note, Tag)]
     numbers = {_attribute(note, "id"): index for index, note in enumerate(notes, start=1)}
     for link in tree.find_all("a", href=True):
-        number = numbers.get(urlsplit(_attribute(link, "href") or "").fragment)
+        parts = _parts(_attribute(link, "href") or "")
+        number = None if parts is None else numbers.get(parts.fragment)
         if number is None or not isinstance(link, Tag) or _within(link, section):
             continue
         parent = link.parent
@@ -1017,8 +1050,10 @@ def _sanitize(element: Tag, *, shell: bool) -> None:
 def _safe_target(element: Tag, name: str) -> bool:
     """Not javascript: or vbscript:, and no data: URL but an image's source."""
     value = _attribute(element, name) or ""
-    scheme = urlsplit(value).scheme.lower()
-    if scheme not in _UNSAFE_SCHEMES:
+    parts = _parts(value)
+    if parts is None:  # Unreadable, so not known safe: the attribute goes.
+        return False
+    if parts.scheme.lower() not in _UNSAFE_SCHEMES:
         return True
     return element.name == "img" and name == "src" and value.lower().startswith(_IMAGE_DATA)
 

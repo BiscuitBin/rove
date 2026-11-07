@@ -553,10 +553,13 @@ _Schema = dict[str, _Keys]
 
 
 def _file_entries(document: dict[str, Any]) -> list[_Entry]:
-    """rovo.toml's settings, in file order."""
+    """rovo.toml's settings, in file order; an empty table is one entry with no key.
+
+    So an empty section is still checked against the schema: an unknown one is refused.
+    """
     entries: list[_Entry] = []
     for section, table in document.items():
-        if isinstance(table, dict):
+        if isinstance(table, dict) and table:
             entries.extend((section, key, value) for key, value in table.items())
         else:
             entries.append((section, None, table))
@@ -593,6 +596,8 @@ def _read_entries(
     values: dict[str, Any] = {}
     for section, key, value in entries:
         keys = schema.get(section)
+        if keys is not None and key is None and value == {}:
+            continue  # An empty known section sets nothing.
         if keys is None or key is None:
             problems.append(f"{section}: unknown section")
             continue

@@ -396,6 +396,9 @@ class SiteResponse:
     main_text: int = 0
     # The raw Location header of a 3xx answer, as the fetcher read it; the follower's input.
     location: str | None = None
+    # The body's bytes as they arrived, which a browser subrequest is fulfilled with
+    # (a font, an image, a stylesheet in another charset); empty when not from the wire.
+    content: bytes = b""
 
     @property
     def ok(self) -> bool:

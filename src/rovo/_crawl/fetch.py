@@ -73,6 +73,7 @@ class HttpxFetcher:
             status=response.status_code,
             source_url=url,
             markup=response.text,
+            content=response.content,
             size=len(response.content),
             content_type=response.headers.get("content-type"),
             retry_after=self._retry_after(response.headers),

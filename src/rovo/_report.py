@@ -503,9 +503,9 @@ def rank_and_write_report(report: CrawlReport, run: Run, clock: Clock) -> ExitCo
     report.quality_summary = summarise(
         report.scores, report.low_confidence_pages, CONFIG.report_percentile
     )
-    report.status = CrawlReportStatus.written
     report.finished_at = clock.now()
     write_json(report_path(report.mirror.out_dir), encode_report(report))
+    report.status = CrawlReportStatus.written  # Only once written: a crash leaves it open.
     return code
 
 

@@ -81,6 +81,20 @@ def write_text(path: Path, text: str) -> None:
         raise
 
 
+def contained(root: Path, relative: str) -> Path:
+    """<root>/<relative>; a ValueError when its directory resolves outside `root`.
+
+    Every file the mirror moves, deletes or writes lies under the mirror directory; a
+    symlinked directory on the way that leads out of it is refused before anything is
+    touched. The last component is not resolved, so a symlink file itself stays local.
+    """
+    path = root / relative
+    if not path.parent.resolve().is_relative_to(root.resolve()):
+        msg = f"path {relative!r} is outside the mirror {root}"
+        raise ValueError(msg)
+    return path
+
+
 def _umask() -> int:
     """The process's file-creation mask; mkstemp's 0600 would otherwise reach every file."""
     current = os.umask(0)
