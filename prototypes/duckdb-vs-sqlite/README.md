@@ -23,6 +23,14 @@ Five stores, each holding the same rows with the same schema:
 | duckdb-default | DuckDB, `VARCHAR` columns under its default column compression |
 | duckdb-zstd | DuckDB, `VARCHAR` columns declared `USING COMPRESSION ZSTD` |
 
+Nine more stores are built from these and compared on size and the read shapes: Parquet
+(zstd level 3; default row groups; 2,048-row groups with bloom filters on `identity`;
+the same sorted by identity), Vortex (default; sorted by identity; sorted and split into
+64 files), Lance (default; with a BTREE index on `identity`), and SQLite with per-row
+zstd against a dictionary trained per regime and column. Parquet, Vortex and Lance are
+written and read through DuckDB; the `vortex` and `lance` extensions are installed into
+`ai_tmp/duckdb-vs-sqlite/extensions/` on the first run.
+
 Four query shapes: point lookup by identity, a full scan of every Markdown body, a
 metadata-only select, and an upsert of one row at a time. Each measurement runs in a
 fresh subprocess and reports the child's own peak RSS and wall time. DuckDB queries run
@@ -62,16 +70,19 @@ uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust --limit 2000
 uv run prototypes/duckdb-vs-sqlite/load_stores.py
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py
 ```
 
 The fourth command needs only the corpus, not the stores, and accepts `--populate` and
 `--insert` to run at smaller sizes (the results file is then named after them). The
-first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
+fifth needs the stores, reaches the network once for the two DuckDB extensions, and
+accepts `--rows N` to build from the first N rows. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
-build needs roughly 22 GB there: the corpus file, the five stores, the download cache and
-the insert benchmark's four row-sample files (5 GB), plus about 5 GB more while that
-benchmark runs, for the base store and its clone. Rerunning a script wipes and rebuilds
+build needs roughly 30 GB there: the corpus file, the five stores, the nine format
+stores and the two extensions, the download cache and the insert benchmark's four
+row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the base
+store and its clone. Rerunning a script wipes and rebuilds
 its outputs, except the row samples, which the insert benchmark keeps and reuses.
 
 The prototype's Python and Markdown pass the repository gate; the data never does.

@@ -1,9 +1,9 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06 with the four commands below, on an Apple M5 Pro (18 cores, 64 GB)
+Measured on 2026-11-06 and 2026-11-07 with the five commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python. Every number on this page comes from one run of the
-four commands below, except the tracer-bullet figures named in the first caveat and the
+five commands below, except the tracer-bullet figures named in the first caveat and the
 block counts of the DuckDB probe named in the insert section:
 
 ```sh
@@ -11,11 +11,12 @@ uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikiped
 uv run prototypes/duckdb-vs-sqlite/load_stores.py --per-regime
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py
 ```
 
-The raw output of the last three commands is kept beside the data, under
-`ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`), which
-is gitignored.
+The raw output of the last four commands is kept beside the data, under
+`ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`,
+`formats.json` and the `formats-explain/` files), which is gitignored.
 
 ## The question
 
@@ -302,6 +303,147 @@ What the tables say:
   DuckDB has no `VACUUM`, so the file never shrinks. Why forced ZSTD holds twice the live
   blocks of the default was not inspected.
 
+## Columnar file formats
+
+Nine more stores, built from the stores above and measured on size, write cost and the
+three read shapes, with `sqlite-zstd` and `duckdb-zstd` re-measured in the same run.
+Parquet, Vortex and Lance are written and read through DuckDB (the `vortex` and `lance`
+core extensions, installed once into `ai_tmp/duckdb-vs-sqlite/extensions/`); the source
+is `stores/duckdb-zstd`, so each write cost includes reading that store, and for the
+sorted variants sorting 4.4 GB. Parquet is zstd at level 3, the level the SQLite stores
+use; the `rg2k` variants write 2,048-row row groups with `DICTIONARY_SIZE_LIMIT 2048`,
+which makes DuckDB dictionary-code `identity` and write a bloom filter per chunk (at the
+default row group it writes none, because the limit is a fifth of the row group and
+every identity is distinct). Vortex's writer exposes no compression, chunk, sort or
+index option; its index layout (`vortex.indexed`) is an experimental, writer-opt-in
+feature with no DuckDB or Python option yet, so the sorted file (zone maps every 8,192
+rows) and the 64-file split (file-level statistics) stand in for it. Lance gets a BTREE
+scalar index on `identity` from `CREATE INDEX ... USING BTREE`. `sqlite-zstd-dict` is
+the `sqlite-zstd` schema with each body compressed against a 128 KiB zstd dictionary
+trained per (regime, column) on 1,000 bodies spread by stride, nine in all (the GitHub
+rows have no HTML), stored in a `dictionaries` table in the same file. Point lookups
+through DuckDB use literals, not parameters, so the filter is a constant at planning
+and pushes into the scan; one `EXPLAIN ANALYZE` per store is kept under
+`results/formats-explain/`. DuckDB-read stores ran at the default memory limit and
+under `SET memory_limit = '512MB'`; a cell that failed says so.
+
+| variant | files | allocated MiB | allocated / raw | write s | write peak RSS MiB | layout |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| parquet-zstd | 1 | 549 | 0.124 | 8.6 | 8,327 | 2 row groups, no bloom filters |
+| parquet-zstd-rg2k | 1 | 546 | 0.123 | 4.6 | 15,242 | 64 row groups, bloom filter on identity in every chunk |
+| parquet-zstd-rg2k-sorted | 1 | 547 | 0.124 | 5.8 | 16,316 | as above, sorted by identity |
+| vortex | 1 | 1,904 | 0.431 | 29.4 | 10,629 | one file, store order |
+| vortex-sorted | 1 | 1,936 | 0.438 | 34.9 | 15,875 | one file, sorted by identity |
+| vortex-split | 64 | 1,859 | 0.420 | 16.5 | 16,145 | 64 files, hive-partitioned by `ntile(64)` over identity |
+| lance | 4 | 929 | 0.210 | 5.1 | 4,081 | one data file, no index |
+| lance-btree | 8 | 927 | 0.210 | 0.1 | 155 | the same plus `identity_idx` (BTREE); the write is the index build on an APFS clone |
+| sqlite-zstd-dict | 1 | 764 | 0.173 | 26.0 | 713 | nine dictionaries, 1,121 KiB, zstd level 3, written from `sqlite-raw` in Python |
+| sqlite-zstd (ref) | 1 | 1,026 | 0.232 | | | per-row zstd level 3, from the size section |
+| duckdb-zstd (ref) | 1 | 560 | 0.127 | | | forced ZSTD, from the size section |
+
+| variant | query | memory limit | peak RSS MiB | wall s | ms per item | items |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| parquet-zstd | point | 51.1 GiB | 1,390 | 23.192 | 115.96 | 200 |
+| parquet-zstd | point | 488.2 MiB | failed: could not allocate block of size 521.8 MiB | | | |
+| parquet-zstd | scan | 51.1 GiB | 791 | 1.083 | 0.01 | 130,880 |
+| parquet-zstd | scan | 488.2 MiB | 801 | 1.151 | 0.01 | 130,880 |
+| parquet-zstd | meta | 51.1 GiB | 133 | 0.112 | 0.00 | 130,880 |
+| parquet-zstd | meta | 488.2 MiB | 133 | 0.111 | 0.00 | 130,880 |
+| parquet-zstd-rg2k | point | 51.1 GiB | 1,023 | 5.875 | 29.37 | 200 |
+| parquet-zstd-rg2k | point | 488.2 MiB | failed: failed to allocate data of size 512.0 MiB | | | |
+| parquet-zstd-rg2k | scan | 51.1 GiB | 1,824 | 1.055 | 0.01 | 130,880 |
+| parquet-zstd-rg2k | scan | 488.2 MiB | failed: failed to allocate data of size 32.0 MiB (481.1 MiB used) | | | |
+| parquet-zstd-rg2k | meta | 51.1 GiB | 183 | 0.081 | 0.00 | 130,880 |
+| parquet-zstd-rg2k | meta | 488.2 MiB | 146 | 0.086 | 0.00 | 130,880 |
+| parquet-zstd-rg2k-sorted | point | 51.1 GiB | 978 | 5.701 | 28.50 | 200 |
+| parquet-zstd-rg2k-sorted | point | 488.2 MiB | failed: failed to allocate data of size 512.0 MiB | | | |
+| parquet-zstd-rg2k-sorted | scan | 51.1 GiB | 1,761 | 1.172 | 0.01 | 130,880 |
+| parquet-zstd-rg2k-sorted | scan | 488.2 MiB | failed: failed to allocate data of size 32.0 MiB (488.1 MiB used) | | | |
+| parquet-zstd-rg2k-sorted | meta | 51.1 GiB | 182 | 0.095 | 0.00 | 130,880 |
+| parquet-zstd-rg2k-sorted | meta | 488.2 MiB | 145 | 0.089 | 0.00 | 130,880 |
+| vortex | point | 51.1 GiB | 2,414 | 2.355 | 11.78 | 200 |
+| vortex | point | 488.2 MiB | 2,414 | 2.140 | 10.70 | 200 |
+| vortex | scan | 51.1 GiB | 2,272 | 1.053 | 0.01 | 130,880 |
+| vortex | scan | 488.2 MiB | 2,285 | 1.039 | 0.01 | 130,880 |
+| vortex | meta | 51.1 GiB | 167 | 0.106 | 0.00 | 130,880 |
+| vortex | meta | 488.2 MiB | 164 | 0.107 | 0.00 | 130,880 |
+| vortex-sorted | point | 51.1 GiB | 1,586 | 2.259 | 11.30 | 200 |
+| vortex-sorted | point | 488.2 MiB | 1,584 | 2.288 | 11.44 | 200 |
+| vortex-sorted | scan | 51.1 GiB | 2,364 | 1.092 | 0.01 | 130,880 |
+| vortex-sorted | scan | 488.2 MiB | 2,385 | 1.136 | 0.01 | 130,880 |
+| vortex-sorted | meta | 51.1 GiB | 169 | 0.102 | 0.00 | 130,880 |
+| vortex-sorted | meta | 488.2 MiB | 169 | 0.105 | 0.00 | 130,880 |
+| vortex-split | point | 51.1 GiB | 1,118 | 1.566 | 7.83 | 200 |
+| vortex-split | point | 488.2 MiB | 1,118 | 1.593 | 7.96 | 200 |
+| vortex-split | scan | 51.1 GiB | 1,545 | 1.038 | 0.01 | 130,880 |
+| vortex-split | scan | 488.2 MiB | 1,571 | 1.070 | 0.01 | 130,880 |
+| vortex-split | meta | 51.1 GiB | 149 | 0.105 | 0.00 | 130,880 |
+| vortex-split | meta | 488.2 MiB | 150 | 0.108 | 0.00 | 130,880 |
+| lance | point | 51.1 GiB | 163 | 0.726 | 3.63 | 200 |
+| lance | point | 488.2 MiB | 162 | 0.664 | 3.32 | 200 |
+| lance | scan | 51.1 GiB | 2,211 | 1.199 | 0.01 | 130,880 |
+| lance | scan | 488.2 MiB | 2,229 | 1.177 | 0.01 | 130,880 |
+| lance | meta | 51.1 GiB | 194 | 0.150 | 0.00 | 130,880 |
+| lance | meta | 488.2 MiB | 188 | 0.153 | 0.00 | 130,880 |
+| lance-btree | point | 51.1 GiB | 123 | 0.216 | 1.08 | 200 |
+| lance-btree | point | 488.2 MiB | 116 | 0.252 | 1.26 | 200 |
+| lance-btree | scan | 51.1 GiB | 2,173 | 1.264 | 0.01 | 130,880 |
+| lance-btree | scan | 488.2 MiB | 2,231 | 1.193 | 0.01 | 130,880 |
+| lance-btree | meta | 51.1 GiB | 185 | 0.153 | 0.00 | 130,880 |
+| lance-btree | meta | 488.2 MiB | 192 | 0.165 | 0.00 | 130,880 |
+| sqlite-zstd-dict | point | SQLite default | 45 | 0.011 | 0.05 | 200 |
+| sqlite-zstd-dict | scan | SQLite default | 64 | 1.180 | 0.01 | 130,880 |
+| sqlite-zstd-dict | meta | SQLite default | 44 | 0.216 | 0.00 | 130,880 |
+| sqlite-zstd | point | SQLite default | 43 | 0.010 | 0.05 | 200 |
+| sqlite-zstd | scan | SQLite default | 63 | 1.178 | 0.01 | 130,880 |
+| sqlite-zstd | meta | SQLite default | 42 | 0.215 | 0.00 | 130,880 |
+| duckdb-zstd | point | 51.1 GiB | 537 | 2.538 | 12.69 | 200 |
+| duckdb-zstd | point | 488.2 MiB | 537 | 2.480 | 12.40 | 200 |
+| duckdb-zstd | scan | 51.1 GiB | 624 | 0.992 | 0.01 | 130,880 |
+| duckdb-zstd | scan | 488.2 MiB | 622 | 0.989 | 0.01 | 130,880 |
+| duckdb-zstd | meta | 51.1 GiB | 95 | 0.081 | 0.00 | 130,880 |
+| duckdb-zstd | meta | 488.2 MiB | 96 | 0.085 | 0.00 | 130,880 |
+
+What the tables say:
+
+- **Parquet with zstd is DuckDB's own disk figure, and nothing else gets close.** The
+  three Parquet files are 0.123 to 0.124 of raw against 0.127 for `duckdb-zstd`; the row
+  group size does not change it. Lance is 0.210 and Vortex 0.42 to 0.44, three and a
+  half times Parquet: its lightweight encodings do not find the repetition across pages
+  that a zstd segment does, and its writer offers no knob for that. The dictionary cuts
+  the SQLite zstd store from 0.232 to 0.173 (1,026 to 764 MiB), a quarter off, for
+  1.1 MiB of dictionaries.
+- **A point lookup on a columnar file pays for the column chunk around the row.**
+  `parquet-zstd` reads 549 MB per lookup (the whole HTML chunk of a 122,880-row row
+  group, per `EXPLAIN ANALYZE`), 116 ms and 1.4 GB of RSS, and under the 512 MB limit it
+  fails outright ("could not allocate block of size 521.8 MiB"). The 2,048-row row
+  groups bring that to 5.5 MB read, "1 / 64 row groups scanned", 29 ms and about 1 GB
+  (the bloom filters and statistics do their job; sorting adds nothing on top), but the
+  reader still fails under 512 MB, on point lookups and on scans. Vortex has no
+  counters in its plan; its lookups take 11.8 ms unsorted, 11.3 ms sorted and 7.8 ms
+  split, at 2.4, 1.6 and 1.1 GB of RSS, so the zone maps and file statistics halve the
+  memory and the split halves the time, and all three stay slower than `duckdb-zstd`
+  (12.7 ms, 537 MiB) in memory. Lance is the one columnar store that looks up like a
+  database: 3.6 ms at 163 MiB without an index and 1.1 ms at 123 MiB with the BTREE
+  index, ten times faster than `duckdb-zstd` on a quarter of the memory. SQLite does it
+  in 0.05 ms at 43 to 45 MiB, with or without the dictionary.
+- **Scans are a wash in time and a spread in memory.** Every store streams the 130,880
+  Markdown bodies in 1.0 to 1.3 s; the memory is 63 to 64 MiB for the two SQLite stores,
+  624 MiB for `duckdb-zstd`, 791 MiB for `parquet-zstd`, 1.5 to 2.4 GB for the Vortex and
+  Lance stores and the small-row-group Parquet files. The metadata select is 0.08 to
+  0.15 s everywhere through DuckDB at 95 to 194 MiB, against 0.22 s at 42 to 44 MiB for
+  SQLite.
+- **The 512 MB limit governs DuckDB's buffer pool, not the extensions.** Vortex and Lance
+  reads peaked at 1.1 to 2.4 GB of RSS under a limit DuckDB reported as 488.2 MiB, and
+  no number moved; the Parquet reader, which is DuckDB's own, honoured it and failed
+  where a single column chunk or the scan's buffers exceeded it.
+- **Writing is where DuckDB's columnar paths spend memory.** Writing Parquet from the
+  DuckDB store peaked at 8.3 GB of RSS unsorted and 15 to 16 GB with small row groups or
+  a sort, Vortex at 10.6 to 16.1 GB and Lance at 4.1 GB, in 5 to 35 s; the Python
+  dictionary store took 26 s at 713 MiB. The source read and the sort are part of those
+  numbers, and a streaming writer would need less; the bulk-ingestion caveat below
+  still applies.
+
 ## Verdict
 
 **On disk, yes. In memory while querying, no.**
@@ -367,6 +509,16 @@ of them in under 92 MiB (raw SQLite in under 139 MiB).
   insert section.
 - **No concurrency.** One writer and no readers at a time; the mirror's real access
   pattern (a crawler writing while a converter reads) was not exercised.
+- **The columnar files were written from the DuckDB store and read with literals.**
+  Each write cost includes reading `stores/duckdb-zstd` and, for the sorted variants,
+  sorting 4.4 GB in DuckDB, so the write RSS is DuckDB's, not the format's. Point
+  lookups through DuckDB inline the identity as a literal, so the filter is a constant at
+  planning; a prepared parameter may plan differently. Vortex's index layout is not
+  exposed to DuckDB or Python, so only its zone maps and file statistics were exercised,
+  and its plans report no pruning counters. The 512 MB memory limit governs DuckDB's
+  buffer pool only: the Vortex and Lance extensions read through their own allocators
+  and ignored it. The Lance BTREE index was built after the fact on an APFS clone; the
+  Lance scan's use of it was inferred from the lookup time and memory, not from the plan.
 
 ## Recommendation
 
@@ -378,17 +530,25 @@ the access pattern a crawl has. The insert measurements leave that in place and 
 mode: SQLite with per-row zstd under `journal_mode=WAL` and `synchronous=NORMAL` takes
 6,000 single-row inserts a second on typical pages (200 MiB/s) at under 180 MiB of RSS,
 as fast as batching, while DuckDB written a row at a time is five times slower and loses
-the disk advantage that was its case (0.57 of raw against 0.23). A later decision record
-can cite these numbers directly.
+the disk advantage that was its case (0.57 of raw against 0.23). The columnar files do
+not change the choice: Parquet matches DuckDB's disk but a point lookup reads a whole
+column chunk (116 ms and 1.4 GB, failing under 512 MB), Vortex is three and a half
+times Parquet on disk, and Lance with a BTREE index is the best lookup DuckDB can offer
+(1.1 ms at 123 MiB) at 0.21 of raw, still twenty times SQLite's time and three times its
+memory. What does move is the SQLite store itself: a zstd dictionary trained per regime
+and column takes it from 0.232 to 0.173 of raw at no measurable query cost, so the
+recommended store is **SQLite with per-row zstd against a per-host (here per-regime)
+dictionary, in WAL mode**. A later decision record can cite these numbers directly.
 
 Two follow-ups are worth measuring if disk becomes the constraint:
 
-- A zstd dictionary trained per host (or per crawl) for SQLite's per-row compression,
-  which recovers some of the shared-chrome win DuckDB gets for free; the `zstandard`
-  package supports it and nothing here measured it.
-- DuckDB as an append-once archive of raw HTML written in bulk after a run and read by
-  scans, where its compression is the whole point and its write and lookup costs do not
-  apply. That is a different store from the temporary one, not a replacement for it.
+- The dictionary's scope and size: one per regime and column at 128 KiB was measured;
+  per host, per crawl, larger, or retrained as a host's chrome changes were not, and the
+  gain on Sphinx-like chrome should be larger than the corpus average.
+- Parquet with zstd as an append-once archive of raw HTML written in bulk after a run
+  and read by scans, where its compression (0.124 of raw, the same as DuckDB's) is the
+  whole point and its lookup cost does not apply. That is a different store from the
+  temporary one, not a replacement for it.
 
 If DuckDB is ever used for bodies, declare `USING COMPRESSION ZSTD` on the body columns
 or lower `zstd_min_string_length`; the default leaves Markdown under 4 KB uncompressed.
