@@ -171,6 +171,26 @@ def vm_down(state_dir: StateDir = None) -> None:
     _finish(state_dir)
 
 
+@vm.command("install-duckdb")
+def vm_install_duckdb(state_dir: StateDir = None) -> None:
+    """Ticket 05: pip-install the host's DuckDB pin in the guest (network), for `crawl --store per-item`."""
+    mach = _running_or_fail(state_dir)
+    try:
+        before = m.duckdb_version(mach)
+        typer.echo(f"guest duckdb before: {before or 'none'}")
+        if before != m.DUCKDB_VERSION:
+            t0 = time.monotonic()
+            typer.echo(m.install_duckdb(mach))
+            typer.echo(f"[time] pip install duckdb=={m.DUCKDB_VERSION}: {time.monotonic() - t0:.2f}s")
+        after = m.duckdb_version(mach)
+        typer.echo(f"guest duckdb after: {after or 'none'}")
+        if after != m.DUCKDB_VERSION:
+            _fail(f"guest duckdb is {after}, the pin is {m.DUCKDB_VERSION}", state_dir)
+    except (SmolError, RuntimeError) as exc:
+        _fail(exc, state_dir)
+    _finish(state_dir)
+
+
 @vm.command("destroy")
 def vm_destroy(state_dir: StateDir = None) -> None:
     """Delete the machine and its disk, and remove the state file; works with no state file."""
@@ -196,6 +216,7 @@ STAT_PREFIXES = (
     "proto/", "httpcache/", "robotstxt/", "offsite/", "retry/", "downloader/request_count",
     "downloader/response_count", "downloader/response_status_count", "downloader/exception_count",
     "item_scraped_count", "response_received_count", "finish_reason", "elapsed_time_seconds", "log_count/ERROR",
+    "memusage/",
 )
 LOG_TAIL = 30
 
@@ -219,6 +240,12 @@ def _running_or_fail(state_dir: Path | None) -> Machine:
         return m.connect_existing(state_dir)
     except (SmolError, RuntimeError) as exc:
         _fail(exc, state_dir)
+
+
+def _count(stats: dict[str, object], key: str) -> int:
+    """A per-item store counter from the guest's stats, or -1 when it is absent or not an int."""
+    value = stats.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else -1
 
 
 def _print_stats(stats: dict[str, object]) -> None:
@@ -275,16 +302,22 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     render: Annotated[
         bool, typer.Option("--render", help="Print what would run in the guest, and exit; no machine call."),
     ] = False,
+    store_kind: Annotated[
+        str, typer.Option("--store", help="bulk: load the feed on the host after the run. per-item: the item "
+            "pipeline writes each page into a DuckDB file on the guest, pulled back afterwards."),
+    ] = "bulk",
     state_dir: StateDir = None,
     db: Db = store.DEFAULT_DB,
     feeds_dir: FeedsDir = store.FEEDS_DIR,
 ) -> None:
-    """Crawl from the seeds inside the guest, pull the feed, bulk-load it into DuckDB, print the summary."""
+    """Crawl from the seeds inside the guest, pull the feed, bulk-load it into DuckDB, print the summary.
+    With --store per-item, the spider writes DuckDB itself and the host pulls that file back instead."""
     try:
         p = c.plan(
             c.new_run_id(), start_url, allowed_host or [], max_pages, replay=replay,
             path_prefixes=path_prefix, include=include, exclude=exclude, max_depth=max_depth,
             keep_query_params=keep_query_param, delay=delay, concurrency=concurrency, user_agent=user_agent,
+            store=store_kind,
         )
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -297,8 +330,13 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
         return
     mach = _running_or_fail(state_dir)
     typer.echo(f"[crawl] run {p.run_id}: {p.start_urls}, hosts {p.allowed_hosts}, max {p.max_pages} pages"
-        + (", replay from the guest cache" if p.replay else ""))
+        + (", replay from the guest cache" if p.replay else "") + f", store {p.store}")
     try:
+        if p.store == "per-item":
+            found = m.duckdb_version(mach)
+            if found != m.DUCKDB_VERSION:
+                _fail(f"the guest has duckdb {found}, the pin is {m.DUCKDB_VERSION}; run "
+                    "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
         c.prepare(mach, p)
         typer.echo(f"[crawl] lock: {c.acquire(mach, p)}")
         try:
@@ -307,7 +345,10 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
             c.release(mach, p)
             raise
         typer.echo(f"[crawl] started in the guest with background=True (pid {pid}); log {p.run_dir}/crawl.log")
-        outcome = c.collect(mach, p, c.watch(mach, p, typer.echo))
+        t_launched = time.monotonic()
+        outcome = c.watch(mach, p, typer.echo)
+        t_done = time.monotonic()
+        outcome = c.collect(mach, p, outcome)
         if outcome.exit_code is None:
             # The wrapper died before its own release; free the lock only if it still names this run.
             c.release(mach, p)
@@ -345,19 +386,59 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     typer.echo(f"[crawl] pulled to {feeds_dir}: feed " + ("yes" if outcome.feed is not None else "NONE")
         + ", stats, log, run manifest")
     _print_stats(outcome.stats)
-    if outcome.exit_code != 0 or close_reason not in OK_REASONS or outcome.feed is None:
+    per_item = p.store == "per-item"
+    st = outcome.stats
+    # Every page the spider emitted is a row inserted or an intentional duplicate, and no insert failed.
+    lost = per_item and (
+        _count(st, "proto/store/insert_failed") != 0
+        or _count(st, "proto/pages")
+        != _count(st, "proto/store/rows_inserted") + _count(st, "proto/store/duplicates_ignored")
+        or _count(st, "proto/store/rows") != _count(st, "proto/store/rows_inserted")
+    )
+    unstored = (st.get("proto/store/closed") != 1 or lost) if per_item else outcome.feed is None
+    if outcome.exit_code != 0 or close_reason not in OK_REASONS or unstored:
         tail = outcome.log.decode("utf-8", "replace").splitlines()[-LOG_TAIL:]
         typer.echo(f"---- last {len(tail)} lines of crawl.log ----")
         typer.echo("\n".join(tail))
-        hint = f"`scrapyproto load {p.run_id}` loads it" if outcome.feed is not None else "there is no feed"
+        if per_item:
+            if lost:
+                hint = (
+                    f"the per-item store lost pages (insert_failed {_count(st, 'proto/store/insert_failed')}, "
+                    f"pages {_count(st, 'proto/pages')}, inserted {_count(st, 'proto/store/rows_inserted')}, "
+                    f"duplicates {_count(st, 'proto/store/duplicates_ignored')}); {p.guest_db} not pulled"
+                )
+            else:
+                hint = f"the per-item store was not closed (stats proto/store/closed absent); {p.guest_db} not pulled"
+        else:
+            hint = f"`scrapyproto load {p.run_id}` loads it" if outcome.feed is not None else "there is no feed"
         _fail(f"the spider did not finish cleanly ({outcome.why}, {close_reason}); not loaded, {hint}", state_dir)
-    try:
-        pages, check = store.load(db, manifest, paths["jsonl"])
-    except (store.FeedError, duckdb.Error, OSError) as exc:
-        _fail(f"load failed, nothing written to the store: {exc}", state_dir)
-    _print_load(check, pages)
+    if per_item:
+        pulled = db.parent / f"{p.run_id}-per-item.duckdb"
+        try:
+            data, listing = c.pull_store(mach, p)
+            typer.echo(f"[pull] guest run directory before the pull (no {c.GUEST_DB_FILE}.wal):")
+            typer.echo(listing.rstrip())
+            store.write_atomic(pulled, data)
+            typer.echo(f"[pull] {p.guest_db} -> {pulled}: {len(data)} bytes, the guest's size")
+            pages = store.record_per_item(db, manifest, pulled)
+        except SmolError as exc:
+            _fail(f"lost the machine pulling {p.guest_db}: {exc}", state_dir)
+        except (RuntimeError, store.FeedError, duckdb.Error, OSError) as exc:
+            _fail(f"per-item store not recorded: {exc}", state_dir)
+        typer.echo(f"[record] runs row for {p.run_id} (store per-item, {pages} pages) in {db}")
+        summary = store.summary(db, p.run_id, pulled)
+    else:
+        try:
+            pages, check = store.load(db, manifest, paths["jsonl"])
+        except (store.FeedError, duckdb.Error, OSError) as exc:
+            _fail(f"load failed, nothing written to the store: {exc}", state_dir)
+        _print_load(check, pages)
+        summary = store.summary(db, p.run_id)
     typer.echo("---- summary (read back from DuckDB) ----")
-    typer.echo(store.summary(db, p.run_id))
+    typer.echo(summary)
+    t_summary = time.monotonic()
+    typer.echo(f"[time] host: launch to done marker seen {t_done - t_launched:.2f}s (polled every "
+        f"{c.POLL_EVERY_S:.0f}s); done marker seen to summary printed {t_summary - t_done:.2f}s")
     _finish(state_dir)
 
 

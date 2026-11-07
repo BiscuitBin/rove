@@ -21,13 +21,15 @@ from urllib.parse import urlsplit
 
 from smol import ExecOptions, Machine, SmolError
 
-from scrapyproto import machine as m, scope as scope_mod
+from scrapyproto import machine as m, scope as scope_mod, store as store_mod
 
 GUEST_ROOT = "/out/scrapyproto"
 RUNS_DIR = f"{GUEST_ROOT}/runs"
 CACHE_DIR = f"{GUEST_ROOT}/httpcache"  # Shared by every run, so `--replay` reads what a live run stored.
 LOCK = f"{GUEST_ROOT}/crawl.lock"  # A symlink naming the run that holds it: `ln -s` fails if it exists.
 FLOCK = f"{GUEST_ROOT}/.lock-take"  # Serialises the check-and-take of LOCK between host processes.
+STORES = ("bulk", "per-item")  # Ticket 05: host bulk load of the feed, or the item pipeline's DuckDB file.
+GUEST_DB_FILE = "pages.duckdb"  # The per-item store, in the run's directory on the guest disk.
 SPIDER_FILE = "proto_spider.py"  # `runspider` imports it as module `proto_spider`; the middleware path uses that.
 
 USER_AGENT = f"scrapy-duckdb-prototype/0.0 (rovo prototype crawler; Scrapy {m.SCRAPY_VERSION}; robots.txt obeyed)"
@@ -69,10 +71,15 @@ class Plan:
     delay: float = DOWNLOAD_DELAY_S
     concurrency: int = CONCURRENCY
     user_agent: str = USER_AGENT
+    store: str = "bulk"
 
     @property
     def run_dir(self) -> str:
         return f"{RUNS_DIR}/{self.run_id}"
+
+    @property
+    def guest_db(self) -> str:
+        return f"{self.run_dir}/{GUEST_DB_FILE}"
 
     @property
     def feed(self) -> str:
@@ -100,6 +107,7 @@ class Plan:
             "concurrency": self.concurrency,
             "user_agent": self.user_agent,
             "robots": "obey",
+            "store": self.store,
             "patterns": "glob: fnmatchcase over the whole identity; re: re.search, unanchored",
         }
 
@@ -124,6 +132,7 @@ def plan(  # noqa: PLR0913, C901, PLR0912  one flag per argument; one check per 
     delay: float = DOWNLOAD_DELAY_S,
     concurrency: int = CONCURRENCY,
     user_agent: str = USER_AGENT,
+    store: str = "bulk",
 ) -> Plan:
     """Validate the flags into a plan; raises ValueError naming the bad flag."""
     if not start_urls:
@@ -165,12 +174,15 @@ def plan(  # noqa: PLR0913, C901, PLR0912  one flag per argument; one check per 
     if not user_agent.strip() or not user_agent.isprintable() or not user_agent.isascii():
         msg = f"--user-agent must be non-empty printable ASCII, got {user_agent!r}"
         raise ValueError(msg)
+    if store not in STORES:
+        msg = f"--store must be one of {list(STORES)}, got {store!r}"
+        raise ValueError(msg)
     keep = sorted({k.strip() for k in keep_query_params or [] if k.strip()})
     return Plan(
         run_id, list(start_urls), allowed, max_pages, replay,
         path_prefixes=prefixes, include=list(include or []), exclude=list(exclude or []),
         max_depth=max_depth, keep_query_params=keep, delay=delay, concurrency=concurrency,
-        user_agent=user_agent,
+        user_agent=user_agent, store=store,
     )
 
 
@@ -216,8 +228,15 @@ def settings(p: Plan) -> dict[str, object]:
         "HTTPCACHE_IGNORE_HTTP_CODES": [429, 503],
         # A replay drops any request not in the cache instead of fetching it.
         "HTTPCACHE_IGNORE_MISSING": p.replay,
-        "FEEDS": {p.feed: {"format": "jsonlines", "encoding": "utf8", "overwrite": True}},
+        # The per-item path writes no feed (ticket 05): its pipeline writes the DuckDB file instead.
+        **({"FEEDS": {p.feed: {"format": "jsonlines", "encoding": "utf8", "overwrite": True}}} if p.store == "bulk"
+            else {}),
         "FEED_EXPORT_ENCODING": "utf-8",
+        # Ticket 05, both paths: Scrapy's own memory stat. It samples ru_maxrss at engine start and every
+        # 60 s, so a short run's memusage/max is the start-up figure; the spider logs ru_maxrss at close too.
+        "MEMUSAGE_ENABLED": True,
+        "MEMUSAGE_LIMIT_MB": 0,
+        "MEMUSAGE_WARNING_MB": 0,
         # Nothing in the guest listens: Scrapy 2.20 starts a remote-control HTTP server by default.
         "REMOTE_CONTROL_ENABLED": False,
         "TELNETCONSOLE_ENABLED": False,
@@ -235,6 +254,9 @@ def config(p: Plan) -> dict[str, object]:
         "max_pages": p.max_pages,
         "replay": p.replay,
         "stats_path": f"{p.run_dir}/stats.json",
+        "store": p.store,
+        "store_path": p.guest_db,
+        "schema": store_mod.SCHEMA,
     }
 
 
@@ -254,6 +276,8 @@ discovered, fragment removed, so its cache key is the one ticket 03 issued for t
 import hashlib
 import json
 import os
+import resource
+import time
 from collections import deque
 from datetime import datetime, timezone
 from urllib.parse import urldefrag, urlsplit
@@ -321,9 +345,101 @@ class Guard:
         return None
 
 
+class DuckDBPipeline:
+    """Ticket 05's per-item store: each page is inserted, as it arrives, into a DuckDB file on the guest
+    disk, one autocommit INSERT per item, with the host store's schema (`html` USING COMPRESSION ZSTD).
+    Scrapy calls close_spider before it sends spider_closed (engine.close_spider_async, read in the
+    guest), so the runs row, the CHECKPOINT and the close all land before the spider's `closed` dumps the
+    stats and reads ru_maxrss. A runs row in the file means the pipeline closed it; a crash leaves none.
+    The insert is synchronous: the reactor waits for it, and the stats record how long."""
+
+    def __init__(self, crawler):
+        self.crawler = crawler
+        self.con = None
+        self.rows = 0
+        self.duplicates = 0
+        self.failed = 0
+        self.insert_s = 0.0
+        self.insert_max_s = 0.0
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler)
+
+    def open_spider(self, spider=None):
+        import duckdb  # The bulk path does not need DuckDB in the guest.
+
+        t0 = time.perf_counter()
+        # No extension may be fetched: the guest has the network, and nothing here is granted it.
+        self.con = duckdb.connect(
+            CONFIG["store_path"],
+            config={"autoinstall_known_extensions": False, "autoload_known_extensions": False},
+        )
+        self.con.execute(CONFIG["schema"])
+        stats = self.crawler.stats
+        stats.set_value("proto/store/kind", "per-item")
+        stats.set_value("proto/store/duckdb", duckdb.__version__)
+        stats.set_value("proto/store/open_s", round(time.perf_counter() - t0, 6))
+
+    def process_item(self, item, spider=None):
+        t0 = time.perf_counter()
+        try:
+            found = self.con.execute(
+                "INSERT OR IGNORE INTO pages (run_id, url, final_url, status, content_type, depth, referrer, "
+                "outlinks, fetched_at, content_hash, html) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS TIMESTAMPTZ), ?, ?)",
+                [
+                    CONFIG["run_id"], item["url"], item["final_url"], item["status"], item["content_type"],
+                    item["depth"], item["referrer"], item["outlinks"], item["fetched_at"], item["content_hash"],
+                    item["html"],
+                ],
+            ).fetchall()
+        except Exception:
+            self.failed += 1  # Scrapy logs it and crawls on; the host rejects the run (cli.py).
+            raise
+        took = time.perf_counter() - t0
+        self.insert_s += took
+        self.insert_max_s = max(self.insert_max_s, took)
+        if found and found[0][0] == 1:
+            self.rows += 1
+        else:  # The bulk load keeps a URL's earliest fetch; so does this, by arrival order.
+            self.duplicates += 1
+        return item
+
+    def close_spider(self, spider=None):
+        stats = self.crawler.stats
+        stats.set_value("proto/store/rows_inserted", self.rows)
+        stats.set_value("proto/store/duplicates_ignored", self.duplicates)
+        stats.set_value("proto/store/insert_failed", self.failed)
+        stats.set_value("proto/store/insert_s_total", round(self.insert_s, 6))
+        stats.set_value("proto/store/insert_s_max", round(self.insert_max_s, 6))
+        if self.con is None:
+            return
+        rows = self.con.execute("SELECT count(*) FROM pages").fetchall()[0][0]
+        self.con.execute(
+            "INSERT INTO runs (run_id, start_urls, scope, pages, store, store_file) VALUES (?, ?, ?, ?, ?, ?)",
+            [CONFIG["run_id"], CONFIG["start_urls"], json.dumps(CONFIG["scope"]), rows, "per-item",
+                CONFIG["store_path"]],
+        )
+        t0 = time.perf_counter()
+        self.con.execute("CHECKPOINT")
+        stats.set_value("proto/store/checkpoint_s", round(time.perf_counter() - t0, 6))
+        self.con.close()
+        self.con = None
+        path = CONFIG["store_path"]
+        stats.set_value("proto/store/rows", rows)
+        stats.set_value("proto/store/closed", 1)
+        stats.set_value("proto/store/file_bytes", os.path.getsize(path))
+        stats.set_value("proto/store/wal_after_close", os.path.exists(path + ".wal"))
+
+
 class ProtoSpider(scrapy.Spider):
     name = "proto"  # Fixed: HTTPCACHE_SCOPE "spider" keys the cache by it, so replays find it.
-    custom_settings = {**SETTINGS, "DOWNLOADER_MIDDLEWARES": {"proto_spider.Guard": 110}}
+    custom_settings = {
+        **SETTINGS,
+        "DOWNLOADER_MIDDLEWARES": {"proto_spider.Guard": 110},
+        **({"ITEM_PIPELINES": {"proto_spider.DuckDBPipeline": 300}} if CONFIG["store"] == "per-item" else {}),
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -490,6 +606,8 @@ class ProtoSpider(scrapy.Spider):
         stats.set_value("proto/requests_issued", self.issued)
         stats.set_value("proto/frontier_left", len(self.frontier))
         stats.set_value("proto/identities_fetched", len(self.fetched))
+        # Ticket 05: this process's peak RSS (Linux: KiB), read after the pipeline's close.
+        stats.set_value("proto/ru_maxrss_kib", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         path = CONFIG["stats_path"]
         with open(path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(stats.get_stats(), f, default=str, indent=1, sort_keys=True)
@@ -614,7 +732,10 @@ def render(p: Plan) -> str:
         f"5. exec(background=True): {' '.join(launch_argv(p))}",
         "6. poll with one exec per interval until `done`, `dead` or the host deadline; on the deadline, TERM",
         "   Scrapy, wait, KILL",
-        f"7. read_file {p.feed}, stats.json and crawl.log; bulk-load the feed into DuckDB on the host",
+        f"7. read_file {p.feed}, stats.json and crawl.log; bulk-load the feed into DuckDB on the host"
+        if p.store == "bulk"
+        else f"7. read_file stats.json and crawl.log; check {p.guest_db} is closed (no WAL), read_file it, record "
+        "the run in the host store",
         "",
         rule,
         "## Settings (Scrapy), as rendered into the spider",
@@ -673,6 +794,7 @@ def dry_run(p: Plan) -> str:
         f"- politeness: delay {p.delay} s between downloads, concurrency {p.concurrency}, robots.txt obeyed",
         f"  (no flag turns it off), user agent {p.user_agent!r}",
         f"- replay: {p.replay} (true: served from the guest cache; a request not in it is dropped)",
+        f"- store: {p.store}",
         f"- CLOSESPIDER_TIMEOUT {timeout} s; host deadline {timeout + DEADLINE_GRACE_S:.0f} s",
         "",
         "## Seeds",
@@ -765,6 +887,25 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
             code = int(status.split()[1]) if status.startswith("done") else None
             return Outcome(exit_code=code, why=f"host deadline passed; killed ({status})")
         time.sleep(POLL_EVERY_S)
+
+
+def pull_store(mach: Machine, p: Plan) -> tuple[bytes, str]:
+    """Ticket 05: read the per-item DuckDB file back, only once it is closed. Returns the bytes and the
+    guest's listing of the run directory. Raises RuntimeError when a WAL sits beside the file (the
+    pipeline never checkpointed and closed it: a crash) or the bytes read differ from the guest's size."""
+    code, listing, err = sh(mach, f"ls -l --time-style=+%s {p.run_dir}; stat -c %s {p.guest_db}")
+    if code != 0:
+        msg = f"no per-item store at {p.guest_db}: {err.strip()[-300:]}"
+        raise RuntimeError(msg)
+    if f"{GUEST_DB_FILE}.wal" in listing:
+        msg = f"{p.guest_db}.wal exists: the pipeline did not checkpoint and close the file; not pulled"
+        raise RuntimeError(msg)
+    guest_size = int(listing.strip().splitlines()[-1])
+    data = mach.read_file(p.guest_db)
+    if len(data) != guest_size:
+        msg = f"read {len(data)} bytes of {p.guest_db}, the guest says {guest_size}"
+        raise RuntimeError(msg)
+    return data, listing
 
 
 def collect(mach: Machine, p: Plan, outcome: Outcome) -> Outcome:

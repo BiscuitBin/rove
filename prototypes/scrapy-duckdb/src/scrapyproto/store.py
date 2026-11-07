@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS runs (
     start_urls   VARCHAR[],
     scope        JSON,
     pages        INTEGER NOT NULL,
-    wall_seconds DOUBLE
+    wall_seconds DOUBLE,
+    store        VARCHAR DEFAULT 'bulk',
+    store_file   VARCHAR
 );
 CREATE TABLE IF NOT EXISTS pages (
     run_id       VARCHAR NOT NULL,
@@ -62,6 +64,15 @@ COLUMNS = {
     "html": "VARCHAR",
 }
 REQUIRED = {"url": str, "status": int, "depth": int, "fetched_at": str}
+# Ticket 05: a store made before `store` existed gains it; its runs are all bulk loads.
+MIGRATE = """
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS store VARCHAR DEFAULT 'bulk';
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS store_file VARCHAR;
+"""
+RUNS_INSERT = (
+    "INSERT INTO runs (run_id, started_at, finished_at, start_urls, scope, pages, wall_seconds, store, store_file) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
 
 class FeedError(ValueError):
@@ -124,6 +135,7 @@ def connect(db: Path, *, read_only: bool = False) -> duckdb.DuckDBPyConnection:
         db.parent.mkdir(parents=True, exist_ok=True)
         con = duckdb.connect(str(db))
         con.execute(SCHEMA)
+        con.execute(MIGRATE)
     con.execute("SET TimeZone = 'UTC'")  # Printed times read the same on any host.
     return con
 
@@ -162,18 +174,7 @@ def load(db: Path, manifest: dict[str, Any], feed: Path) -> tuple[int, FeedCheck
             if pages != check.unique_urls:
                 msg = f"loaded {pages} pages but the feed has {check.unique_urls} unique URLs; rolled back"
                 raise FeedError(msg)
-            con.execute(
-                "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [
-                    run_id,
-                    _ts(manifest.get("started_epoch")),
-                    _ts(manifest.get("finished_epoch")),
-                    manifest["start_urls"],
-                    json.dumps(manifest["scope"]),
-                    pages,
-                    manifest.get("wall_seconds"),
-                ],
-            )
+            con.execute(RUNS_INSERT, _runs_row(manifest, pages, "bulk", db))
             con.execute("COMMIT")
         except BaseException:
             con.execute("ROLLBACK")
@@ -185,6 +186,49 @@ def load(db: Path, manifest: dict[str, Any], feed: Path) -> tuple[int, FeedCheck
     finally:
         con.close()
     return pages, check
+
+
+def _runs_row(manifest: dict[str, Any], pages: int, kind: str, file: Path) -> list[Any]:
+    return [
+        manifest["run_id"],
+        _ts(manifest.get("started_epoch")),
+        _ts(manifest.get("finished_epoch")),
+        manifest["start_urls"],
+        json.dumps(manifest["scope"]),
+        pages,
+        manifest.get("wall_seconds"),
+        kind,
+        str(file),
+    ]
+
+
+def record_per_item(db: Path, manifest: dict[str, Any], pulled: Path) -> int:
+    """Ticket 05: check the pulled per-item file and record its run in the host store's runs table.
+
+    The file must hold this run's runs row, which the pipeline writes only at close, and as many pages as
+    that row says; otherwise nothing is recorded. Returns the page count."""
+    run_id = manifest["run_id"]
+    item = connect(pulled, read_only=True)
+    try:
+        found = item.execute("SELECT pages, store FROM runs WHERE run_id = ?", [run_id]).fetchall()
+        rows = item.execute("SELECT count(*), count(DISTINCT url) FROM pages WHERE run_id = ?", [run_id]).fetchall()[0]
+        others = item.execute("SELECT count(*) FROM pages WHERE run_id <> ?", [run_id]).fetchall()[0][0]
+    finally:
+        item.close()
+    if found != [(rows[0], "per-item")] or rows[0] != rows[1] or others:
+        msg = (f"{pulled}: runs row {found}, pages {rows[0]} ({rows[1]} distinct URLs), {others} rows of other runs;"
+            " a file the pipeline did not close holds no runs row; nothing recorded")
+        raise FeedError(msg)
+    con = connect(db)
+    try:
+        if con.execute("SELECT count(*) FROM runs WHERE run_id = ?", [run_id]).fetchall() != [(0,)]:
+            msg = f"run {run_id} is already in {db}; nothing recorded"
+            raise FeedError(msg)
+        con.execute(RUNS_INSERT, _runs_row(manifest, rows[0], "per-item", pulled))
+        con.execute("CHECKPOINT")
+    finally:
+        con.close()
+    return rows[0]
 
 
 def size(db: Path) -> int:
@@ -216,15 +260,23 @@ def _table(con: duckdb.DuckDBPyConnection, query: str, params: list[Any] | None 
     return "\n".join(out)
 
 
-def summary(db: Path, run_id: str) -> str:
-    """The run as the store holds it, read back from DuckDB after a CHECKPOINT."""
+def summary(db: Path, run_id: str, pages_db: Path | None = None) -> str:
+    """The run as the store holds it, read back from DuckDB after a CHECKPOINT. With `pages_db` (ticket
+    05's pulled per-item file), the pages are read from that file and the runs row from `db`."""
+    runs_con = connect(db, read_only=True)
+    try:
+        found = runs_con.execute(
+            "SELECT pages, wall_seconds, store FROM runs WHERE run_id = ?", [run_id],
+        ).fetchall()
+    finally:
+        runs_con.close()
+    if not found:
+        msg = f"run {run_id} is not in {db}"
+        raise FeedError(msg)
+    run = found[0]
+    db = pages_db or db
     con = connect(db, read_only=True)
     try:
-        found = con.execute("SELECT pages, wall_seconds FROM runs WHERE run_id = ?", [run_id]).fetchall()
-        if not found:
-            msg = f"run {run_id} is not in {db}"
-            raise FeedError(msg)
-        run = found[0]
         rows, distinct, html_bytes, with_html = con.execute(
             "SELECT count(*), count(DISTINCT url), coalesce(sum(strlen(html)), 0), count(html) "
             "FROM pages WHERE run_id = ?",
@@ -233,6 +285,7 @@ def summary(db: Path, run_id: str) -> str:
         lines = [
             f"run {run_id}: {rows} pages in `pages` ({distinct} distinct URLs), runs.pages = {run[0]}"
             + ("" if rows == run[0] else "  MISMATCH"),
+            f"store kind: {run[2]}; pages read from {db}",
             f"wall time: {run[1]:.1f} s (guest clock, wrapper start to Scrapy exit)"
             if run[1] is not None
             else "wall time: not recorded",
@@ -255,7 +308,7 @@ def runs(db: Path) -> str:
     try:
         return _table(
             con,
-            "SELECT run_id, started_at, finished_at, pages, round(wall_seconds, 1) AS wall_s, start_urls, scope "
+            "SELECT run_id, store, started_at, finished_at, pages, round(wall_seconds, 1) AS wall_s, start_urls, scope "
             "FROM runs ORDER BY started_at, run_id",
         )
     finally:

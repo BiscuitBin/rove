@@ -14,6 +14,7 @@ from scrapyproto import state
 MACHINE_NAME = "scrapy-proto"
 IMAGE = "python:3.12"
 SCRAPY_VERSION = "2.20.0"  # A guest pin, never a host dependency.
+DUCKDB_VERSION = "2.0.0"  # Ticket 05's guest pin: the host's, from uv.lock, so both read one file format.
 # Without target="local" the SDK may address the cloud.
 LOCAL = ConnectOptions(target="local")
 # Explicit: the engine's defaults are 4 vCPU, 8 GiB, 20 GiB storage and a 10 GiB overlay, and
@@ -91,6 +92,22 @@ def install_scrapy(mach: Machine) -> str:
         msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"
         raise RuntimeError(msg)
     return r.stdout.strip()[-800:]
+
+
+def duckdb_version(mach: Machine) -> str | None:
+    """The DuckDB version the guest's Python imports, or None when it has none (ticket 05's per-item path)."""
+    r = mach.exec(["python", "-c", "import duckdb; print(duckdb.__version__)"], ExecOptions(timeout=CHECK_TIMEOUT_S))
+    return r.stdout.strip() if r.exit_code == 0 else None
+
+
+def install_duckdb(mach: Machine) -> str:
+    """Ticket 05: pip-install the host's DuckDB pin onto the machine's disk. Reaches the network."""
+    argv = ["pip", "install", "--no-input", "--root-user-action=ignore", f"duckdb=={DUCKDB_VERSION}"]
+    r = mach.exec(argv, ExecOptions(timeout=INSTALL_TIMEOUT_S))
+    if r.exit_code != 0:
+        msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"
+        raise RuntimeError(msg)
+    return r.stdout.strip()[-2000:]
 
 
 def _one_line(reason: object) -> str:

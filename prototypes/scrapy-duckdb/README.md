@@ -74,7 +74,9 @@ uv run scrapyproto crawl --start-url https://example.com --max-pages 25   # tick
 uv run scrapyproto runs
 uv run scrapyproto sql "select status, count(*) from pages group by 1"
 uv run scrapyproto crawl --start-url URL --exclude 'glob' --dry-run        # ticket 04
+uv run scrapyproto vm install-duckdb                     # ticket 05: guest DuckDB pin (network)
 uv run scrapyproto crawl --start-url URL --store per-item                 # ticket 05
+uv run python bench_queries.py bench --urls-from F --scratch D F1 F2      # ticket 05
 uv run scrapyproto vm down                               # stop; `vm up` reconnects
 uv run scrapyproto vm destroy                            # delete the machine and the state file
 ```
@@ -575,3 +577,149 @@ from the site before this run. What happened to each guess:
 **Paths now run live.** The redirect scope check in Guard (Workspace, once), the shortest-depth
 fix (`proto/links/depth_lowered` 21 and 17) and `too_deep` (Graph, 360). Still not run live:
 `redirect_to_fetched` and the `fetched_via_redirect` skip.
+
+### Ticket 05: per-item DuckDB against the bulk load
+
+**This comparison rests on 25 pages.** They are ticket 03's cached crawl, replayed. At this size the
+DuckDB study's findings, made on 130,880 pages, are neither confirmed nor contradicted by anything
+below.
+
+`crawl --store per-item` runs the same spider with an item pipeline, `DuckDBPipeline`. It inserts each
+page, as it arrives, into `/out/scrapyproto/runs/<run_id>/pages.duckdb` on the guest disk, one autocommit
+`INSERT OR IGNORE` per page, using the host store's schema (`html VARCHAR USING COMPRESSION ZSTD`).
+Extension autoload and autoinstall are off, so DuckDB fetches nothing. No feed is written. At close
+the pipeline writes the file's `runs` row, then runs `CHECKPOINT` and closes the connection. Scrapy
+calls a pipeline's `close_spider` before it sends `spider_closed` (`engine.close_spider_async`, read in
+the guest, `logs/05-03`), so all of this lands before the spider's `closed` handler. That handler reads
+`ru_maxrss` and dumps the stats. The host then lists the run directory and refuses to pull when
+`pages.duckdb.wal` exists. Otherwise it reads the file with `read_file`, checks the byte count against
+the guest's `stat`, and writes it to `ai_tmp/scrapy-duckdb/<run_id>-per-item.duckdb`. It refuses to
+record a file that has no `runs` row for the run, or whose page count differs, and refuses to pull
+at all when the stats show a lost page (`proto/pages` is not inserted plus duplicates, or an insert
+failed: Scrapy logs a pipeline error and crawls on). Otherwise it records the
+run in the host store's `runs` table with `store = 'per-item'`, and prints the summary from the pulled
+file. `runs` gained `store` and `store_file`; the older runs read `bulk` (`logs/05-15`: 14 bulk, 5 per-item). Guest DuckDB is 2.0.0, the host's pin,
+installed by `scrapyproto vm install-duckdb` (the cp312 abi3 manylinux aarch64 wheel, 21.7 MB, 1.25 s,
+`logs/05-pip-duckdb.txt`).
+
+**The runs.** Five replays per path, alternating bulk and per-item (`logs/05-replay-{bulk,per-item}-{1..5}.txt`).
+Each one ran from `prototypes/scrapy-duckdb`, through the timing harness:
+
+```sh
+uv run --offline python bench_queries.py wall -- uv run --offline scrapyproto crawl \
+    --start-url https://learn.microsoft.com/en-us/graph/api/overview --max-pages 25 --path-prefix / \
+    --replay --store bulk    # or --store per-item
+```
+
+This is ticket 03's seed and cap plus `--replay`. It also needs `--path-prefix /`, which reproduces 03's
+host-only scope: since ticket 04, the default prefix drops 03's lifecycle page and the replay then takes
+cache misses. Every one of the ten runs closed `closespider_itemcount` with `proto/pages 25`,
+`item_scraped_count 25`, `downloader/request_count 27`, `downloader/response_count 27` and
+`httpcache/hit 27`. No stats file has `httpcache/firsthand`, `miss` or `ignore` (`logs/05-06`, `logs/05-15`). All 27
+responses, robots.txt included, came from the cache, so **neither path made a site request**.
+`scrapyproto runs` lists the five per-item runs with store `per-item` (`logs/05-09`). A per-item run's
+output, trimmed:
+
+```text
+proto/ru_maxrss_kib: 163188
+proto/store/checkpoint_s: 0.004872
+proto/store/closed: 1
+proto/store/insert_s_max: 0.004915
+proto/store/insert_s_total: 0.060357
+proto/store/rows: 25
+proto/store/wal_after_close: False
+[pull] /out/scrapyproto/runs/20261107T120906Z-f4bb/pages.duckdb -> .../20261107T120906Z-f4bb-per-item.duckdb: 1323008 bytes, the guest's size
+[record] runs row for 20261107T120906Z-f4bb (store per-item, 25 pages) in .../prototype.duckdb
+run 20261107T120906Z-f4bb: 25 pages in `pages` (25 distinct URLs), runs.pages = 25
+store kind: per-item; pages read from .../20261107T120906Z-f4bb-per-item.duckdb
+```
+
+**Same pages.** Each of the five pairs was compared with `bench_queries.py compare` (`logs/05-08`):
+the bulk run in `prototype.duckdb` against its per-item file, and the isolated bulk file against the
+per-item file. Every pair has 25 rows on each side, the same 25 URLs, the same `content_hash` set
+and the same `(url, content_hash, md5(html))` set. So does 03's live run `20261107T111039Z-c29b`
+against the first per-item file. Every file stores `html` in a ZSTD segment, plus one Constant segment.
+
+**The table.** Five runs per path for the run rows. Seven measured runs per query and file, after one
+discarded warm-up, for the query rows. Each cell is the median, then the range in brackets.
+
+| Measure | bulk | per-item |
+| --- | --- | --- |
+| Wall time of the run, host process start to summary printed | 5.275 s [5.270 to 5.298] | 5.251 s [5.243 to 5.266] |
+| Beside it: guest wall, wrapper start to Scrapy exit | 0.328 s [0.293 to 0.422] | 0.424 s [0.400 to 0.464] |
+| Beside it: host, done marker seen to summary printed | 0.14 to 0.15 s | 0.07 to 0.08 s |
+| Peak RSS of the spider process in the guest | 88.7 MiB [88.68 to 88.74] | 160.1 MiB [159.4 to 160.6] |
+| Store file size after `CHECKPOINT` | 1323008 bytes, all 5 | 1323008 bytes, all 5 |
+| Host-side point lookup by URL (25 lookups): time | 24.9 ms [24.6 to 26.5] | 24.5 ms [22.8 to 25.3] |
+| Host-side point lookup by URL: peak RSS | 66.3 MiB [66.2 to 66.5] | 66.3 MiB [66.2 to 66.6] |
+| Host-side full scan of `html`: time | 14.1 ms [13.0 to 14.4] | 14.0 ms [13.1 to 14.5] |
+| Host-side full scan of `html`: peak RSS | 68.4 MiB [68.2 to 68.5] | 68.4 MiB [68.2 to 68.4] |
+
+How each number was taken, one line each:
+
+- **Wall time:** `bench_queries.py wall` stamps `perf_counter` before it spawns `uv run --offline scrapyproto
+  crawl ...` and again when the summary's `store:` line arrives. The host polls the guest every 5 s, so
+  both paths land at about 5 s, and this row cannot tell them apart.
+- **Guest wall:** `started.at` to `finished.at`, written by the guest wrapper around `scrapy runspider`
+  (guest clock).
+- **Host after the done marker:** the `crawl` command's own `[time] host:` line, from `time.monotonic`.
+  For bulk this is the feed pull plus the load; for per-item, the `.duckdb` pull plus the check and the record.
+- **Peak RSS in the guest:** `resource.getrusage(RUSAGE_SELF).ru_maxrss` (KiB on Linux, shown here in
+  MiB), read in the spider's `closed` handler inside the `scrapy runspider` process. That is after the
+  pipeline's CHECKPOINT and close, and it is not the guest agent's figure. Scrapy's `MEMUSAGE_ENABLED`
+  is on for both paths, but its `memusage/max` samples only at engine start and then every 60 s. On a
+  run of under 1 s that is the start-up figure: 80.4 MiB for bulk and 120.0 to 120.4 MiB for per-item,
+  across the five runs (`logs/05-15`).
+- **Store size:** `stat` bytes with no `.wal` beside the file. For per-item, the pulled file. For bulk,
+  the figure is isolated from the other runs in `prototype.duckdb`. `scrapyproto load <run_id> --db
+  <run_id>-bulk.duckdb` reloads that run's pulled feed into a fresh file with the same loader and its
+  CHECKPOINT (`logs/05-07`). Each file then holds one run's 25 pages and its one `runs` row, like the
+  per-item file. DuckDB allocates 256 KiB blocks, so this row counts blocks: 5 in each file, none free
+  (`pragma_database_size`). An offline probe (`logs/05-12`) loaded the same 25 rows into four scratch
+  files. It shows that the `runs` row alone costs 2 of the 5 blocks: 798720 bytes without it and
+  1323008 with it, whether or not an explicit CHECKPOINT ran before the close. So at 25 pages this row
+  cannot tell the two write paths apart.
+- **Point lookup:** a fresh `python bench_queries.py --child point` process. It opens the file
+  read-only, runs `SELECT html FROM pages WHERE url = ?` for each of the run's 25 URLs and hashes each
+  `html`. The time runs from before the connect to after the close, and includes about 10 ms of open in
+  every cell. The process then reports its own `ru_maxrss` (bytes on macOS). A child that only imports
+  DuckDB peaks at 38.8 MiB.
+- **Full scan:** the same, with `SELECT html FROM pages`, fetched 64 rows at a time, every value hashed.
+- **Equal warmth:** both files sat on the same host disk. Each (query, file) pair had one discarded
+  warm-up child first. Each measured round then ran both files, alternating which went first
+  (`logs/05-10`). This is the DuckDB study's method, with seven runs instead of its second-of-two.
+
+**Sharp edges of the per-item path.** These were measured offline on the host with DuckDB 2.0.0, using
+the per-item file's own 25 rows (`bench_queries.py edges`, `logs/05-11`), or read from the replays' stats.
+
+- **One writer per file.** While a writer holds the file, a second read-write open fails with `IO
+  Error: Could not set lock on file ... Conflicting lock is held`, and so does a read-only open. The
+  host cannot read a per-item file while the spider is running. Verdict: one file per run, in the run's
+  own directory, held by the one `scrapy runspider` that the crawl lock allows; the host pulls only after
+  the done marker. Two spiders sharing one file, or a host reading progress live, would need a
+  different store. The progress line already counts feed lines, so on this path it reads 0.
+- **The pipeline blocks the reactor.** `process_item` is synchronous, so Twisted waits for each insert.
+  Over the five replays the 25 inserts took 0.049 to 0.060 s in total, at most 5 ms for one. CHECKPOINT
+  took 4 to 5 ms and the open 11 to 18 ms. Against the 1 s download delay that is negligible at this
+  page size. Not measured: larger pages, more pages, or a slow disk. The workaround, if it grows, is
+  `deferToThread` for a single writer thread, or batching rows into one transaction per N items.
+- **A crashed spider.** A writer SIGKILLed after 25 autocommit inserts, before its `runs` row and before
+  CHECKPOINT, leaves `pages.duckdb` at 12288 bytes with a `pages.duckdb.wal` of 3011313 bytes. The
+  `.duckdb` copied alone, which is what pulling the one file would get, has no `pages` table at all
+  (`Catalog Error: Table with name pages does not exist`). Opened with its WAL beside it, it replays
+  all 25 pages and 0 `runs` rows. A read-write open then folds the WAL in on close, giving 798720 bytes
+  and no WAL. The host can tell, at three points:
+  - The stats file lacks `proto/store/closed`, if Scrapy died before `closed` ran. A SIGKILL also
+    leaves no stats file, so `crawl` exits 1 without pulling (by the code; this path was not run).
+  - The guest listing shows `pages.duckdb.wal`, so `pull_store` refuses.
+  - The pulled file has no `runs` row for the run, so `record_per_item` refuses.
+
+  Verdict: a crash loses nothing that the guest's WAL holds, but a single-file pull loses all of it.
+  The recovery is to open the guest file read-write in the guest, which replays the WAL, before any
+  pull. That recovery is not built.
+
+  Not measured: a crash in the guest itself (only the host probe ran), a crash during CHECKPOINT, and
+  a `vm down` mid-run.
+- **A gentler close.** A writer that closes without an explicit CHECKPOINT still leaves no WAL (798720
+  bytes, `logs/05-11` part 1), because DuckDB checkpoints on a clean close. The explicit CHECKPOINT is
+  kept so that the stats can time it.
