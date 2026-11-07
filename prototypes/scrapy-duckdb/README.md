@@ -151,8 +151,280 @@ same command and plays the three roles with its own subtasks.
 
 ## Verdict
 
-Ticket 06 writes the final Verdict. Until then, the rungs, timings and sample runs from
-tickets 01 to 05 accumulate here as each lands.
+Dated 2026-11-07, written by ticket 06 from the runs that tickets 01 to 05 recorded. No new run
+was made for it. The per-ticket sections after it are the evidence it cites, and each number below
+appears there or in the log it names (`ai_tmp/scrapy-duckdb/logs/`, gitignored). A sentence marked
+**inference** is a reading of the evidence, not a measurement. Anything not measured is named as
+not measured.
+
+### Recommendations
+
+1. **Scrapy in a smol sandbox as the engine of the http fetch tier: candidate with conditions.**
+   What was shown: Scrapy 2.20.0 installed once into a persistent `python:3.12` microVM, survived
+   every stop and reconnect, and ran three live crawls under polite defaults. One crawl was 25
+   pages of Microsoft Graph. Two were 200 pages each, of Graph and Google Workspace. Each was run
+   from a fresh host process with `exec(background=True)` and a polled done marker. Both 200-page
+   runs filled their cap with status 200 pages and were ended by the spider's own cap, with robots.txt
+   obeyed and no throttling. Every replay that was meant to stay offline made no site request. The
+   conditions:
+   - **The guest run is detached and watched, never a blocking `exec`.** An `exec` timeout
+     SIGKILLs the command tree, and `exec` truncates at 11 MiB per stream with no flag (ticket 01).
+     So the crawl must run in the background, write its output to a guest file, leave a done
+     marker, and close itself with `CLOSESPIDER_TIMEOUT`. A real run being closed by
+     `CLOSESPIDER_TIMEOUT` is not measured. The host's deadline, TERM and KILL path has not run.
+   - **rovo owns the politeness and scope code, not Scrapy's defaults.** That means the page cap in
+     the spider, the exact-host `Guard`, robots failing closed, a delay with no jitter, remote control
+     off, a redirect scope check and shortest-depth tracking. Each one replaces a Scrapy 2.20
+     default or behaviour that this prototype found too loose for a polite, bounded crawl (sharp
+     edges below).
+   - **A cache policy is decided before a live crawl relies on the cache.** The guest HTTP cache
+     never expires, so a "live" crawl serves every URL it already holds without fetching it
+     (ticket 04: 26 of Graph's 202 downloads were cache hits). rovo's revalidation rules are not
+     built or measured here.
+   - **The lifecycle paths that never ran are run before anything depends on them.** `vm destroy`,
+     the `vm up` create path that writes the generation label, and a cold image pull are listed
+     under "What this prototype did not exercise".
+   - **Nothing in the SDK serialises two processes on one machine.** A `vm down` from another shell
+     kills a running crawl. The guest crawl lock refuses a second `crawl`, but its `busy` and `stale`
+     branches have not run live. rovo needs one owner per machine or its own host-side lock.
+   - **The image is pinned by digest.** `python:3.12` floats and no digest was recorded.
+
+   **Inference:** at the 1 s delay the crawl rate is set by politeness, not by the sandbox. Both
+   200-page crawls sat at about one download a second, so the sandbox's own overhead did not show.
+   What it costs at a higher rate is not measured.
+
+2. **DuckDB as the store of a run's fetched pages: candidate with conditions, as a store bulk-loaded
+   from the run's feed after the run. The per-item path is not part of the recommendation.** What
+   was shown: the bulk path loaded every recorded run transactionally, refused a bad feed whole, and
+   read back the same pages. That covers ticket 03's 25 pages and ticket 04's two 200-page runs,
+   with 12346775 and 60636097 bytes of HTML. The per-item path stored the same 25 pages as the bulk
+   path in each of five pairs. The conditions:
+   - **One writer per file, written after the run.** On the per-item path, a writer's lock
+     refused a second read-write open and a read-only open too (ticket 05). The host cannot read a
+     run's pages while the spider writes them.
+   - **The decision does not rest on this prototype's size or speed numbers.** Its comparison
+     rests on 25 pages, where both files are five 256 KiB blocks and the `runs` row alone costs two
+     of them. Disk, memory and write cost at a crawl's scale come from the DuckDB study or from a
+     new measurement, not from the table below.
+   - **The per-item path is not adopted.** Its own evidence does not separate it from the bulk
+     load. It matched bulk at 25 pages, and it adds the one-writer lock, a reactor-blocking insert, a
+     160.1 MiB spider against 88.7 MiB, and a crash that leaves the pages only in the WAL. A
+     single-file pull loses all of them. The recovery, a read-write open in the guest before the
+     pull, is described but not built. Adopting it would need a comparison on the 200-page caches,
+     and that recovery built and run.
+
+   **Not compared here:** SQLite, or any other store, against DuckDB. Whether DuckDB should be the
+   run's working store at all is the DuckDB study's question, not this one's (see the reading under
+   the table).
+
+### The setup
+
+- **Host:** macOS 26.4 (build 25E246) on an Apple M5 Pro, 18 cores, 64 GiB (`sw_vers`, `sysctl`).
+  Host CPython 3.15.0, uv's pick under `requires-python = ">=3.13"`.
+- **Pins:** `smolmachines` 1.32.4, DuckDB 2.0.0 and typer 0.27.3 on the host (`uv.lock`). Scrapy
+  2.20.0 on guest Python 3.12.16. DuckDB 2.0.0 in the guest too, the cp312 abi3 manylinux aarch64
+  wheel (ticket 05).
+- **The machine:** one persistent, detached, networked machine, `scrapy-proto`, created from
+  `python:3.12` with `ResourceSpec(cpus=4, memory_mb=4096, network=True, storage_gb=20,
+  overlay_gb=10)` (`logs/01-spike-first.txt`, line 1). That is what was requested at create. The
+  guest's own `nproc` and memory were not read. `df` in the guest showed 20G for `/`.
+
+### Cold and warm `vm up`
+
+- **Cold: 42.0 s, from ticket 01's spike, not from `vm up`.** `Machine.create` took 20.2 s and
+  `pip install scrapy==2.20.0` 21.8 s. The sum is the only cold figure there is. Whether the image
+  was already cached on this host at that create was not measured, so 20.2 s is not a known
+  image-pull time. `vm up`'s own create path has never run (see below). The whole spike, with a
+  deliberate 5 s wait and the 2.2 s example.com crawl, took 51.0 s.
+- **Warm: 0.12 to 0.32 s from stopped to `running`, across 12 `vm up` runs in tickets 02 to 05.**
+  The Scrapy version check after it took 0.29 to 0.39 s. No `pip` ran. The `[time]` lines time
+  `Machine.connect` and `state()` only. Interpreter and `uv run` start-up were not measured.
+
+### Feed round trip and `exec`
+
+- **`read_file`, guest to host:** a 20971520-byte random file, read nine times, matched its hash
+  every time, at 0.094 to 0.122 s (171.6 to 223.4 MB/s). The 187-byte spike feed took 0.003 s.
+  Ticket 04's real feeds, 14870433 bytes for Graph and 76287696 for Workspace on the host, were
+  pulled and loaded without error, but their pull was not timed. `write_file` speed was not measured.
+- **Blocking `exec`** hands back output only at exit, and ran 660 s with no implicit timeout. A
+  longer run was not measured. A timeout does not raise. It returns exit 124 and kills the command
+  tree with no graceful close, so a `TERM` trap never ran. Output stops at 11534336 bytes on stdout
+  (11542528 on stderr in its one measurement). The writer gets SIGPIPE, `exec` gives no truncation
+  flag, and a script can still exit 0. A host SIGKILL during `exec` kills the guest command too.
+- **`exec_stream`** is live, at a constant 0.108 s lag, and ends with an `error` event at the cap.
+- **`exec(background=True)`** returned in 0.005 s and outlived a starter that exited normally. It
+  is killed by a machine `stop`, which leaves no marker. Surviving a host SIGKILL of the starter is
+  not measured. The crawls ran on this path: 26.5 s, 175.9 s and 204.9 s of guest wall time, with
+  the 30 s progress line printed live on the 200-page runs.
+
+### Crawl throughput
+
+Warm machine, polite defaults: 1 s download delay with no jitter, concurrency 2, robots.txt
+obeyed. One run per site, each capped at 200 pages (ticket 04). The rates count real downloads
+only (`httpcache/firsthand`), never cache hits.
+
+| | Graph `20261107T114236Z-46bf` | Workspace `20261107T114550Z-2a9f` |
+| --- | --- | --- |
+| Guest wall time | 175.9 s | 204.9 s |
+| Real downloads (`firsthand`) | 176, all pages | 204: 200 pages, robots.txt, three 301 hops |
+| Cache hits | 26: robots.txt, the seed's 301, 24 pages from ticket 03 | none |
+| Real downloads per minute | 60.0 | 59.7 |
+| Page downloads per minute | 60.0 | 58.6 (200 / 204.9 s, computed here) |
+| Pages stored, and status 200 among them | 200 of the 200-page cap: 100% | 200 of 200: 100% |
+| What ended the run | the spider's cap (`closespider_itemcount`, `proto/pages` 200) | the same |
+
+Of Graph's 200 status 200 pages, 24 came from ticket 03's cache and 176 from the network. Not
+measured: a site that throttles, a robots-forbidden path, a rate above the 1 s delay, and any
+crawl longer than 200 pages.
+
+### Bulk load against per-item writes
+
+Ticket 05's table, unchanged. **It rests on 25 pages**: ticket 03's cached crawl, replayed five
+times per path with no site request. Each cell is the median, then the range.
+
+| Measure | bulk | per-item |
+| --- | --- | --- |
+| Wall time of the run, host process start to summary printed | 5.275 s [5.270 to 5.298] | 5.251 s [5.243 to 5.266] |
+| Beside it: guest wall, wrapper start to Scrapy exit | 0.328 s [0.293 to 0.422] | 0.424 s [0.400 to 0.464] |
+| Beside it: host, done marker seen to summary printed | 0.14 to 0.15 s | 0.07 to 0.08 s |
+| Peak RSS of the spider process in the guest | 88.7 MiB [88.68 to 88.74] | 160.1 MiB [159.4 to 160.6] |
+| Store file size after `CHECKPOINT` | 1323008 bytes, all 5 | 1323008 bytes, all 5 |
+| Host-side point lookup by URL (25 lookups): time | 24.9 ms [24.6 to 26.5] | 24.5 ms [22.8 to 25.3] |
+| Host-side point lookup by URL: peak RSS | 66.3 MiB [66.2 to 66.5] | 66.3 MiB [66.2 to 66.6] |
+| Host-side full scan of `html`: time | 14.1 ms [13.0 to 14.4] | 14.0 ms [13.1 to 14.5] |
+| Host-side full scan of `html`: peak RSS | 68.4 MiB [68.2 to 68.5] | 68.4 MiB [68.2 to 68.4] |
+
+**Reading it against the DuckDB study.** The study measured 130,880 pages. It recommends SQLite
+with per-row zstd against a per-host dictionary, in WAL mode, as the temporary page store. One of
+its two follow-ups worth measuring is **Parquet** with zstd as an append-once archive of raw HTML written
+in bulk after a run (`RESULTS.md`, "Recommendation"). This README's question names DuckDB in that
+role, which is not what the study wrote. The study found DuckDB best on disk (12.7% of raw against
+23.2%). It also found DuckDB worst for single-row writes: five times slower than SQLite, with its
+disk advantage gone (0.57 of raw against 0.23). Its point lookups were 12.6 ms and 536 MiB against
+0.05 ms and 46 MiB. **This table, on 25 pages, can confirm or contradict none of that.** Both
+files are five blocks, so the size row cannot separate the paths. The study's single-row costs
+were measured with about 10,000 inserts into a 50,000-row base and with 500 upserts into a copy of
+the 130,880-page store. 25 rows reach neither. The wall-time row is set by the host's 5 s poll. The lookups here run at 66 MiB, with
+about 10 ms of each cell spent opening the file. That is a property of a tiny file, not evidence
+against the study's 536 MiB. What the table does show is that the two paths store identical pages.
+The per-item spider holds 71 MiB more, and its 25 inserts took 0.049 to 0.060 s in all against a
+1 s delay. That is the extent of its evidence. The one figure past 25 pages is a by-product: the
+shared `prototype.duckdb` grew by 524288 bytes when Graph's 12346775 bytes of HTML loaded, and by
+2097152 bytes for Workspace's 60636097. These are deltas on a file that already held other runs,
+whose free blocks may have been reused. They are not isolated sizes and not compression ratios.
+**Inference:** they are consistent with the study's finding that DuckDB's ZSTD compresses
+templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
+
+### Sharp edges and their workarounds
+
+#### smolmachines 1.32.4
+
+- **`Machine.__exit__` deletes the machine.** No `with` block manages one here.
+- **`Machine.connect` starts a stopped machine, and the SDK has no attach that does not start
+  one.** Reports read the state through `open` first and connect only to a machine this checkout
+  owns that is already running. A stop landing between the two still boots it. That window is
+  inferred from the code, not measured.
+- **An `open` handle cannot `exec` in a fresh process** (`expected started, got not started`). The
+  version read uses `connect`.
+- **The machine registry is host-global, and the SDK records no owner.** The workaround is a random
+  generation in a machine label and in the checkout's state file, compared through `Machine.list`.
+  The create path that writes it has not run live.
+- **`exec`'s timeout kills, its output cap truncates silently, and a host SIGKILL takes the guest
+  command with it.** The workaround is `background=True`, output to a guest log, and a done marker
+  written through a temp file and `mv`.
+- **`background=True` takes no timeout, and a `stop` leaves no marker.** Liveness checks the boot
+  id and `/proc/<pid>/cmdline` against the run, since guest pids restart low after a reboot. The
+  host has its own deadline, and `CLOSESPIDER_TIMEOUT` is the graceful guard.
+- **Nothing serialises processes.** A second process can `exec` or `stop` during a crawl, and a
+  stop interrupts an `exec` with `SmolError code=INTERRUPTED`. That was measured from a thread in
+  one process; across processes it is inference. The workaround is a guest crawl lock (a symlink
+  taken under `flock`). A `vm down` from elsewhere is still not prevented.
+- **`/tmp` is wiped by a stop.** Everything durable lives under `/out`.
+- **`start_job` and `Job` are cloud-only** by the SDK source. They were not run.
+- **What the SDK could not do:** attach to a stopped machine without starting it; record an owner;
+  serialise two clients; flag a truncated `exec`; time out a background command; tell "still
+  running" from "killed by a stop" without the caller's own markers; or run a local job.
+
+#### Scrapy 2.20.0
+
+- **`REMOTE_CONTROL_ENABLED` is on by default** and listens on a guest port. Set to `False`.
+- **`CLOSESPIDER_PAGECOUNT` counts robots.txt responses** (ticket 01), though not 301 hops
+  (ticket 04). The page cap lives in the spider, `CLOSESPIDER_ITEMCOUNT` equals the cap, and
+  `PAGECOUNT` is a loose backstop. `proto/pages` equal to the cap shows which limit ended the run.
+- **`OffsiteMiddleware` allows subdomains, and robots.txt is fetched before a later middleware
+  sees the page.** The spider's `Guard` checks the exact host before its robots exemption. That
+  fixed a review finding. No subdomain redirect occurred live.
+- **Scrapy treats an unreadable robots.txt as allowing everything.** `Guard` fails closed for a
+  missing, 429 or 5xx robots.txt. This was not met live.
+- **`DOWNLOAD_DELAY_JITTER` defaults to ±50%,** which can put a gap under 1 s. Set to 0.
+- **The HTTP cache never expires** (DummyPolicy, `EXPIRATION_SECS=0`). A live run reuses cached
+  pages, so throughput is counted from `httpcache/firsthand`. 429 and 503 are kept out of the
+  cache, so a replay of a throttled run diverges from it. That trade-off was judged in review 03-1
+  and left as it is.
+- **The FIFO frontier spends a small cap on the earliest seeds.** Workspace's Drive and Calendar
+  seeds yielded only themselves. **Inference:** several seeds do not give several sections. The
+  first depth seen is not the shortest under concurrency, so the spider tracks the shortest depth
+  per identity, redirect aliases included.
+- **Idle-issued requests skip `RefererMiddleware`.** `referrer` is set explicitly.
+- **`html` is `response.text`,** lossy for a page that is not UTF-8. `content_hash` is over the raw
+  body.
+- **`memusage/max` samples only at start and every 60 s.** The spider records `ru_maxrss` in its
+  `closed` handler.
+- **An item pipeline's exception is logged and the crawl goes on.** The host reconciles
+  `proto/pages` with the rows inserted and refuses a run that lost one.
+- **The default `--path-prefix` (the first seed's directory) changed which links a replay
+  requests.** Ticket 05's replays pass `--path-prefix /` to reproduce ticket 03's pages.
+- **INFO logging does not say which link started a redirect chain.**
+- **robots.txt `Crawl-delay` is not read,** and the User-Agent has no contact URL. Both were noted
+  for review in ticket 03 and left as they are.
+
+#### DuckDB 2.0.0
+
+- **Fetching a `TIMESTAMPTZ` needs `pytz`, and an unfinished `fetchone()` blocks further work.**
+  Displayed columns are cast to `VARCHAR`, and the code uses `fetchall()`.
+- **A writer's lock refuses every other open, read-only included.** There is one file per run, and
+  it is pulled after the done marker.
+- **A crashed writer leaves its pages only in the WAL.** The host refuses to pull when `.wal`
+  exists. The recovery is described but not built.
+- **Extension autoload and autoinstall could reach the network.** Both are off in the guest.
+- **`CHECKPOINT` can fail after `COMMIT`.** The load then warns that the run is stored, instead of
+  saying nothing was written. That was checked offline only.
+- **Sizes are counted in 256 KiB blocks,** so small runs cannot be told apart by size.
+
+### What this prototype did not exercise
+
+- **`vm destroy` has not run.** The agent's permission system refused it in ticket 02, and the
+  maintainer deferred it to the end of the prototype. `scrapy-proto` still exists, stopped.
+- **The `vm up` create path, which writes the generation label, has not run live.** Every `vm up`
+  reconnected to ticket 01's machine, which has no label. A cold image pull through `vm up` is
+  therefore not measured either.
+- **Ticket 03's two second-review fixes were checked offline only.** They write `run.json` before
+  the feed, and they warn after a `CHECKPOINT` failure. Ticket 03's live crawl ran before them.
+  Ticket 04's crawls and ticket 05's replays ran code that contains them, but on the normal path.
+  The interruption and the checkpoint failure they guard against were reproduced offline only.
+- **Ticket 04's last fix was checked offline only.** It shares the shortest depth and the expansion
+  across a page's redirect hops, and it landed after both 200-page crawls. Neither crawl reached
+  that path.
+- **Ticket 05's two fixes were checked offline, against the five replays' recorded stats.** They
+  refuse a lost insert, and they stop `bench_queries.py edges` deleting an existing directory. Both
+  landed after those replays. No crawl ran with them.
+- Also not run live: the host deadline, TERM and KILL path; the crawl lock's `busy` and `stale`
+  branches; a throttled or robots-forbidden close; `CLOSESPIDER_TIMEOUT` closing a run; the
+  `redirect_to_fetched` and `fetched_via_redirect` paths; the per-item `.wal` refusal; a crash in
+  the guest; a `vm down` mid-run; a background run surviving a host SIGKILL; an `exec` longer than
+  660 s; SIGKILL of the VM process; and a host reboot.
+
+### What a decision record citing this should not claim
+
+- That a cold `vm up` costs 42.0 s. The image-cache state is unknown, and the path was the spike's.
+- That the sandbox sustains more than 60 pages a minute. Only the 1 s delay was measured, once per
+  site, on two sites.
+- That this prototype shows DuckDB beats SQLite, or loses to it, for a run's pages. It compared
+  DuckDB with DuckDB on 25 pages.
+- That the per-item path is safe under a crash. The recovery is not built.
+- That the lifecycle is complete. `vm destroy` and the labelled create have not run.
+
+The sections below are the evidence, one per ticket, in the order the tickets landed.
 
 ### Ticket 01: the spike
 
