@@ -331,13 +331,20 @@ class Guard:
             return None
         redirects = request.meta.get("redirect_urls")
         if redirects and "proto_depth" in request.meta:
-            if SCOPE.identity(request.url) in spider.fetched:
+            target = SCOPE.identity(request.url)
+            if target in spider.fetched:
                 stats.inc_value("proto/guard/redirect_to_fetched")
                 raise IgnoreRequest(f"redirect onto a page already fetched: {request.url}")
+            own = {SCOPE.identity(u) for u in redirects}  # this chain's own hops, its origin included
+            if target in spider.requested and target not in own and request.meta.get("proto_claimed") != target:
+                stats.inc_value("proto/guard/redirect_to_requested")
+                raise IgnoreRequest(f"redirect onto a page already requested: {request.url}")
             reason = SCOPE.bounds_reason(request.url)
             if reason is not None:
                 stats.inc_value(f"proto/guard/redirect_{reason}")
                 raise IgnoreRequest(f"redirect out of scope ({reason}): {redirects[0]} -> {request.url}")
+            spider.requested.add(target)  # drain must not issue it again while this hop is in flight
+            request.meta["proto_claimed"] = target  # a retry of this hop carries it and passes
         status = spider.robots_status.get(urlsplit(request.url).netloc)
         if status is None or status >= 500 or status == 429:
             stats.inc_value("proto/guard/robots_unavailable")
@@ -415,6 +422,9 @@ class DuckDBPipeline:
         stats.set_value("proto/store/insert_s_max", round(self.insert_max_s, 6))
         if self.con is None:
             return
+        # A shorter route found after a page was stored lowers its depth (enqueue); apply it to the row.
+        for url, depth in self.crawler.spider.depth_corrections().items():
+            self.con.execute("UPDATE pages SET depth = ? WHERE run_id = ? AND url = ?", [depth, CONFIG["run_id"], url])
         rows = self.con.execute("SELECT count(*) FROM pages").fetchall()[0][0]
         self.con.execute(
             "INSERT INTO runs (run_id, start_urls, scope, pages, store, store_file) VALUES (?, ?, ?, ?, ?, ?)",
@@ -453,6 +463,7 @@ class ProtoSpider(scrapy.Spider):
         self.requested = set()  # identities a request was issued for
         self.expanded = {}  # identity -> (outlinks, page url) of a stored 200 HTML page, for re-expansion
         self.fetched = set()  # identities of every URL a page was stored for, redirect hops included
+        self.stored = {}  # stored url -> (depth written, hop identities); the first fetch wins, as in both stores
         self.in_flight = 0
         self.pages = 0
         self.issued = 0
@@ -554,6 +565,7 @@ class ProtoSpider(scrapy.Spider):
         depth = min([response.meta["proto_depth"], *(self.best_depth[h] for h in hops if h in self.best_depth)])
         for h in hops:
             self.best_depth[h] = depth
+        self.stored.setdefault(first, (depth, hops))
         yield {
             "url": first,
             "final_url": response.url,
@@ -576,6 +588,15 @@ class ProtoSpider(scrapy.Spider):
             for url in outlinks:
                 self.enqueue(url, depth + 1, response.url)
         yield from self.drain()
+
+    def depth_corrections(self):
+        """Stored URLs whose least known depth fell after their item was emitted: url -> that depth."""
+        out = {}
+        for url, (written, hops) in self.stored.items():
+            best = min(self.best_depth.get(h, written) for h in hops)
+            if best < written:
+                out[url] = best
+        return out
 
     def failed(self, failure):
         self.in_flight -= 1
@@ -603,6 +624,7 @@ class ProtoSpider(scrapy.Spider):
         stats = self.crawler.stats
         stats.set_value("proto/close_reason", reason)
         stats.set_value("proto/pages", self.pages)
+        stats.set_value("proto/depth_corrections", self.depth_corrections())
         stats.set_value("proto/requests_issued", self.issued)
         stats.set_value("proto/frontier_left", len(self.frontier))
         stats.set_value("proto/identities_fetched", len(self.fetched))
@@ -638,8 +660,8 @@ scrapy runspider {d}/{SPIDER_FILE} > {d}/crawl.log 2>&1
 code=$?
 date -u +%s.%N > finished.at
 echo $code > done.tmp && mv done.tmp done
-# Release the lock only if this run still holds it.
-[ "$(readlink {LOCK})" = "{p.run_id}" ] && rm -f {LOCK}
+# Release the lock only if this run still holds it, under the same flock acquire takes.
+{release_script(p.run_id)}
 exit $code
 """
 
@@ -691,7 +713,7 @@ ln -s {run_id} {LOCK} && echo taken
 
 
 def release_script(run_id: str) -> str:
-    return f'[ "$(readlink {LOCK})" = "{run_id}" ] && rm -f {LOCK}; true'
+    return f'( flock -w 30 9 && [ "$(readlink {LOCK})" = "{run_id}" ] && rm -f {LOCK} ) 9>{FLOCK}; true'
 
 
 def poll_script(p: Plan) -> str:
@@ -876,6 +898,10 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
             return Outcome(exit_code=code, why=f"exited {code}")
         if status.startswith("dead"):
             return Outcome(why=f"run is dead with no done marker ({status})")
+        if status.startswith("starting") and int(status.split()[1]) >= STALE_LOCK_S:
+            # pid is written before Scrapy starts; none after STALE_LOCK_S means it never ran
+            # (cd failed, run.sh never started, or a reboot first). The lock calls it stale too.
+            return Outcome(why=f"run never wrote a pid ({status}); dead, as the lock rule says")
         if now - last_progress >= PROGRESS_EVERY_S:
             say(f"[crawl] {now - t0:.0f}s: {status}, {lines.strip()} pages in the feed")
             last_progress = now

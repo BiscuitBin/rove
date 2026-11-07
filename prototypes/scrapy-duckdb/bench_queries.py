@@ -135,9 +135,19 @@ def spread(values: list[float]) -> str:
 
 
 def bench(files: list[str], urls_from: str, repeats: int, scratch: Path) -> None:
-    con = duckdb.connect(urls_from, read_only=True, config=NO_EXTENSIONS)
-    urls = [r[0] for r in con.execute("SELECT url FROM pages ORDER BY url").fetchall()]
-    con.close()
+    url_sets = []
+    for f in [urls_from, *files]:  # Every file must hold one run with one row per URL, and the same URLs.
+        con = duckdb.connect(f, read_only=True, config=NO_EXTENSIONS)
+        runs, rows, distinct = con.execute(
+            "SELECT count(DISTINCT run_id), count(*), count(DISTINCT url) FROM pages").fetchall()[0]
+        url_sets.append({r[0] for r in con.execute("SELECT url FROM pages").fetchall()})
+        con.close()
+        if runs != 1 or rows != distinct:
+            sys.exit(f"bench: {f} holds {runs} runs, {rows} rows, {distinct} URLs; isolate one run first "
+                "(scrapyproto load <run_id> --db <run_id>-bulk.duckdb)")
+    if any(s != url_sets[0] for s in url_sets):
+        sys.exit("bench: the files do not hold the same URLs; point lookups would not be like for like")
+    urls = sorted(url_sets[0])
     scratch.mkdir(parents=True, exist_ok=True)
     urls_file = scratch / "bench-urls.json"
     urls_file.write_text(json.dumps(urls))

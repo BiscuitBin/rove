@@ -184,10 +184,11 @@ def vm_install_duckdb(state_dir: StateDir = None) -> None:
             typer.echo(f"[time] pip install duckdb=={m.DUCKDB_VERSION}: {time.monotonic() - t0:.2f}s")
         after = m.duckdb_version(mach)
         typer.echo(f"guest duckdb after: {after or 'none'}")
-        if after != m.DUCKDB_VERSION:
-            _fail(f"guest duckdb is {after}, the pin is {m.DUCKDB_VERSION}", state_dir)
     except (SmolError, RuntimeError) as exc:
         _fail(exc, state_dir)
+    # Outside the try: typer.Exit is a RuntimeError, so a _fail inside it would report twice.
+    if after != m.DUCKDB_VERSION:
+        _fail(f"guest duckdb is {after}, the pin is {m.DUCKDB_VERSION}", state_dir)
     _finish(state_dir)
 
 
@@ -331,12 +332,16 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     mach = _running_or_fail(state_dir)
     typer.echo(f"[crawl] run {p.run_id}: {p.start_urls}, hosts {p.allowed_hosts}, max {p.max_pages} pages"
         + (", replay from the guest cache" if p.replay else "") + f", store {p.store}")
-    try:
-        if p.store == "per-item":
+    if p.store == "per-item":
+        try:
             found = m.duckdb_version(mach)
-            if found != m.DUCKDB_VERSION:
-                _fail(f"the guest has duckdb {found}, the pin is {m.DUCKDB_VERSION}; run "
-                    "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
+        except (SmolError, RuntimeError) as exc:
+            _fail(exc, state_dir)
+        # Outside the try: typer.Exit is a RuntimeError, so a _fail inside it would report twice.
+        if found != m.DUCKDB_VERSION:
+            _fail(f"the guest has duckdb {found}, the pin is {m.DUCKDB_VERSION}; run "
+                "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
+    try:
         c.prepare(mach, p)
         typer.echo(f"[crawl] lock: {c.acquire(mach, p)}")
         try:

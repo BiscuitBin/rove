@@ -171,6 +171,11 @@ def load(db: Path, manifest: dict[str, Any], feed: Path) -> tuple[int, FeedCheck
                 [run_id],
             )
             pages = con.execute("SELECT count(*) FROM pages WHERE run_id = ?", [run_id]).fetchall()[0][0]
+            # The spider's late depth lowerings (crawl.py depth_corrections), from the stats beside the feed.
+            stats_file = feed.with_suffix(".stats.json")
+            stats = json.loads(stats_file.read_text()) if stats_file.exists() else {}
+            for url, depth in stats.get("proto/depth_corrections", {}).items():
+                con.execute("UPDATE pages SET depth = ? WHERE run_id = ? AND url = ?", [depth, run_id, url])
             if pages != check.unique_urls:
                 msg = f"loaded {pages} pages but the feed has {check.unique_urls} unique URLs; rolled back"
                 raise FeedError(msg)

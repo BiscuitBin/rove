@@ -333,12 +333,17 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
   command with it.** The workaround is `background=True`, output to a guest log, and a done marker
   written through a temp file and `mv`.
 - **`background=True` takes no timeout, and a `stop` leaves no marker.** Liveness checks the boot
-  id and `/proc/<pid>/cmdline` against the run, since guest pids restart low after a reboot. The
-  host has its own deadline, and `CLOSESPIDER_TIMEOUT` is the graceful guard.
+  id and `/proc/<pid>/cmdline` against the run, since guest pids restart low after a reboot, once
+  the wrapper has written its pid. A run with no pid after 120 s is treated as dead, the lock's own
+  staleness rule; that branch was added in the final review, checked offline only, and no recorded
+  run reached it. The host has its own deadline, and `CLOSESPIDER_TIMEOUT` is the graceful guard.
 - **Nothing serialises processes.** A second process can `exec` or `stop` during a crawl, and a
   stop interrupts an `exec` with `SmolError code=INTERRUPTED`. That was measured from a thread in
   one process; across processes it is inference. The workaround is a guest crawl lock (a symlink
-  taken under `flock`). A `vm down` from elsewhere is still not prevented.
+  taken under `flock`). Its release takes the same `flock` too; that was added in the final review
+  and checked offline only. Every recorded run predates it, but every one logged `lock: taken` and
+  none overlapped another, so the race it closes (a run's release undoing a `stale` takeover) never
+  arose. A `vm down` from elsewhere is still not prevented.
 - **`/tmp` is wiped by a stop.** Everything durable lives under `/out`.
 - **`start_job` and `Job` are cloud-only** by the SDK source. They were not run.
 - **What the SDK could not do:** attach to a stopped machine without starting it; record an owner;
@@ -364,7 +369,8 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
 - **The FIFO frontier spends a small cap on the earliest seeds.** Workspace's Drive and Calendar
   seeds yielded only themselves. **Inference:** several seeds do not give several sections. The
   first depth seen is not the shortest under concurrency, so the spider tracks the shortest depth
-  per identity, redirect aliases included.
+  per identity, redirect aliases included. A row already stored kept the depth it was written
+  with until the final review's fix 6; that fix lowers it at close (see the Graph depth note below).
 - **Idle-issued requests skip `RefererMiddleware`.** `referrer` is set explicitly.
 - **`html` is `response.text`,** lossy for a page that is not UTF-8. `content_hash` is over the raw
   body.
@@ -405,14 +411,22 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
 - **Ticket 04's last fix was checked offline only.** It shares the shortest depth and the expansion
   across a page's redirect hops, and it landed after both 200-page crawls. Neither crawl reached
   that path.
+- **The stale-depth fix (final review, finding 6) was checked offline only.** It lowers, at
+  close, the stored depth of a page whose shorter route was found after it was stored: the per-item
+  pipeline updates its own file and the bulk load reads `proto/depth_corrections` from the stats
+  beside the feed. It landed after every crawl and replay; no run has produced that stat.
 - **Ticket 05's two fixes were checked offline, against the five replays' recorded stats.** They
   refuse a lost insert, and they stop `bench_queries.py edges` deleting an existing directory. Both
   landed after those replays. No crawl ran with them.
+- **`bench_queries.py bench` now refuses mismatched inputs; checked offline only.** Added in the
+  final review, it exits unless `--urls-from` and every benched file each hold one run, one row per
+  URL, and the same URL set. The recorded bench (`logs/05-10`) ran before it, on two files that
+  meet it (one run, 25 rows, 25 URLs each, the same set), so no recorded number changes.
 - Also not run live: the host deadline, TERM and KILL path; the crawl lock's `busy` and `stale`
   branches; a throttled or robots-forbidden close; `CLOSESPIDER_TIMEOUT` closing a run; the
-  `redirect_to_fetched` and `fetched_via_redirect` paths; the per-item `.wal` refusal; a crash in
-  the guest; a `vm down` mid-run; a background run surviving a host SIGKILL; an `exec` longer than
-  660 s; SIGKILL of the VM process; and a host reboot.
+  `redirect_to_fetched`, `redirect_to_requested` and `fetched_via_redirect` paths; the per-item
+  `.wal` refusal; a crash in the guest; a `vm down` mid-run; a background run surviving a host
+  SIGKILL; an `exec` longer than 660 s; SIGKILL of the VM process; and a host reboot.
 
 ### What a decision record citing this should not claim
 
@@ -691,10 +705,13 @@ and `--concurrency` is 1 to 4. The resolved scope is stored in `runs.scope`.
 alone. So dropping `?view=graph-rest-1.0` from the identity does not change the request or its cache
 key. What does change is which links are requested. A link whose identity was already queued or
 fetched is skipped. In the 25-page replays below, that left 438 links in the frontier against 03's
-442. A redirect hop onto an identity already fetched is dropped, and so is a hop that leaves the
-scope, even from a seed. The default `--path-prefix` is the first seed's
-directory, `/en-us/graph/api/`, which drops 03's `/en-us/lifecycle/...` page. That is why the
-replays below pass `--path-prefix /` to reproduce 03's host-only scope.
+442. A redirect hop onto an identity already fetched or requested is dropped, and so is a hop that
+leaves the scope, even from a seed. The "or requested" half (a hop onto an identity whose own request
+is still in flight, which could store one identity twice) was added in the final review and checked
+offline only; every recorded run predates it, and none of their stores holds a duplicated identity.
+The default `--path-prefix` is the first seed's directory, `/en-us/graph/api/`, which drops 03's
+`/en-us/lifecycle/...` page. That is why the replays below pass `--path-prefix /` to reproduce
+03's host-only scope.
 
 **Exclude test, no site request.** Three replays over 03's cache, on the same seed and cap
 (`logs/04-03` to `04-06`):
@@ -778,7 +795,8 @@ Summaries (`logs/04-crawl-graph.txt`, `logs/04-crawl-workspace.txt`) and full st
 | Close reason | `closespider_itemcount` | `closespider_itemcount` |
 | Pages, spider requests | 200, 200 | 200, 202 |
 | Pages by status | 200: 200 | 200: 200 |
-| Depth histogram | 0: 1, 1: 24, 2: 40, 3: 135 | 0: 4, 1: 196 |
+| Depth histogram, as stored | 0: 1, 1: 24, 2: 40, 3: 135 (12 stale, see below) | 0: 4, 1: 196 |
+| Least depth over the stored link graph | 0: 1, 1: 24, 2: 52, 3: 123 | 0: 4, 1: 196 |
 | Downloads: 200 / 301 | 201 / 1 | 201 / 3 |
 | `httpcache/firsthand` / `hit` | 176 / 26 | 204 / absent |
 | Wall (guest clock) | 175.9 s | 204.9 s |
@@ -812,8 +830,17 @@ dropped the one in-prefix variant, `overview?view=graph-rest-beta&preserve-view=
 and fell to the prefix. Redirects: only the seed redirected, so the expected many 301 hops from
 bare links did not happen in these 200 pages. Eleven bare in-prefix links (such as
 `resources/user`) were discovered and none was requested; whether they would 301 is not
-measured. Depth: the cap was not reached at depth 2 as the plan guessed: 135 pages are at depth
-3, and 360 links were refused as too deep, so `--max-depth 3` shaped which 200 pages were kept.
+measured. Depth: the cap was not reached at depth 2 as the plan guessed: 123 pages are at least
+depth 3 (135 as stored; 12 were stored before a shorter route was found), and 360 links were
+refused as too deep, so `--max-depth 3` shaped which 200 pages were kept. **Fact** (offline BFS
+from the run's seed over the stored pages' `outlinks`, with the prototype's `scope.identity_of`):
+12 Graph rows say depth 3 where the run's own link graph puts them at 2, and for each of them the
+first depth-1 page linking it was parsed later than the row. `proto/links/depth_lowered` (21)
+counted the lowering, but the row was not updated: a defect in the code these crawls ran, fixed
+afterwards and checked offline only (final review, finding 6). **Inference:** Scrapy's scheduler
+ran some depth-1 pages after their depth-3 descendants; not traced in Scrapy. The Workspace
+histogram, ticket 03's `0: 1, 1: 24` and ticket 05's replays are unaffected (nothing there can sit
+below depth 1).
 All 200 stored URLs carry `?view=graph-rest-1.0`, and 80 are `resources/` pages.
 
 **Workspace: what it threw at the scope.** Every Workspace flag was a guess; nothing was fetched
@@ -847,8 +874,9 @@ from the site before this run. What happened to each guess:
 - **Robots.** robots.txt answered 200 and no request was forbidden.
 
 **Paths now run live.** The redirect scope check in Guard (Workspace, once), the shortest-depth
-fix (`proto/links/depth_lowered` 21 and 17) and `too_deep` (Graph, 360). Still not run live:
-`redirect_to_fetched` and the `fetched_via_redirect` skip.
+fix (`proto/links/depth_lowered` 21 and 17) and `too_deep` (Graph, 360). The lowering corrected
+the frontier, but not 12 rows already stored in the Graph run; the fix for those rows came later
+and has not run live. Still not run live: `redirect_to_fetched` and the `fetched_via_redirect` skip.
 
 ### Ticket 05: per-item DuckDB against the bulk load
 
