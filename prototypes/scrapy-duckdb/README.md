@@ -400,3 +400,178 @@ error: scrapy-proto is stopped; run `scrapyproto vm up` first. Nothing was reque
 Not shown by this run: the 30 s progress line (the crawl ended first), the deadline and kill path,
 the lock's `busy` and `stale` branches, and a throttled or robots-forbidden close. The per-item
 comparison in ticket 05 rests on these 25 pages.
+
+### Ticket 04: guiding and filtering parameters
+
+`crawl` now takes the rest of the scope vocabulary: `--path-prefix`, `--include`, `--exclude`,
+`--max-depth`, `--keep-query-param`, `--delay`, `--concurrency`, `--user-agent` and `--dry-run`,
+next to 03's repeatable `--start-url` and `--allowed-host`. `src/scrapyproto/scope.py` holds the
+identity and the in-bounds test after `CrawlScope`. The host imports it for `--dry-run`, and its
+source is pasted into the rendered spider. Patterns match the identity, never the raw URL. A glob is
+`fnmatchcase` over the whole identity. A `re:` pattern is `re.search`, unanchored, so
+`re:^/user-get` never matches: the identity begins `https://`. `--delay` cannot go below 03's 1 s,
+and `--concurrency` is 1 to 4. The resolved scope is stored in `runs.scope`.
+
+**Cache identity.** The spider requests a link as discovered, with only the fragment removed, as
+03 did. The identity (kept query parameters only, sorted) is used for the scope test and dedup
+alone. So dropping `?view=graph-rest-1.0` from the identity does not change the request or its cache
+key. What does change is which links are requested. A link whose identity was already queued or
+fetched is skipped. In the 25-page replays below, that left 438 links in the frontier against 03's
+442. A redirect hop onto an identity already fetched is dropped, and so is a hop that leaves the
+scope, even from a seed. The default `--path-prefix` is the first seed's
+directory, `/en-us/graph/api/`, which drops 03's `/en-us/lifecycle/...` page. That is why the
+replays below pass `--path-prefix /` to reproduce 03's host-only scope.
+
+**Exclude test, no site request.** Three replays over 03's cache, on the same seed and cap
+(`logs/04-03` to `04-06`):
+
+```sh
+scrapyproto crawl --start-url https://learn.microsoft.com/en-us/graph/api/overview --max-pages 25 --path-prefix / --replay
+scrapyproto crawl ... --exclude '*/graph/api/user-get' --replay
+scrapyproto crawl ... --exclude 're:/user-list-(manager|directreports)$' --replay
+```
+
+| Run | Exclude | Pages | `httpcache/hit` | `miss` = `ignore` | `firsthand` |
+| --- | --- | --- | --- | --- | --- |
+| `20261107T112648Z-5382` | none | 25 | 27 | absent | absent |
+| `20261107T112700Z-f841` | glob | 24 | 26 | 26 | absent |
+| `20261107T112711Z-7b76` | `re:` | 23 | 25 | 27 | absent |
+
+`scrapyproto sql` against 03's live run `20261107T111039Z-c29b` shows the following:
+
+- **The control replay** loads the same 25 URLs.
+- **The glob replay** lacks exactly `.../graph/api/user-get?view=graph-rest-1.0`.
+- **The `re:` replay** lacks exactly `user-list-manager` and `user-list-directreports`.
+- **No replay** loads a URL that 03 did not, or a different `content_hash`.
+
+Each excluded link gave its slot back. The next frontier links, such as
+`section-post-pages?view=graph-rest-1.0`, were not in the cache. Each was dropped as a miss until
+the spider had issued its 50 requests, and it closed `finished`. No response came from the network:
+`httpcache/firsthand` is absent and every miss was ignored. The stats count the exclusions as
+`proto/links/excluded: 1` and `2`.
+
+**`CLOSESPIDER_PAGECOUNT` is now a loose backstop.** It was the cap plus the hosts. It is now
+`2 * max_pages * 3 + hosts`, 1201 for a 200-page run on one host: the at most `2 * max_pages`
+requests the spider issues, times the 3 downloads per request that `CLOSESPIDER_TIMEOUT` already
+assumes. `CLOSESPIDER_ITEMCOUNT` stays at the cap, so a run that fills the cap closes as
+`closespider_itemcount`; `proto/pages` equal to the cap is what shows the spider's own cap ended it.
+Measured on all three runs below: a 301 hop is not counted. `response_received_count` is 201
+against 202 downloads (Graph, one 301) and 201 against 204 (Workspace, three 301s), so the
+counter saw robots.txt and the pages only.
+
+**Replay after the review fixes, no site request** (`logs/04-replay-03-after-fixes.txt` and
+`04-replay-03-after-fixes-prefix-root.txt`). Ticket 03's exact command plus `--replay`, run
+`20261107T113923Z-0c5d`, loaded 24 pages, not 25: the default prefix `/en-us/graph/api/` now
+drops 03's lifecycle page (`proto/links/off_prefix: 54`), and the freed slots went to links that
+are not in the cache (`httpcache/miss 26` = `ignore 26`, closed `finished`). The same command
+with `--path-prefix /`, run `20261107T113944Z-8d7d`, matches 03: 25 pages, `httpcache/hit 27`,
+`downloader/request_count 27`, closed `closespider_itemcount`. Neither full stats file has
+`httpcache/firsthand` or any `proto/guard/redirect_*` key, and both have
+`response_status_count/301: 1`; the seed's feed row reads `overview` →
+`overview?view=graph-rest-1.0`, status 200, depth 0. So the seed's 301 passes the stricter
+redirect check. Ticket 05's replay must pass `--path-prefix /`.
+
+#### The two 200-page crawls
+
+Run from `prototypes/scrapy-duckdb` after `scrapyproto vm up`, once each, each through
+`PYTHONUNBUFFERED=1 uv run --offline`:
+
+```sh
+scrapyproto crawl --start-url https://learn.microsoft.com/en-us/graph/api/overview --max-pages 200 --path-prefix /en-us/graph/api/ --keep-query-param view --exclude 're:[?&]view=(?!graph-rest-1\.0(&|$))' --max-depth 3
+scrapyproto crawl --start-url https://developers.google.com/workspace/ --start-url https://developers.google.com/workspace/gmail/api/reference/rest --start-url https://developers.google.com/workspace/drive/api/reference/rest/v3 --start-url https://developers.google.com/workspace/calendar/api/v3/reference --max-pages 200 --path-prefix /workspace/ --keep-query-param hl --exclude 're:[?&]hl=' --max-depth 3
+```
+
+The `--dry-run` of the Graph line (`logs/04-16-dryrun-graph-final.txt`), trimmed:
+
+```text
+# scrapyproto crawl --dry-run: nothing was started and nothing was requested
+- path prefixes: a URL is in scope only when its identity's path starts with one of ['/en-us/graph/api/']
+- exclude: ['re:[?&]view=(?!graph-rest-1\\.0(&|$))']
+- max depth: 3; a link whose shortest known route is deeper is not followed
+- page cap: 200 pages, enforced in the spider; at most 400 spider requests
+- kept query parameters: ['view']; every other parameter is dropped from the
+- a seed is always in scope; a redirect hop must stay in scope (a seed's own redirect included),
+- CLOSESPIDER_TIMEOUT 1320 s; host deadline 1440 s
+  "CLOSESPIDER_PAGECOUNT": 1201,
+  "CLOSESPIDER_ITEMCOUNT": 200,
+```
+
+Summaries (`logs/04-crawl-graph.txt`, `logs/04-crawl-workspace.txt`) and full stats
+(`logs/04-18-graph-feed-and-stats.txt`, `logs/04-19-workspace-feed-and-stats.txt`):
+
+| | Graph `20261107T114236Z-46bf` | Workspace `20261107T114550Z-2a9f` |
+| --- | --- | --- |
+| Close reason | `closespider_itemcount` | `closespider_itemcount` |
+| Pages, spider requests | 200, 200 | 200, 202 |
+| Pages by status | 200: 200 | 200: 200 |
+| Depth histogram | 0: 1, 1: 24, 2: 40, 3: 135 | 0: 4, 1: 196 |
+| Downloads: 200 / 301 | 201 / 1 | 201 / 3 |
+| `httpcache/firsthand` / `hit` | 176 / 26 | 204 / absent |
+| Wall (guest clock) | 175.9 s | 204.9 s |
+| Real downloads per minute | 60.0 | 59.7 |
+| `robots_status` | 200 | 200 |
+| `proto/links`: off-host, off-prefix | 223, 100 | 280, 701 |
+| `proto/links`: excluded, too deep, depth lowered | 1, 360, 21 | absent, absent, 17 |
+| `proto/guard/redirect_off_prefix` | absent | 1 |
+| Frontier left | 357 | 1855 |
+| HTML stored | 12346775 bytes | 60636097 bytes |
+
+**Both runs reached the cap with 200s only:** 200 of 200 pages are status 200 in each, and
+`scrapyproto sql` grouping `pages` by status agrees (`logs/04-20-crawls-sql.txt`). In each the
+spider's own cap ended the run: `proto/pages` is 200, and `response_received_count` (201) is far
+below the 1201 backstop. Nothing was throttled, and robots.txt answered 200 on both hosts. Pages
+per minute is `httpcache/firsthand` over the wall time, so it counts robots.txt and 301 hops as
+downloads and leaves out Graph's 26 cache hits: 176 / 175.9 s and 204 / 204.9 s. Both sit at the
+1 s delay's ceiling of 60. The Graph hits are 03's cached robots.txt, the seed's 301 and the 24
+pages the two runs share (`sql`: 24 URLs in both runs).
+
+**Graph: what it threw at the scope.** Every on-host outlink starts with `/en-us/` (841 distinct,
+`logs/04-18`), so no locale variant appeared, and `--path-prefix /en-us/graph/api/` pins the
+locale. That prefix also kept out 100 off-prefix identities: Entra, Exchange and Graph concept
+pages under `/en-us/graph/`. The host test kept out 223 off-host identities; the most frequent hosts are
+github.com (202 distinct links), go.microsoft.com, aka.ms and techcommunity.microsoft.com.
+Inference from the hosts, not read link by link: these are the edit, feedback and footer links. Version selectors: 728 distinct outlinks carry
+`view=graph-rest-1.0`; `--keep-query-param view` keeps that in the identity, and the `re:` exclude
+dropped the one in-prefix variant, `overview?view=graph-rest-beta&preserve-view=true`
+(`proto/links/excluded: 1`; `Scope.verdict` on that URL offline returns `excluded`). The other
+`view=` values (`o365-worldwide`, `exchserver-2019`, `odsp-graph-online`) are on other doc sets
+and fell to the prefix. Redirects: only the seed redirected, so the expected many 301 hops from
+bare links did not happen in these 200 pages. Eleven bare in-prefix links (such as
+`resources/user`) were discovered and none was requested; whether they would 301 is not
+measured. Depth: the cap was not reached at depth 2 as the plan guessed: 135 pages are at depth
+3, and 360 links were refused as too deep, so `--max-depth 3` shaped which 200 pages were kept.
+All 200 stored URLs carry `?view=graph-rest-1.0`, and 80 are `resources/` pages.
+
+**Workspace: what it threw at the scope.** Every Workspace flag was a guess; nothing was fetched
+from the site before this run. What happened to each guess:
+
+- **Seeds.** All four answered 200 with no redirect. Breadth first, the cap went to the first
+  seeds' links: 157 pages have the Gmail reference as referrer and 38 have `/workspace/`
+  (`sql` on `referrer`). No stored page has the Drive or Calendar seed as referrer, so those
+  seeds yielded only themselves. The spider issued 202 requests for 200 pages and one dropped
+  redirect; the fate of the remaining request is not recorded. Inference: a FIFO frontier spends a small cap on the
+  earliest seeds, so several seeds do not give several sections.
+- **`?hl=` locale.** No outlink carried `hl` (`logs/04-19`: no `hl` among outlink query
+  parameters), and `proto/links/excluded` is absent, so `--exclude 're:[?&]hl='` and
+  `--keep-query-param hl` did nothing on these pages. The starvation risk noted before the crawl
+  did not occur.
+- **Navigation inside the prefix.** The guess that navigation lies outside `/workspace/` was
+  wrong. The `/workspace/` hub's 38 links are product landing and site pages such as
+  `/workspace/terms`, `/workspace/support`, `/workspace/newsletters` and `/workspace/videos`; by
+  `sql`, 155 stored URLs contain `/reference` and 45 do not. No flag in the command
+  answered this. Inference, not tried since each crawl ran once: an `--include` such as
+  `*/reference*` would keep these out, while the seeds stay in scope.
+- **Off-prefix and off-host links.** The prefix kept out 701 identities, mostly older paths such
+  as `/apps-script/` and `/admin-sdk/` (`logs/04-19`), and the host test 280, such as
+  code.google.com and support.google.com. Other query parameters (`component`, `id`, `product`)
+  appeared on outlinks and were dropped from the identity by default.
+- **Redirects off the prefix.** `/workspace/resources-menu` redirected to `/workspace/resources`,
+  which is in scope and was stored. One other redirect led to `https://developers.google.com/workspace`
+  (no trailing slash), which is off `/workspace/`; Guard dropped it
+  (`proto/guard/redirect_off_prefix: 1`) and the slot went back. Which link started that chain is
+  not measured: the log runs at INFO.
+- **Robots.** robots.txt answered 200 and no request was forbidden.
+
+**Paths now run live.** The redirect scope check in Guard (Workspace, once), the shortest-depth
+fix (`proto/links/depth_lowered` 21 and 17) and `too_deep` (Graph, 360). Still not run live:
+`redirect_to_fetched` and the `fetched_via_redirect` skip.

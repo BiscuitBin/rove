@@ -233,14 +233,44 @@ def _host_paths(feeds_dir: Path, run_id: str) -> dict[str, Path]:
 
 
 @app.command("crawl")
-def crawl_cmd(  # noqa: PLR0913  the ticket's flags
+def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     start_url: Annotated[list[str], typer.Option("--start-url", help="A seed URL; repeatable.")],
     max_pages: Annotated[int, typer.Option("--max-pages", help="Pages to fetch at most, enforced by the spider.")],
     allowed_host: Annotated[
         list[str] | None, typer.Option("--allowed-host", help="Exact host to stay on; default the seeds' hosts."),
     ] = None,
+    path_prefix: Annotated[
+        list[str] | None,
+        typer.Option("--path-prefix", help="In scope only when the path starts with one; repeatable. "
+            "Default: the first seed's directory."),
+    ] = None,
+    include: Annotated[
+        list[str] | None,
+        typer.Option("--include", help="Glob, or regex when prefixed re:; when any is given a URL must match "
+            "one; repeatable."),
+    ] = None,
+    exclude: Annotated[
+        list[str] | None,
+        typer.Option("--exclude", help="Glob, or regex when prefixed re:; a match keeps the URL out; repeatable."),
+    ] = None,
+    max_depth: Annotated[int, typer.Option("--max-depth", help="Links beyond this depth are not followed.")] = (
+        c.MAX_DEPTH
+    ),
+    keep_query_param: Annotated[
+        list[str] | None,
+        typer.Option("--keep-query-param", help="A query parameter kept in the page identity; repeatable. "
+            "Every other one is dropped before scope and dedup."),
+    ] = None,
+    delay: Annotated[
+        float, typer.Option("--delay", help="Seconds between downloads; the default is the floor."),
+    ] = c.DOWNLOAD_DELAY_S,
+    concurrency: Annotated[int, typer.Option("--concurrency", help="Requests at once.")] = c.CONCURRENCY,
+    user_agent: Annotated[str, typer.Option("--user-agent", help="The User-Agent header.")] = c.USER_AGENT,
     replay: Annotated[
         bool, typer.Option("--replay", help="Serve from the guest's HTTP cache; drop anything not in it."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the resolved scope and settings, and exit; no machine call."),
     ] = False,
     render: Annotated[
         bool, typer.Option("--render", help="Print what would run in the guest, and exit; no machine call."),
@@ -251,10 +281,17 @@ def crawl_cmd(  # noqa: PLR0913  the ticket's flags
 ) -> None:
     """Crawl from the seeds inside the guest, pull the feed, bulk-load it into DuckDB, print the summary."""
     try:
-        p = c.plan(c.new_run_id(), start_url, allowed_host or [], max_pages, replay=replay)
+        p = c.plan(
+            c.new_run_id(), start_url, allowed_host or [], max_pages, replay=replay,
+            path_prefixes=path_prefix, include=include, exclude=exclude, max_depth=max_depth,
+            keep_query_params=keep_query_param, delay=delay, concurrency=concurrency, user_agent=user_agent,
+        )
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(2) from exc
+    if dry_run:
+        typer.echo(c.dry_run(p))
+        return
     if render:
         typer.echo(c.render(p))
         return
