@@ -399,8 +399,9 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
 
 ### What this prototype did not exercise
 
-- **`vm destroy` has not run.** The agent's permission system refused it in ticket 02, and the
-  maintainer deferred it to the end of the prototype. `scrapy-proto` still exists, stopped.
+- **`vm destroy` has not run.** The agent's permission system refused it in ticket 02. At the end
+  the maintainer chose to keep `scrapy-proto`, stopped, so its HTTP cache (ticket 03's 25 pages and
+  ticket 04's two 200-page crawls) stays replayable.
 - **The `vm up` create path, which writes the generation label, has not run live.** Every `vm up`
   reconnected to ticket 01's machine, which has no label. A cold image pull through `vm up` is
   therefore not measured either.
@@ -597,11 +598,11 @@ Remaining limit:
   state read and that attach boots the machine again: the SDK has no attach that does not start.
   Not measured.
 
-**`vm destroy` is deferred.** The ticket ends with `vm destroy`, but the run was refused by the
-agent's permission system as an irreversible deletion, and the maintainer chose to run it at the
-end of the prototype instead, once tickets 03 to 05 no longer need the guest's HTTP cache. Until
-then its code is read but not run, and ticket 03 reuses this machine rather than recreating it,
-so no second image pull or Scrapy install happens. The destroy sample is added when it runs.
+**`vm destroy` was not run.** The ticket ends with `vm destroy`, but the run was refused by the
+agent's permission system as an irreversible deletion. The maintainer first deferred it to the end
+of the prototype, then chose to keep `scrapy-proto` stopped so its HTTP cache stays replayable. Its
+code is read but not run, and ticket 03 reused this machine rather than recreating it, so no second
+image pull or Scrapy install happened. There is no destroy sample.
 
 ### Ticket 03: seeds to DuckDB
 
