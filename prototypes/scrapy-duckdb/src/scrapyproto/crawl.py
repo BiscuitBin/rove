@@ -717,10 +717,18 @@ def release_script(run_id: str) -> str:
 
 
 def poll_script(p: Plan) -> str:
+    """The liveness line plus a progress count. Bulk counts the feed's lines. Per-item has no feed and
+    the live DuckDB file is locked by its writer, so the count is Scrapy's own LogStats figure (INFO,
+    every 60 s): 0 until the first tick, and until the log exists."""
+    count = (
+        f"wc -l < {p.feed} 2>/dev/null || echo 0"
+        if p.store == "bulk"
+        else f"grep -o 'scraped [0-9]* items' {p.run_dir}/crawl.log 2>/dev/null | tail -n 1 | grep -o '[0-9]*' || echo 0"
+    )
     return f"""{STATUS_FN}
 st=$(run_status {p.run_id})
-lines=$(wc -l < {p.feed} 2>/dev/null || echo 0)
-echo "$st|$lines"
+count=$({count})
+echo "$st|$count"
 """
 
 
@@ -851,7 +859,7 @@ def prepare(mach: Machine, p: Plan) -> None:
     code, _, err = sh(mach, f"mkdir -p {p.run_dir} {CACHE_DIR}")
     if code != 0:
         msg = f"mkdir in the guest exited {code}: {err.strip()[-300:]}"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
     mach.write_file(f"{p.run_dir}/{SPIDER_FILE}", spider_source(p))
     mach.write_file(f"{p.run_dir}/run.sh", wrapper_source(p))
 
@@ -862,7 +870,7 @@ def acquire(mach: Machine, p: Plan) -> str:
     lines = out.strip().splitlines()
     if not lines or lines[-1] != "taken":
         msg = f"another crawl holds {LOCK} on the guest: {out.strip() or err.strip()}"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
     return out.strip()
 
 
@@ -888,10 +896,11 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
     under us, say by another process's `vm down`) propagates: nothing more can be read then."""
     deadline = time.monotonic() + closespider_timeout(p.max_pages, p.delay) + DEADLINE_GRACE_S
     last_progress = 0.0
+    unit = "pages in the feed" if p.store == "bulk" else "items scraped (Scrapy's log stats, every 60 s)"
     t0 = time.monotonic()
     while True:
         _, out, _ = sh(mach, poll_script(p))
-        status, _, lines = out.strip().rpartition("|")
+        status, _, count = out.strip().rpartition("|")
         now = time.monotonic()
         if status.startswith("done"):
             code = int(status.split()[1])
@@ -903,7 +912,7 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
             # (cd failed, run.sh never started, or a reboot first). The lock calls it stale too.
             return Outcome(why=f"run never wrote a pid ({status}); dead, as the lock rule says")
         if now - last_progress >= PROGRESS_EVERY_S:
-            say(f"[crawl] {now - t0:.0f}s: {status}, {lines.strip()} pages in the feed")
+            say(f"[crawl] {now - t0:.0f}s: {status}, {count.strip()} {unit}")
             last_progress = now
         if now > deadline:
             say(f"[crawl] host deadline passed after {now - t0:.0f}s: stopping Scrapy")
@@ -917,20 +926,23 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
 
 def pull_store(mach: Machine, p: Plan) -> tuple[bytes, str]:
     """Ticket 05: read the per-item DuckDB file back, only once it is closed. Returns the bytes and the
-    guest's listing of the run directory. Raises RuntimeError when a WAL sits beside the file (the
-    pipeline never checkpointed and closed it: a crash) or the bytes read differ from the guest's size."""
-    code, listing, err = sh(mach, f"ls -l --time-style=+%s {p.run_dir}; stat -c %s {p.guest_db}")
+    guest's `ls -l` of the run directory. Raises ProtoError when the file is missing, when a WAL sits
+    beside it (the pipeline never checkpointed and closed it: a crash) or when the bytes read differ
+    from the guest's size."""
+    # One exec: the listing, then stat's size as the last line; the exit status is stat's.
+    code, out, err = sh(mach, f"ls -l --time-style=+%s {p.run_dir}; stat -c %s {p.guest_db}")
     if code != 0:
         msg = f"no per-item store at {p.guest_db}: {err.strip()[-300:]}"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
+    listing, _, size_line = out.rstrip().rpartition("\n")
     if f"{GUEST_DB_FILE}.wal" in listing:
         msg = f"{p.guest_db}.wal exists: the pipeline did not checkpoint and close the file; not pulled"
-        raise RuntimeError(msg)
-    guest_size = int(listing.strip().splitlines()[-1])
+        raise m.ProtoError(msg)
+    guest_size = int(size_line)
     data = mach.read_file(p.guest_db)
     if len(data) != guest_size:
         msg = f"read {len(data)} bytes of {p.guest_db}, the guest says {guest_size}"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
     return data, listing
 
 

@@ -91,13 +91,6 @@ class Scope:
     def identity(self, url):
         return identity_of(url, self.keep)
 
-    def is_seed(self, url):
-        return self.identity(url) in self.seed_ids
-
-    def host_allowed(self, url):
-        ident = self.identity(url)
-        return ident is not None and (urlsplit(ident).hostname or "") in self.allowed_hosts
-
     def bounds_reason(self, url):
         """`within_bounds`, with the failing clause named. A seed is always in bounds."""
         ident = self.identity(url)

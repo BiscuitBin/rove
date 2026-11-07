@@ -31,20 +31,16 @@ def main() -> None:
     """PROTOTYPE: Scrapy in a smol microVM, pages in DuckDB. Throwaway."""
 
 
-def _one_line(reason: object) -> str:
-    return " ".join(str(reason).split())
-
-
 def _finish(state_dir: Path | None, *, failing: bool = False) -> None:
     """Print the state block, read afresh by name; an error in any field is a failed command."""
     try:
         block = m.state_block(m.open_existing(), state_dir=state_dir)
     except SmolError as exc:
-        block = m.state_block(None, _one_line(exc), state_dir)
+        block = m.state_block(None, m.one_line(exc), state_dir)
     fields = [line.split(":", 1)[-1].strip() for line in block.splitlines()]
     errors = [field for field in fields if field.startswith("error:")]
     if errors and not failing:
-        typer.echo(_one_line(errors[0]), err=True)
+        typer.echo(m.one_line(errors[0]), err=True)
     typer.echo("---- state ----")
     typer.echo(block)
     if errors or failing:
@@ -53,7 +49,7 @@ def _finish(state_dir: Path | None, *, failing: bool = False) -> None:
 
 def _fail(reason: object, state_dir: Path | None) -> NoReturn:
     """Report a failed vm command: the reason, the state block as far as it is known, exit 1."""
-    typer.echo(f"error: {_one_line(reason)}", err=True)
+    typer.echo(f"error: {m.one_line(reason)}", err=True)
     _finish(state_dir, failing=True)
     raise typer.Exit(1)
 
@@ -98,7 +94,7 @@ def _reconnect(state_dir: Path | None, was: str) -> None:
     typer.echo(f"[time] {was} to {now}: {time.monotonic() - t0:.2f}s")
     if now != "running":
         msg = f"{m.MACHINE_NAME} is {now} after connect, not running"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
     t0 = time.monotonic()
     _require_pin(mach)
     typer.echo(f"[time] scrapy check, no pip run: {time.monotonic() - t0:.2f}s")
@@ -108,12 +104,12 @@ def _require_pin(mach: Machine) -> None:
     """The guest must report the pin: a lost installation fails here rather than being repaired."""
     try:
         version = m.scrapy_version(mach)
-    except RuntimeError as exc:
+    except m.ProtoError as exc:
         msg = f"scrapy check failed: {exc}; `vm up` installs on first create only, so `vm destroy` then `vm up`"
-        raise RuntimeError(msg) from exc
+        raise m.ProtoError(msg) from exc
     if version != m.SCRAPY_VERSION:
         msg = f"guest has scrapy {version}, the pin is {m.SCRAPY_VERSION}"
-        raise RuntimeError(msg)
+        raise m.ProtoError(msg)
 
 
 @vm.command("up")
@@ -129,7 +125,7 @@ def vm_up(state_dir: StateDir = None) -> None:
             _create(state_dir)
         else:
             _reconnect(state_dir, mach.state())
-    except (SmolError, RuntimeError, OSError) as exc:
+    except (SmolError, m.ProtoError, OSError) as exc:
         _fail(exc, state_dir)
     _finish(state_dir)
 
@@ -184,11 +180,10 @@ def vm_install_duckdb(state_dir: StateDir = None) -> None:
             typer.echo(f"[time] pip install duckdb=={m.DUCKDB_VERSION}: {time.monotonic() - t0:.2f}s")
         after = m.duckdb_version(mach)
         typer.echo(f"guest duckdb after: {after or 'none'}")
-    except (SmolError, RuntimeError) as exc:
+        if after != m.DUCKDB_VERSION:
+            _fail(f"guest duckdb is {after}, the pin is {m.DUCKDB_VERSION}", state_dir)
+    except (SmolError, m.ProtoError) as exc:
         _fail(exc, state_dir)
-    # Outside the try: typer.Exit is a RuntimeError, so a _fail inside it would report twice.
-    if after != m.DUCKDB_VERSION:
-        _fail(f"guest duckdb is {after}, the pin is {m.DUCKDB_VERSION}", state_dir)
     _finish(state_dir)
 
 
@@ -237,9 +232,10 @@ def _running_or_fail(state_dir: Path | None) -> Machine:
     if now != "running":
         _fail(f"{m.MACHINE_NAME} is {now}; run `scrapyproto vm up` first. Nothing was requested.", state_dir)
     try:
-        # Running and owned: this attaches without a boot (a stop landing in between is the README's limit).
-        return m.connect_existing(state_dir)
-    except (SmolError, RuntimeError) as exc:
+        # Running and owned (checked above, once): this attaches without a boot (a stop landing in
+        # between is the README's limit).
+        return m.connect_owned()
+    except SmolError as exc:
         _fail(exc, state_dir)
 
 
@@ -335,12 +331,11 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     if p.store == "per-item":
         try:
             found = m.duckdb_version(mach)
-        except (SmolError, RuntimeError) as exc:
+            if found != m.DUCKDB_VERSION:
+                _fail(f"the guest has duckdb {found}, the pin is {m.DUCKDB_VERSION}; run "
+                    "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
+        except SmolError as exc:
             _fail(exc, state_dir)
-        # Outside the try: typer.Exit is a RuntimeError, so a _fail inside it would report twice.
-        if found != m.DUCKDB_VERSION:
-            _fail(f"the guest has duckdb {found}, the pin is {m.DUCKDB_VERSION}; run "
-                "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
     try:
         c.prepare(mach, p)
         typer.echo(f"[crawl] lock: {c.acquire(mach, p)}")
@@ -351,15 +346,27 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
             raise
         typer.echo(f"[crawl] started in the guest with background=True (pid {pid}); log {p.run_dir}/crawl.log")
         t_launched = time.monotonic()
-        outcome = c.watch(mach, p, typer.echo)
-        t_done = time.monotonic()
-        outcome = c.collect(mach, p, outcome)
-        if outcome.exit_code is None:
-            # The wrapper died before its own release; free the lock only if it still names this run.
-            c.release(mach, p)
+        try:
+            outcome = c.watch(mach, p, typer.echo)
+            t_done = time.monotonic()
+            outcome = c.collect(mach, p, outcome)
+            if outcome.exit_code is None:
+                # The wrapper died before its own release; free the lock only if it still names this run.
+                c.release(mach, p)
+        except KeyboardInterrupt:
+            # The host process was interrupted; the background run was not. Say where it stands.
+            typer.echo(
+                f"\ninterrupted on the host. Run {p.run_id} continues in the guest until it ends or "
+                f"CLOSESPIDER_TIMEOUT ({c.closespider_timeout(p.max_pages, p.delay)} s) closes it, and it "
+                f"holds the crawl lock {c.LOCK} meanwhile, so the next `scrapyproto crawl` reports busy. Its log "
+                f"and results stay in {p.run_dir} on the guest; no command pulls them (`scrapyproto load` "
+                "needs a feed on the host).",
+                err=True,
+            )
+            raise typer.Exit(130) from None
     except SmolError as exc:
         _fail(f"lost the machine during run {p.run_id} (stopped by another process?): {exc}", state_dir)
-    except RuntimeError as exc:
+    except m.ProtoError as exc:
         _fail(exc, state_dir)
     close_reason = str(outcome.stats.get("proto/close_reason", "unknown"))
     wall = (
@@ -417,6 +424,7 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
         else:
             hint = f"`scrapyproto load {p.run_id}` loads it" if outcome.feed is not None else "there is no feed"
         _fail(f"the spider did not finish cleanly ({outcome.why}, {close_reason}); not loaded, {hint}", state_dir)
+    pulled: Path | None = None
     if per_item:
         pulled = db.parent / f"{p.run_id}-per-item.duckdb"
         try:
@@ -428,17 +436,20 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
             pages = store.record_per_item(db, manifest, pulled)
         except SmolError as exc:
             _fail(f"lost the machine pulling {p.guest_db}: {exc}", state_dir)
-        except (RuntimeError, store.FeedError, duckdb.Error, OSError) as exc:
+        except (m.ProtoError, store.FeedError, duckdb.Error, OSError) as exc:
             _fail(f"per-item store not recorded: {exc}", state_dir)
         typer.echo(f"[record] runs row for {p.run_id} (store per-item, {pages} pages) in {db}")
-        summary = store.summary(db, p.run_id, pulled)
     else:
         try:
             pages, check = store.load(db, manifest, paths["jsonl"])
         except (store.FeedError, duckdb.Error, OSError) as exc:
             _fail(f"load failed, nothing written to the store: {exc}", state_dir)
         _print_load(check, pages)
-        summary = store.summary(db, p.run_id)
+    try:
+        summary = store.summary(db, p.run_id, pulled)
+    except (store.FeedError, duckdb.Error, OSError) as exc:
+        # The commit above held: the run is stored, and only the read-back failed.
+        _fail(f"run {p.run_id} is recorded in {db}, but reading it back failed: {exc}", state_dir)
     typer.echo("---- summary (read back from DuckDB) ----")
     typer.echo(summary)
     t_summary = time.monotonic()
@@ -462,11 +473,16 @@ def load_cmd(run_id: str, db: Db = store.DEFAULT_DB, feeds_dir: FeedsDir = store
         manifest = json.loads(paths["run.json"].read_text())
         pages, check = store.load(db, manifest, paths["jsonl"])
     except (store.FeedError, duckdb.Error, OSError, ValueError, KeyError) as exc:
-        typer.echo(f"error: load failed, nothing written to the store: {_one_line(exc)}", err=True)
+        typer.echo(f"error: load failed, nothing written to the store: {m.one_line(exc)}", err=True)
         raise typer.Exit(1) from exc
     _print_load(check, pages)
+    try:
+        summary = store.summary(db, run_id)
+    except (store.FeedError, duckdb.Error, OSError) as exc:
+        typer.echo(f"error: run {run_id} is recorded in {db}, but reading it back failed: {m.one_line(exc)}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo("---- summary (read back from DuckDB) ----")
-    typer.echo(store.summary(db, run_id))
+    typer.echo(summary)
 
 
 @app.command("runs")
@@ -475,7 +491,7 @@ def runs_cmd(db: Db = store.DEFAULT_DB) -> None:
     try:
         typer.echo(store.runs(db))
     except (duckdb.Error, OSError) as exc:
-        typer.echo(f"error: {_one_line(exc)}", err=True)
+        typer.echo(f"error: {m.one_line(exc)}", err=True)
         raise typer.Exit(1) from exc
 
 
@@ -485,5 +501,5 @@ def sql_cmd(query: str, db: Db = store.DEFAULT_DB) -> None:
     try:
         typer.echo(store.sql(db, query))
     except (duckdb.Error, OSError) as exc:
-        typer.echo(f"error: {_one_line(exc)}", err=True)
+        typer.echo(f"error: {m.one_line(exc)}", err=True)
         raise typer.Exit(1) from exc

@@ -104,7 +104,13 @@ def boot() -> tuple[Machine, bool] | None:
     t0 = time.monotonic()
     if existing is not None:
         say(f"{m.MACHINE_NAME} exists ({existing.state()}); connecting")
-        mach = m.connect_existing()
+        try:
+            mach = m.connect_existing()
+        except m.ProtoError as exc:
+            # The state file is here but names another generation: another checkout's machine.
+            say(str(exc))
+            say(m.state_block(existing))
+            return None
         say(f"[time] connect: {time.monotonic() - t0:.1f}s; state={mach.state()}")
         return mach, False
     say(f"creating {m.MACHINE_NAME} from {m.IMAGE} with {m.RESOURCES}")

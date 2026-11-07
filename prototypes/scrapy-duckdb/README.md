@@ -344,6 +344,13 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
   and checked offline only. Every recorded run predates it, but every one logged `lock: taken` and
   none overlapped another, so the race it closes (a run's release undoing a `stale` takeover) never
   arose. A `vm down` from elsewhere is still not prevented.
+- **A host-side interruption during the watch orphans the run.** Ctrl-C in `scrapyproto crawl`
+  stops the poller, not the guest's background run: it continues until it ends or
+  `CLOSESPIDER_TIMEOUT` closes it, holding the crawl lock meanwhile, so the next crawl reports
+  `busy` until then. Its log and results stay in the run directory under `/out`, and no command
+  pulls them (`scrapyproto load` needs a feed already on the host). Since the second review the
+  host prints where they are and exits 130; a pull or abort command would be a new ticket. Checked
+  offline only.
 - **`/tmp` is wiped by a stop.** Everything durable lives under `/out`.
 - **`start_job` and `Job` are cloud-only** by the SDK source. They were not run.
 - **What the SDK could not do:** attach to a stopped machine without starting it; record an owner;
@@ -423,6 +430,12 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
   final review, it exits unless `--urls-from` and every benched file each hold one run, one row per
   URL, and the same URL set. The recorded bench (`logs/05-10`) ran before it, on two files that
   meet it (one run, 25 rows, 25 URLs each, the same set), so no recorded number changes.
+- **The second review's fixes were checked offline only.** The per-item progress line now reads
+  Scrapy's log-stats item count from `crawl.log` instead of counting a feed that path never writes
+  (0 until Scrapy's first stats tick at 60 s); the summary read-back has its own failure message
+  (the run is recorded, the read failed); and an interrupted watch prints where the orphaned run's
+  results sit. Every recorded run predates them; no recorded run was interrupted or failed its
+  read-back.
 - Also not run live: the host deadline, TERM and KILL path; the crawl lock's `busy` and `stale`
   branches; a throttled or robots-forbidden close; `CLOSESPIDER_TIMEOUT` closing a run; the
   `redirect_to_fetched`, `redirect_to_requested` and `fetched_via_redirect` paths; the per-item
@@ -998,7 +1011,9 @@ the per-item file's own 25 rows (`bench_queries.py edges`, `logs/05-11`), or rea
   host cannot read a per-item file while the spider is running. Verdict: one file per run, in the run's
   own directory, held by the one `scrapy runspider` that the crawl lock allows; the host pulls only after
   the done marker. Two spiders sharing one file, or a host reading progress live, would need a
-  different store. The progress line already counts feed lines, so on this path it reads 0.
+  different store. The progress line cannot read the live file either, so on this path it reports
+  Scrapy's own log-stats item count (logged every 60 s, so 0 until the first tick); the recorded
+  replays ran before that change, when it counted feed lines and read 0.
 - **The pipeline blocks the reactor.** `process_item` is synchronous, so Twisted waits for each insert.
   Over the five replays the 25 inserts took 0.049 to 0.060 s in total, at most 5 ms for one. CHECKPOINT
   took 4 to 5 ms and the open 11 to 18 ms. Against the 1 s download delay that is negligible at this

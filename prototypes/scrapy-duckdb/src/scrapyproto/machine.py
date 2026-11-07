@@ -26,6 +26,14 @@ CHECK_TIMEOUT_S = 60.0
 GENERATION_LABEL = "scrapyproto-generation"
 
 
+class ProtoError(RuntimeError):
+    """A refusal or failure the prototype itself detected."""
+
+
+def one_line(reason: object) -> str:
+    return " ".join(str(reason).split())
+
+
 def create(generation: str | None = None) -> Machine:
     """Create and boot the machine; returns once the guest agent is up. Raises if the name is taken."""
     config = MachineConfig(
@@ -71,7 +79,12 @@ def connect_existing(state_dir: Path | None = None) -> Machine:
             f"{MACHINE_NAME}: no state file at {state.path(state_dir)} records this machine, "
             "another checkout's? Refusing to connect."
         )
-        raise RuntimeError(msg)
+        raise ProtoError(msg)
+    return connect_owned()
+
+
+def connect_owned() -> Machine:
+    """Attach to the named machine, starting it if stopped; callers have checked `owned`."""
     return Machine.connect(MACHINE_NAME, LOCAL)
 
 
@@ -80,7 +93,7 @@ def scrapy_version(mach: Machine) -> str:
     r = mach.exec(["scrapy", "version"], ExecOptions(timeout=CHECK_TIMEOUT_S))
     if r.exit_code != 0:
         msg = f"`scrapy version` exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-200:]}"
-        raise RuntimeError(msg)
+        raise ProtoError(msg)
     return r.stdout.strip().removeprefix("Scrapy ")
 
 
@@ -90,7 +103,7 @@ def install_scrapy(mach: Machine) -> str:
     r = mach.exec(argv, ExecOptions(timeout=INSTALL_TIMEOUT_S))
     if r.exit_code != 0:
         msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"
-        raise RuntimeError(msg)
+        raise ProtoError(msg)
     return r.stdout.strip()[-800:]
 
 
@@ -106,12 +119,8 @@ def install_duckdb(mach: Machine) -> str:
     r = mach.exec(argv, ExecOptions(timeout=INSTALL_TIMEOUT_S))
     if r.exit_code != 0:
         msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"
-        raise RuntimeError(msg)
+        raise ProtoError(msg)
     return r.stdout.strip()[-2000:]
-
-
-def _one_line(reason: object) -> str:
-    return " ".join(str(reason).split())
 
 
 def state_block(mach: Machine | None, open_error: str | None = None, state_dir: Path | None = None) -> str:
@@ -119,14 +128,14 @@ def state_block(mach: Machine | None, open_error: str | None = None, state_dir: 
     lines = [f"machine:    {MACHINE_NAME}"]
     running = False
     if open_error:
-        lines.append(f"state:      error: {_one_line(open_error)}")
+        lines.append(f"state:      error: {one_line(open_error)}")
     elif mach is None:
         lines.append("state:      (no machine)")
     else:
         try:
             current = mach.state()
         except SmolError as exc:
-            lines.append(f"state:      error: {_one_line(exc)}")
+            lines.append(f"state:      error: {one_line(exc)}")
         else:
             running = current == "running"
             lines.append(f"state:      {current}")
@@ -136,9 +145,9 @@ def state_block(mach: Machine | None, open_error: str | None = None, state_dir: 
             # this one call attaches: only to a machine this checkout owns, only when running. A stop
             # landing between the state read above and here makes this connect boot it; the SDK has
             # no attach that does not start, and the README states the limit.
-            lines.append(f"scrapy:     {scrapy_version(Machine.connect(MACHINE_NAME, LOCAL))}")
-        except (SmolError, RuntimeError) as exc:
-            lines.append(f"scrapy:     error: {_one_line(exc)}")
+            lines.append(f"scrapy:     {scrapy_version(connect_owned())}")
+        except (SmolError, ProtoError) as exc:
+            lines.append(f"scrapy:     error: {one_line(exc)}")
     elif running:
         lines.append("scrapy:     unknown (not this checkout's machine, so not attached)")
     else:
