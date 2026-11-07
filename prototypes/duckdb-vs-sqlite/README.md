@@ -69,8 +69,10 @@ The fourth command needs only the corpus, not the stores, and accepts `--populat
 first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
-build needs roughly 17 GB there: the corpus file, the five stores and the download cache.
-Rerunning a script wipes and rebuilds its outputs.
+build needs roughly 22 GB there: the corpus file, the five stores, the download cache and
+the insert benchmark's four row-sample files (5 GB), plus about 5 GB more while that
+benchmark runs, for the base store and its clone. Rerunning a script wipes and rebuilds
+its outputs, except the row samples, which the insert benchmark keeps and reuses.
 
 The prototype's Python and Markdown pass the repository gate; the data never does.
 The tickets are under `tickets/` in this directory.

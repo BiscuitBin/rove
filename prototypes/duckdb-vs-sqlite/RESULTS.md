@@ -3,7 +3,8 @@
 Measured on 2026-11-06 with the four commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python. Every number on this page comes from one run of the
-four commands below, except the tracer-bullet figures named in the first caveat:
+four commands below, except the tracer-bullet figures named in the first caveat and the
+block counts of the DuckDB probe named in the insert section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
@@ -289,9 +290,10 @@ What the tables say:
   of raw) and 191 MiB in `duckdb-zstd` (0.57), against 78 MiB (0.23) for `sqlite-zstd`;
   the batch-built 50,000-row bases are 464 MiB (default) and 871 MiB (forced ZSTD) against
   390 MiB for `sqlite-zstd`, where the bulk-loaded full corpus gave DuckDB half of
-  SQLite's bytes. A probe (one more 10,000-row batch build of each, inspected with
-  `pragma_storage_info` and `pragma_database_size`) showed one ZSTD segment per body
-  column in both, so the compression did run; but after `CHECKPOINT` more than half of
+  SQLite's bytes. A probe, done by hand rather than by a committed command (one more
+  10,000-row batch build of each through the script's `--child` mode, then
+  `pragma_storage_info` and `pragma_database_size` on the result), showed one ZSTD
+  segment per body column in both, so the compression did run; but after `CHECKPOINT` more than half of
   each file is free blocks (`duckdb-default`: 437 blocks of 256 KiB, 188 in use;
   `duckdb-zstd`: 724, 373 in use), and the forced-ZSTD store's blocks in use are twice
   the default's (93 MiB against 47 MiB) for the same segment layout. The file grows at

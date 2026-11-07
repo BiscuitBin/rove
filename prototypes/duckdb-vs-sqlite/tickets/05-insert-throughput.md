@@ -28,7 +28,8 @@ the compaction. The populated base is built once per (variant, mix) by the `batc
 inserter and cloned per run with `cp -Rc` (APFS clonefile), so each run starts from the
 same bytes; the zstd variants compress inside the timed loop.
 
-**Blocked by:** 01 (Tracer bullet on local data). Independent of 02 to 04.
+**Blocked by:** 01 (Tracer bullet on local data) and 02 (Corpus breadth), whose Common
+Crawl regime is the second row mix. Independent of 03 and 04.
 
 **Status:** done
 
