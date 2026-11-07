@@ -1,7 +1,7 @@
 """Ticket 01 spike: boot unclecode/crawl4ai directly as a smol microVM and wait for /health.
 
 Run: uv run python spike.py [--env KEY=VALUE ...] [--keep]
-Ends with stop(), not delete(): pulled layers are per machine (ticket 02 reuses the name).
+Ends with stop(), not delete(), to keep the machine's own disk (ticket 02 reuses the name).
 """
 
 import secrets
@@ -28,7 +28,7 @@ def diagnose(mach):
     run_exec(mach, ["ps", "aux"])
     run_exec(mach, ["ss", "-ltnp"])
     run_exec(mach, ["sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | head -20"])
-    run_exec(mach, ["sh", "-c", "id; hostname; ls /app 2>/dev/null | head; env | grep -i -E 'crawl|gunicorn' "])
+    run_exec(mach, ["sh", "-c", "id; hostname; ls /app 2>/dev/null | head; env | cut -d= -f1 | grep -i -E 'crawl|gunicorn'"])
     try:
         print("---- logs ----")
         print(mach.logs(tail=200))

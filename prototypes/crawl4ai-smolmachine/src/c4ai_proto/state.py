@@ -1,6 +1,7 @@
 """The prototype's state file: machine name, host port and the API token."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,11 @@ def load(state_dir: Path | None = None) -> dict[str, Any] | None:
 def save(data: dict[str, Any], state_dir: Path | None = None) -> Path:
     p = path(state_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, indent=2) + "\n")
+    # The file holds the bearer token: owner-only, including when it already exists.
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(data, indent=2) + "\n")
     return p
 
 
