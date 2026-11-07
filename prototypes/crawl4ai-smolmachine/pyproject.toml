@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crawl4ai-smolmachine-prototype"
+version = "0.0.0"
+description = "PROTOTYPE: crawl4AI booted as a Smol Machines microVM, driven from a Typer command."
+requires-python = ">=3.13"
+dependencies = [
+  # Exact: four releases shipped in one week; the prototype records one of them.
+  "smolmachines==1.32.4",
+  # rovo's range, so the prototype's command reads like rovo's.
+  "typer>=0.27.3,<0.28",
+]
+
+[project.scripts]
+c4ai = "c4ai_proto.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/c4ai_proto"]
