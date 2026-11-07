@@ -34,6 +34,19 @@ A crawl with the machine stopped or absent exits 1 before any request, naming
 `scrapyproto vm up`. A spider that exits non-zero is reported with its last lines of
 output and exits 1; the feed, if any, is still pulled.
 
+**Review:** two moments, each through the README's adversarial review loop. First,
+before the real crawl, with the spider and settings the host would render written to
+an untracked file inside `prototypes/scrapy-duckdb/` so the working-tree review reads
+them (deleted before `just check`), with the focus: would this spider make
+an impolite, unbounded or off-host request; robots, delay, concurrency, the page cap,
+the allowed hosts, redirects off the host, retries on 429 and 503, the cache capturing
+the run for replay. This moment gates the crawl: the crawl is asked for only after its
+valid findings are fixed. Second, once the bulk load and the summary work, with the
+focus: data loss between feed and store; a page in the feed but not in `pages`, a
+duplicate URL, a `runs` row without pages or pages without a `runs` row, a crash between
+pull and load, a summary that disagrees with the table, HTML that is not UTF-8, a
+spider that exits non-zero after writing a partial feed.
+
 **Blocked by:** 02 (a machine that stays up between invocations, with Scrapy in it).
 
 **Status:** ready-for-agent
@@ -48,4 +61,7 @@ output and exits 1; the feed, if any, is still pulled.
 - [ ] The crawl's real output and the summary are quoted in the README
 - [ ] `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran at both moments, the first before the crawl; the
+  hand-back lists each finding with its verdict and the reviewing model, and every
+  valid finding's fix is in the commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged

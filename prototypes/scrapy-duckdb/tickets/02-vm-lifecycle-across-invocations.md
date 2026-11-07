@@ -19,6 +19,14 @@ The machine registry is host-global while the state file is per checkout, so fol
 crawl4AI branch: an existing machine with no state file here is reported, not deleted,
 with a pointer to `vm destroy`.
 
+**Review:** one moment, through the README's adversarial review loop, once the four
+commands pass their checklist and before the samples go in the README, with the focus:
+lifecycle holes; `up` against a machine another checkout created, `destroy` with the
+state file missing or unreadable, `down` during a running `exec`, a stale state file
+after a host reboot, two `up` commands racing; anything on any path that deletes a
+machine or its disk; whether the Scrapy check in `up` can pass on a guest that lost the
+installation.
+
 **Blocked by:** 01 (the spike fixes the image, the install rung and the machine
 settings).
 
@@ -33,4 +41,7 @@ settings).
 - [ ] Every command ends with the full state block; a sample of each is in the README
 - [ ] `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran at its moment; the hand-back lists each finding
+  with its verdict and the reviewing model, and every valid finding's fix is in the
+  commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged

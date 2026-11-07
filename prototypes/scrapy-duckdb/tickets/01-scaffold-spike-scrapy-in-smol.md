@@ -70,6 +70,15 @@ worktree's gate trips on it, exclude the lockfile by path in the hook configurat
 typos and lychee, never by weakening a gate. `src/rovo/` stays untouched. `just check`
 must still end with `All checks passed and the worktree is unchanged.`
 
+**Review:** two moments, each through the README's adversarial review loop. First,
+once the spike prints the example.com item and before the README Verdict is written,
+with the focus: the machine wrapper and state file that tickets 02 to 05 build on; can a
+stop, a crash mid-`exec`, a timeout, or a second process on the same machine name lose
+the machine, its disk or the installed Scrapy; does the rung that worked persist by
+design or by luck; does anything in the spike delete what it should keep. Second, once
+the Verdict paragraph is written, with the focus: every claim traces to printed output,
+every timing was measured, and the ladder's record says what failed, not only what worked.
+
 **Blocked by:** None (can start immediately).
 
 **Status:** ready-for-agent
@@ -89,4 +98,7 @@ must still end with `All checks passed and the worktree is unchanged.`
 - [ ] The nested `uv.lock` passes the gate as committed, or is excluded by path;
   `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran at both moments; the hand-back lists each
+  finding with its verdict and the reviewing model, and every valid finding's fix is in
+  the commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged

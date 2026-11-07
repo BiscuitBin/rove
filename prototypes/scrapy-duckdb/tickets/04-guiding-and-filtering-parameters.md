@@ -35,6 +35,19 @@ feedback links, redirects off the prefix) and which flag answered each:
    `https://learn.microsoft.com/en-us/graph/api/`.
 2. The Google Workspace API reference under `https://developers.google.com/workspace/`.
 
+**Review:** two moments, each through the README's adversarial review loop. First,
+before the two 200-page crawls, with each planned crawl's `--dry-run` output written to
+an untracked file inside `prototypes/scrapy-duckdb/` so the working-tree review reads
+it (deleted before `just check`), with the focus: scope; could the
+resolved scope let a crawl leave its prefix, chase locale variants or versioned copies
+of one page, spend the cap on navigation and feedback links, or drop a page it should
+keep; does `--keep-query-param` and the normalisation match what `CrawlScope` in
+`docs/specs/mirror.allium` says about identity; does an `re:` pattern anchor the way the
+operator expects. This moment gates the crawls: they are asked for only after its valid
+findings are fixed. Second, once both crawls are recorded, with the focus: every claim
+in the two README notes traces to the feed or the summary, and the flags cited are the
+ones in the command lines quoted.
+
 **Blocked by:** 03 (the crawl command, the store and the HTTP cache).
 
 **Status:** ready-for-agent
@@ -50,4 +63,7 @@ feedback links, redirects off the prefix) and which flag answered each:
   redirects and errors mixed in, and the README says so
 - [ ] `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran at both moments, the first before the crawls;
+  the hand-back lists each finding with its verdict and the reviewing model, and every
+  valid finding's fix is in the commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged

@@ -85,7 +85,8 @@ The tickets under `tickets/` are numbered in dependency order and written in the
 lightweight per-ticket form: what to build, what blocks it, an acceptance checklist.
 Each ticket that reaches the network says so at the top; a future agent asks before
 pulling or crawling anything. Each ticket is picked up in a fresh context, in order;
-04 and 05 are independent once 03 lands.
+04 and 05 are independent once 03 lands. Each ticket names its review moments, at which
+the agent runs the adversarial review loop below.
 
 | Ticket | Title | Blocked by |
 | --- | --- | --- |
@@ -95,6 +96,56 @@ pulling or crawling anything. Each ticket is picked up in a fresh context, in or
 | `04-guiding-and-filtering-parameters.md` | Guiding and filtering parameters, proven on Graph and Workspace | 03 |
 | `05-per-item-duckdb-versus-bulk-load.md` | The per-item DuckDB path, compared with the bulk load | 03 |
 | `06-verdict.md` | Verdict | 04, 05 |
+
+## Adversarial review
+
+Every ticket names one or two review moments. At each one the agent runs this loop. It
+is the prototype's second pair of eyes, from a different model, and the one place a
+throwaway gets challenged on its design and its claims rather than its style. The loop
+is written for Claude Code with the Codex plugin installed; another executor runs the
+same command and plays the three roles with its own subtasks.
+
+1. **Review, by one subagent.** With the slice in the working tree (or, if it is already
+   committed, with `--base <the commit before it>` in place of `--scope working-tree`),
+   spawn one general-purpose subagent whose only job is to run the Codex adversarial
+   review and save its output verbatim. The review is the Codex plugin's runtime, run by
+   Bash from the installed plugin directory, with the moment's focus text from the ticket:
+
+   ```sh
+   node ~/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs \
+     adversarial-review --wait --model gpt-6-astra --scope working-tree "<focus text>"
+   ```
+
+   Astra (`gpt-6-astra`) is the preferred reviewer. If Codex rejects the model, rerun
+   without `--model` and record which model answered. The `codex:codex-rescue` subagent
+   forwards tasks only and refuses reviews, so a general-purpose subagent runs the
+   command, with its Bash timeout at the maximum, since an Astra review of a multi-file
+   slice outlives the default; if the run outlives that too, it reruns with
+   `--background` and reads `result <job-id>` from the same script. The review reads git
+   state only: a gitignored path under `ai_tmp/` never reaches the reviewer, so a moment
+   that reviews rendered output puts it in an untracked file inside
+   `prototypes/scrapy-duckdb/` for the duration of the review and deletes it before
+   `just check`. The subagent writes the output to
+   `ai_tmp/scrapy-duckdb/reviews/<ticket>-<moment>.md` and returns that path and
+   nothing else: no opinion, no fix.
+2. **Triage, by other subagents.** For each finding spawn a fresh subagent, one per
+   finding and in parallel, given the finding, the ticket and the code, and no opinion
+   from the main thread. It returns one verdict with its evidence: valid, with the
+   smallest fix applied and the check it ran; invalid, with the evidence; or out of
+   scope. The scope rule is the prototype's own: no tests, no polish, throwaway, so a
+   finding that asks for those is out of scope, while a wrong measurement, an impolite
+   or unbounded request, a lost or duplicated page, a lifecycle hole, a deleted machine
+   or an unsupported claim in the README is in. A fix is applied only to a valid finding.
+   Verdicts run in parallel, fixes do not collide: findings that touch the same file go
+   to one subagent, or the fixes are applied serially once every verdict is in. The
+   ticket is the authorization the plugin's result-handling rule asks for before a
+   review finding is fixed.
+3. **Reconcile, in the main thread.** Read every verdict and diff, reverse any fix that
+   changed what the ticket asked for, rerun the slice's own command and `just check`,
+   and commit the slice with its fixes, naming the findings fixed in the message.
+4. **Record.** The hand-back lists each finding in one line with its verdict, names the
+   model that reviewed, and gives the saved output's path. A second round at the same
+   moment runs only when a fix changed a design choice.
 
 ## Verdict
 

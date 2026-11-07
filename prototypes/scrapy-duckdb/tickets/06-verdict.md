@@ -23,6 +23,13 @@ quoted output:
 Facts stay facts and inferences are marked as such. Anything that was not measured is
 named as not measured, not estimated.
 
+**Review:** one moment, through the README's adversarial review loop, once the Verdict
+is drafted and before the commit, with the focus: does every number trace to a recorded
+run or table, is every inference marked as one, is each recommendation supported by the
+evidence above it and not by the sibling prototypes' results, and what would a decision
+record citing this Verdict be wrong about. Fixes here are edits to the README; a finding
+that needs a new measurement is recorded as not measured, never estimated.
+
 **Blocked by:** 04 and 05.
 
 **Status:** ready-for-agent
@@ -35,4 +42,7 @@ named as not measured, not estimated.
 - [ ] The sharp edges and the SDK's limits are listed with workarounds
 - [ ] `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran on the drafted Verdict; the hand-back lists each
+  finding with its verdict and the reviewing model, and every valid finding's edit is in
+  the commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged

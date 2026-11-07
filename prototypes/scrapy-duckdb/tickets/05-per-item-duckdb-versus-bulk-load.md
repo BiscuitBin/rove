@@ -34,6 +34,14 @@ DuckDB study's `bench_queries.py` does. Sharp edges on the per-item path (one wr
 per file, the pipeline blocking the reactor, what a crashed spider leaves in the file)
 go in the README.
 
+**Review:** one moment, through the README's adversarial review loop, once the table
+is filled and before it is read into a conclusion, with the focus: measurement
+validity; are the two runs the same pages, was the per-item file checkpointed and
+closed before the pull, is the RSS the spider process's and not the guest agent's, are
+the query numbers from fresh subprocesses over equally warm files, does each row of the
+table compare like with like, what a crash mid-run leaves in the DuckDB file on the
+guest and whether the host can tell.
+
 **Blocked by:** 03 (the crawl command, the schema and the HTTP cache). Independent of
 04.
 
@@ -50,4 +58,7 @@ go in the README.
   or a verdict each
 - [ ] `just check` ends with `All checks passed and the worktree is unchanged.` and
   `git status --short` is empty
+- [ ] The adversarial review loop ran at its moment; the hand-back lists each finding
+  with its verdict and the reviewing model, and every valid finding's fix is in the
+  commit
 - [ ] `src/rovo/`, `tests/` and `docs/specs/` are unchanged
