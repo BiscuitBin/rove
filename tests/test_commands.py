@@ -28,6 +28,7 @@ from fakes import (
     SteppingTimer,
     fixture_site,
     html_response,
+    probe_engine,
     text_response,
     unopened_engine,
 )
@@ -2283,18 +2284,26 @@ def needing_browser(out_dir: Path) -> Path:
     return out_dir
 
 
-def test_rule_success_RefuseMissingEngine(tmp_path: Path) -> None:
+def test_rule_success_RefuseMissingEngine(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Verify rule RefuseMissingEngine succeeds when all preconditions are met.
 
-    A configured browser tier (render_mode = auto) with no browser engine installed, and
-    a configured stealth tier with no stealth engine, each alone: refused "configured
-    tier is not installed", no request, no engine opened, .rovo/ untouched.
+    A configured browser tier (render_mode = auto, and always) with no browser engine
+    installed, and a configured stealth tier with no stealth engine, each alone: refused
+    "configured tier is not installed", no request, no engine opened, .rovo/ untouched.
+    Re-propagated at e0f0c44 (T19 follow-up): a browser refusal names both ways
+    forward on standard error, `playwright install chromium` and `render_mode = never`.
     """
     browser = needing_browser(first_synced(tmp_path / "browser"))
+    always = first_synced(tmp_path / "always")
+    set_key(always, "render_mode", '"always"')
     stealth = first_synced(tmp_path / "stealth")
     set_key(stealth, "stealth_mode", '"on"')
+    capsys.readouterr()
     for out_dir, installed in (
         (browser, frozenset({Tier.stealth})),
+        (always, frozenset({Tier.stealth})),
         (stealth, frozenset({Tier.browser})),
     ):
         before = state_files(out_dir)
@@ -2303,6 +2312,10 @@ def test_rule_success_RefuseMissingEngine(tmp_path: Path) -> None:
         assert refused(out_dir)["refusal_reason"] == MISSING_ENGINE
         assert fetcher.requests == []
         assert state_files(out_dir) == before
+        err = capsys.readouterr().err
+        if out_dir is not stealth:
+            assert ENGINE_FIX_INSTALL in err
+            assert ENGINE_FIX_NEVER in err
 
 
 def test_rule_failure_RefuseMissingEngine_1(tmp_path: Path) -> None:
@@ -2395,3 +2408,88 @@ def test_rule_failure_RefuseMissingEngine_6(tmp_path: Path) -> None:
     assert engine_sync(never, fetcher) is ExitCode.ok
     assert report(never)["report_status"] == "finished"
     assert SEED in fetcher.requests
+
+
+# The refusal's two ways forward and its missing pieces (RefuseMissingEngine guidance,
+# rovo.allium at e0f0c44), as rovo._crawl.browser.missing_browser_piece names them.
+ENGINE_FIX_INSTALL = "playwright install chromium"
+ENGINE_FIX_NEVER = "render_mode = never"
+NO_PACKAGE = "the playwright package"
+NO_BINARY = "the Chromium browser"
+
+
+@pytest.mark.parametrize("render_mode", ["auto", "always"])
+@pytest.mark.parametrize(
+    ("binary", "piece"),
+    [
+        pytest.param(None, NO_PACKAGE, id="no-package"),
+        pytest.param(None, NO_BINARY, id="no-binary-path"),
+        pytest.param("absent", NO_BINARY, id="binary-not-on-disk"),
+    ],
+)
+def test_a_missing_engine_refusal_names_the_missing_piece_and_both_fixes(  # noqa: PLR0913, PLR0917  The fixtures and the case's columns.
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    render_mode: str,
+    binary: str | None,
+    piece: str,
+) -> None:
+    """RefuseMissingEngine guidance (rovo.allium at e0f0c44): fail fast, naming the piece.
+
+    tier_installed(browser) is the playwright package and its Chromium binary; the
+    default check reads the engine probe, faked here, so no real Chromium is consulted.
+    A sync that may render (render_mode auto or always) with no package, or with the
+    package and no Chromium binary (none reported, or one reported but not on disk), is
+    refused before any request: exit 2, "configured tier is not installed", no engine
+    opened, and standard error names that piece and both ways forward.
+    """
+    out_dir = first_synced(tmp_path / "out")
+    set_key(out_dir, "render_mode", f'"{render_mode}"')
+    probe_engine(
+        monkeypatch,
+        package=piece != NO_PACKAGE,
+        binary=None if binary is None else tmp_path / binary,
+    )
+    capsys.readouterr()
+    fetcher = site()
+    code = _commands.sync(out_dir, fetcher=fetcher, clock=FixedClock(), engine=unopened_engine)
+    assert code is ExitCode.usage
+    assert refused(out_dir)["refusal_reason"] == MISSING_ENGINE
+    assert fetcher.requests == []
+    err = capsys.readouterr().err
+    for named in (piece, ENGINE_FIX_INSTALL, ENGINE_FIX_NEVER):
+        assert named in err, named
+
+
+def test_a_sync_whose_probe_finds_playwright_and_chromium_renders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe finds the package and a Chromium binary on disk: the auto sync runs.
+
+    tier_installed is not injected; the sync is not refused, opens one engine and closes
+    it. A default sync (render_mode = never) never consults the probe: with a probe that
+    would fail if asked, it still runs.
+    """
+    chromium = tmp_path / "chrome"
+    chromium.write_text("", encoding="utf-8")
+    probe_engine(monkeypatch, package=True, binary=chromium)
+    out_dir = needing_browser(first_synced(tmp_path / "auto"))
+    opened: list[FakeEngine] = []
+
+    def open_engine() -> FakeEngine:
+        opened.append(FakeEngine())
+        return opened[-1]
+
+    code = _commands.sync(out_dir, fetcher=site(), clock=FixedClock(), engine=open_engine)
+    assert code is ExitCode.ok
+    assert len(opened) == 1
+    assert opened[0].closed
+
+    def unprobed() -> bool:
+        msg = "render_mode = never needs no engine, so the probe is not asked"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr("rovo._crawl.browser.playwright_importable", unprobed)
+    never = first_synced(tmp_path / "never")
+    assert _commands.sync(never, fetcher=site(), clock=FixedClock()) is ExitCode.ok

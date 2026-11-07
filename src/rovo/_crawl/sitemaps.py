@@ -73,8 +73,8 @@ def llms_txt_targets(response: SiteResponse, base: str) -> tuple[str, ...]:
 def sitemap_admitted(url: str, profile: Profile, scope: CrawlScope) -> bool:
     """The profile's sitemap_include filter: an empty filter admits every sitemap.
 
-    A placeholder is filled before matching (FetchSitemap guidance, crawl.allium 1057 to
-    1066): {section} matches as * does, and {locale} is the scope's pinned locale, else
+    A placeholder is filled before matching (FetchSitemap guidance, crawl.allium 1086 to
+    1092): {section} matches as * does, and {locale} is the scope's pinned locale, else
     any one of the scope's locale_codes; with neither, a {locale} pattern admits nothing.
     """
     patterns = profile.sitemap_include

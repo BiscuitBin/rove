@@ -11,16 +11,16 @@ rovo._crawl.
 """
 
 import importlib.metadata
-import importlib.util
 import json
 import os
 import sys
 from collections import Counter
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from rovo._convert.profiles import GENERIC, profile_for
+from rovo._convert.profiles import GENERIC, profile_for, profile_named
 from rovo._exit import ExitCode
 from rovo._mirror.finalise import finalise
 from rovo._mirror.indexes import index_pass, unreadable_page_file
@@ -124,7 +124,6 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     )
     from rovo._report import report_refusal  # noqa: PLC0415  It loads rovo._crawl.
 
-    installed = tier_installed or _tier_installed
     if not out_dir.is_dir():
         return _refuse(f"sync: {out_dir} is not a directory")
     try:
@@ -140,7 +139,7 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
         urls=tuple(urls),
         paths=tuple(paths),
     )
-    problem = _start_problem(mirror, settings, options, installed)
+    problem = _start_problem(mirror, settings, options, tier_installed)
     if problem is not None:
         reason, detail = problem
         report_refusal(mirror, Operator(), options, settings, reason, clock=clock)
@@ -172,36 +171,65 @@ def fetch(  # noqa: PLR0913  The command's seams and its options.
     owner_test: object | None = None,
     tier_installed: Callable[[Tier], bool] | None = None,
     engine: "EngineFactory | None" = None,
+    config_path: Path | None = None,
 ) -> ExitCode:
-    """Realises rovo.allium RefuseOwnerTestingFetch, RefuseMissingFetchTier and FetchOneUrl.
+    """Realises rovo.allium's fetch rules: RefuseOwnerTestingFetch, then the rest.
 
-    An owner test, the stealth tier or a URL that is not http(s) exits usage, then a
-    named tier that is not installed does, each with no request. Otherwise fetch_one
-    fetches the page with the profile the catalogue picks by host, the initial scope of
-    the URL and the standard policy; no rovo.toml is read, and nothing is written. Its
-    Markdown body, without frontmatter, goes to standard output and the exit is ok;
-    nothing is printed and the exit is partial when it gave none. `--tier browser`
-    renders through one engine from `engine`, closed when the fetch ends.
+    RefuseFetchOnBadConfig, RefuseMissingFetchTier and FetchOneUrl follow. An owner
+    test, the stealth tier or a URL that is not http(s) exits usage, then a configuration
+    that is invalid or names an unblocking provider does, then a walk that could render
+    with the browser engine missing does, each with no request. The
+    configuration is resolve_fetch_config's: the built-in defaults, then, with
+    `config_path`, that file's shared sections and its [fetch] section. The walk runs
+    `tier` only when one is named, else by the effective render_mode as a sync's does
+    (always starts at the browser, auto climbs from http, never is http only).
+    fetch_one fetches the page under the standard policy and the configured profile;
+    the scope is the file's (scope_of, its seeds by default the URL) with `config_path`,
+    else the URL's own (initial_scope). Nothing is written. Its Markdown body, without
+    frontmatter, goes to standard output and the exit is ok; nothing is printed and the
+    exit is partial when it gave none. A walk that may render does so through one engine
+    from `engine`, closed when the fetch ends.
     """
-    from rovo._config import initial_scope, signature_of  # noqa: PLC0415  It loads rovo._crawl.
+    from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl.
+        initial_scope,
+        resolve_fetch_config,
+        scope_of,
+        signature_of,
+    )
+    from rovo._crawl.model import RenderMode  # noqa: PLC0415  Only a fetch loads the crawl.
     from rovo._crawl.run import fetch_one  # noqa: PLC0415  Only a fetch loads the crawl.
 
-    installed = tier_installed or _tier_installed
     if owner_test is not None or tier is Tier.stealth or not is_http_url(url):
         return _refuse(f"fetch: owner testing, the stealth tier or a non-http URL: {url}")
-    if tier is not None and tier is not Tier.http and not installed(tier):
-        return _refuse(f"fetch: the {tier.value} tier is not installed")
-    profile = profile_for(url, None) or GENERIC
-    scope = initial_scope(url, profile)
+    settings = resolve_fetch_config(config_path, url)
+    if not settings.valid or settings.unblocking_provider is not None:
+        problems = settings.problems or ("unblocking.provider is reserved",)
+        return _refuse("fetch: invalid configuration: " + "; ".join(problems))
+    render_mode = {
+        None: settings.render_mode,
+        Tier.http: RenderMode.never,
+        Tier.browser: RenderMode.always,
+    }[tier]
+    missing = (
+        None if render_mode is RenderMode.never else _missing_engine(Tier.browser, tier_installed)
+    )
+    if missing is not None:
+        return _refuse(f"fetch: the browser tier is not installed ({missing}); {_ENGINE_FIX}")
+    profile = profile_named(settings.profile_name) or GENERIC
+    if config_path is None:
+        scope = initial_scope(url, profile)
+    else:
+        seeded = settings if settings.has_seeds else replace(settings, start_urls=(url,))
+        scope = scope_of(seeded, profile)
     mirror = Mirror(
         out_dir=Path(),
         scope=scope,
         profile=profile,
         processing_signature=signature_of(scope, profile),
     )
-    opened = _open_engine(engine) if tier is Tier.browser else None
+    opened = None if render_mode is RenderMode.never else _open_engine(engine)
     try:
-        body = fetch_one(mirror, url, tier, (fetcher, clock, opened))
+        body = fetch_one(mirror, url, render_mode, (fetcher, clock, opened))
     finally:
         if opened is not None:
             opened.close()
@@ -215,11 +243,13 @@ def _start_problem(
     mirror: Mirror,
     settings: "Configuration",
     options: "SyncOptions",
-    installed: Callable[[Tier], bool],
+    tier_installed: Callable[[Tier], bool] | None,
 ) -> tuple[str, str] | None:
     """The first refusal that applies, in the specification's order: (reason, detail).
 
     The reason is the refused report's refusal_reason; the detail is standard error's.
+    The browser engine is probed only when every earlier refusal passed and the
+    configuration may render.
     """
     from rovo._crawl.model import RobotsMode  # noqa: PLC0415  Only a sync loads the crawl.
 
@@ -236,7 +266,7 @@ def _start_problem(
         url for url in options.urls if not is_http_url(url) or hostname_of(url) not in allowed
     ]
     unknown = [path for path in options.paths if path not in mirror.page_paths]
-    problems = (
+    earlier = (
         (not settings.valid, bad_config, f"{bad_config}: " + "; ".join(settings.problems)),
         (not settings.has_seeds, bad_config, f"{bad_config}: no root URL and no start URL"),
         (
@@ -259,22 +289,33 @@ def _start_problem(
             "unknown target path",
             f"not a written page's path: {', '.join(unknown)}",
         ),
-        (
-            settings.needs_browser and not installed(Tier.browser),
-            tier_missing,
-            "the configured browser tier is not installed",
-        ),
-        (
-            settings.needs_stealth and not installed(Tier.stealth),
-            tier_missing,
-            "the configured stealth tier is not installed",
-        ),
-        (settings.robots is not RobotsMode.respect, robots, robots),
     )
-    return next(
-        ((reason, detail) for failed, reason, detail in problems if failed),
-        None,
+    problem = _first_problem(earlier)
+    if problem is not None or not settings.needs_browser:
+        missing = None
+    else:
+        missing = _missing_engine(Tier.browser, tier_installed)
+    return problem or _first_problem(
+        (
+            (
+                missing is not None,
+                tier_missing,
+                f"the configured browser tier is not installed ({missing}); {_ENGINE_FIX}",
+            ),
+            (
+                settings.needs_stealth
+                and _missing_engine(Tier.stealth, tier_installed) is not None,
+                tier_missing,
+                "the configured stealth tier is not installed",
+            ),
+            (settings.robots is not RobotsMode.respect, robots, robots),
+        )
     )
+
+
+def _first_problem(problems: Sequence[tuple[bool, str, str]]) -> tuple[str, str] | None:
+    """The (reason, detail) of the first problem that failed, else None."""
+    return next(((reason, detail) for failed, reason, detail in problems if failed), None)
 
 
 def _profile(settings: "Configuration") -> "Profile":
@@ -588,9 +629,25 @@ def finish_index_command(written: IndexesWritten | None) -> ExitCode | None:
     return ExitCode.ok
 
 
-def _tier_installed(tier: Tier) -> bool:
-    """The browser tier needs playwright; the stealth tier has no engine yet."""
-    return tier is Tier.browser and importlib.util.find_spec("playwright") is not None
+# The two ways forward from a missing browser engine (rovo.allium RefuseMissingEngine).
+_ENGINE_FIX = "install it (playwright install chromium) or set render_mode = never"
+
+
+def _missing_engine(tier: Tier, tier_installed: Callable[[Tier], bool] | None) -> str | None:
+    """rovo.allium tier_installed(tier): what of the tier's engine is missing, else None.
+
+    `tier_installed`, when given, decides; by default the browser tier is the playwright
+    package and its Chromium binary (the engine probe, missing_browser_piece), and the
+    stealth tier has no engine yet.
+    """
+    if tier_installed is not None:
+        return None if tier_installed(tier) else f"the {tier.value} engine is missing"
+    if tier is Tier.stealth:
+        return "the stealth engine is missing"
+    from rovo._crawl.browser import missing_browser_piece  # noqa: PLC0415  Only a render probes.
+
+    piece = missing_browser_piece()
+    return None if piece is None else f"{piece} is missing"
 
 
 def _refuse(problem: str) -> ExitCode:

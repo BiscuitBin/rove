@@ -165,7 +165,7 @@ def _empty_summary() -> QualitySummary:
 
 @dataclass(kw_only=True, eq=False)
 class CrawlReport:
-    """The crawl report (rovo.allium 197); lists with no row type in this slice stay empty."""
+    """The crawl report (rovo.allium 205); lists with no row type in this slice stay empty."""
 
     mirror: Mirror
     operator: Operator

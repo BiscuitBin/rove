@@ -786,7 +786,12 @@ commit.
      then resolved, asks for a retry that `AttemptTier` now refuses (it requires an
      untripped host), and no rule settles the walk, so it stays `walking`. Owner
      testing is T20's: nothing is built or pinned here.
-  4. **Residue, OPEN: the discovery side of item 2** (review T18-2 C4). `7d01367`
+  4. **Residue: the discovery side of item 2** (review T18-2 C4). **ANSWERED** (the
+     maintainer, 2026-11-06; spec `e0f0c44`, through T19's batched item 1): stop, no
+     retry. Once a `fetch_resource`'s own host has tripped, its retry or hop is not
+     made and the fetch ends with the answer it holds (`crawl.allium` `FetchRobots`
+     guidance 868 to 875); built and pinned by T19 (`tests/test_tripped_discovery.py`).
+     The question as it was asked: `7d01367`
      answers item 2 for a walk only. A `fetch_resource` hop onto another origin of the
      source's own host, whose robots.txt read retires that host, ends the try as the
      error `"redirect to a retired host"`; `fetch_resource` retries an error answer
@@ -797,8 +802,8 @@ commit.
      refused hop's error, so `robots_refused`, `sitemap_unavailable` or an unread
      `llms.txt`?). Interim: unchanged (the next try is made;
      `tests/test_blocks_regressions.py`'s C4 tests pin a hop to a second host only);
-     none built and none pinned. It blocks no owned obligation; it is item 1 of the
-     T18-3 batched needs-user question (OPEN), which any later gap joins.
+     none built and none pinned. It blocked no owned obligation; it was item 1 of the
+     T18-3 batched needs-user question, now answered.
 - **Carried, ANSWERED-BY-SPEC** (from `.allium-loop/T17-quality-gates.json`, originally
   T16): whether a host retirement ranks exit 3 or 1. Exit 3 (Facts): `rovo.allium` 706
   and 955 to 965, `crawl.allium` 933 to 935. Mark it so in this slice's ledger.

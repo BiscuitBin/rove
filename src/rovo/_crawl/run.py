@@ -1,4 +1,4 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 611 to 2192).
+"""One standard run, RunRequested to RunEnded (crawl.allium 617 to 2329).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
@@ -664,7 +664,7 @@ def robots_allows(run: Run, url: str) -> bool:
     True under robots = ignore and for an origin whose stance is allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 1071 to 1111).
+    literal-$ copy included (crawl.allium 1097 to 1137).
     """
     if run.policy.robots is RobotsMode.ignore:
         return True
@@ -1434,7 +1434,8 @@ class _Render:
     validators. Every later request, a subrequest, goes only to an allowed host that has
     not tripped, after its origin's robots.txt is read and only when that allows it,
     under that host's limiter, once: it is never retried, and its Retry-After pauses the
-    host, at most retry_after_cap, never retiring it (T19's batched question, item 4).
+    host, at most retry_after_cap, never retiring it (AttemptTier guidance, decided for
+    now; crawl.allium's open question on subresources outside the allowed hosts).
     Anything else is aborted unrequested. Every answer's bytes count toward the render.
     """
 
@@ -1543,14 +1544,34 @@ def retire_host_on_long_retry_after(attempt: FetchAttempt) -> BreakerTripped | b
     walk.status = WalkStatus.settled
     walk.standing = attempt
     host.tiers_used = host.tiers_used | {attempt.tier}
+    if walk.escalated:
+        host.render_escalations += 1
     return True if tripped is None else tripped
+
+
+def pause_host_on_render_retry_after(attempt: FetchAttempt) -> HostBackedOff | None:
+    """Realises crawl.allium PauseHostOnRenderRetryAfter: the HostBackedOff it raised.
+
+    A render's navigation answer with a Retry-After under the cap pauses the host as
+    HttpRetry's wait does (`back_off`), though a render is never retried; None when a
+    guard does not hold.
+    """
+    host = attempt.walk.host
+    response = attempt.response
+    if attempt.tier is Tier.http or host.run.status is not RunStatus.running:
+        return None
+    if response.retry_after is None or not response.retryable:
+        return None
+    if not host.run.policy.honor_retry_after or attempt.retires_host:
+        return None
+    return back_off(host, attempt.try_, response.retry_after)
 
 
 def count_retry_after(attempt: FetchAttempt) -> bool:
     """Realises crawl.allium CountRetryAfter: True when it counted the Retry-After."""
     host = attempt.walk.host
     response = attempt.response
-    if host.run.status is not RunStatus.running or attempt.tier is not Tier.http:
+    if host.run.status is not RunStatus.running:
         return False
     if response.retry_after is None or not response.retryable:
         return False
@@ -1670,8 +1691,8 @@ def remember_render_tier(walk: LadderWalk) -> TierHint | None:
 def path_pattern(identity: str) -> str:
     """crawl.allium path_pattern: the identity's path cut to its first two segments.
 
-    The interim of T19's batched question, item 5: `/a/b/c.html` is `/a/b`; a path of
-    two segments or fewer, `/` included, stays as it is; the query is dropped.
+    Decided (TierHint guidance, crawl.allium 378 to 381): `/a/b/c.html` is `/a/b`; a
+    path of two segments or fewer, `/` included, stays as it is; the query is dropped.
     """
     path = urlsplit(identity).path or "/"
     segments = path.split("/")
@@ -1695,6 +1716,8 @@ def stop_walk_on_tripped_host(attempt: FetchAttempt) -> UrlSkippedBlocked | None
         return None
     walk.status = WalkStatus.settled
     walk.standing = attempt
+    if walk.escalated:
+        walk.host.render_escalations += 1
     return _skip(run, walk.entry)
 
 
@@ -2102,15 +2125,16 @@ def run_crawl(
 def fetch_one(
     mirror: Mirror,
     url: str,
-    tier: Tier | None,
+    render_mode: RenderMode,
     seams: tuple[Fetcher, Timer, BrowserEngine | None],
 ) -> str | None:
     """rovo.allium fetch_one: the Markdown body of `url`, or None.
 
     An in-memory run over a mirror nothing saves: the URL's host is opened (its
-    robots.txt read), and a walk whose tiers are [tier] (browser through `engine`), else
-    [http], with no climb (T19's batched question, item 2), fetches it under the
-    standard policy as FetchEntry, AttemptTier, HttpRetry and SettleWalk do. None when
+    robots.txt read), and a walk whose tiers `render_mode` gives as a sync's (always:
+    the browser through `engine`; auto: http, climbing to the browser when the page
+    needs rendering; never: http only) fetches it under the standard policy as
+    FetchEntry, AttemptTier, HttpRetry, SettleWalk and Escalate do. None when
     robots.txt refuses it, the host tripped, or the standing answer is not an ok,
     unblocked HTML answer; else its conversion under the mirror's profile.
     """
@@ -2126,7 +2150,7 @@ def fetch_one(
         policy=standard_policy(),
         dry_run=False,
         interactive=False,
-        render_mode=RenderMode.always if tier is Tier.browser else RenderMode.never,
+        render_mode=render_mode,
         stealth_mode=StealthMode.off,
         targets=frozenset(),
     )
@@ -2327,6 +2351,7 @@ def _settle(
     attempt: FetchAttempt | None = walk.attempts[-1]
     while attempt is not None:
         prepare_attempt(attempt)
+        pause_host_on_render_retry_after(attempt)
         if retire_host_on_long_retry_after(attempt) or stop_walk_on_tripped_host(attempt):
             break
         if http_retry(attempt, fetcher) is not None:

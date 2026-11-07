@@ -70,6 +70,8 @@ in the last column. The standard library reads the file with `tomllib`.
 | `quality.fail_on_low_quality` | `false` | `config.fail_on_low_quality`, `rovo.allium` |
 | `mirror.prune` | `false`: a removed page's file is archived under `_removed/`; `true` deletes it | `config.prune`, `mirror.allium` |
 | `unblocking.provider` | absent; any value is a configuration problem | `Configuration`, `rovo.allium` |
+| `fetch.render_mode` | absent: `crawl.render_mode` applies; read by `rovo fetch --config` only | `resolve_fetch_config`, `rovo.allium` |
+| `fetch.profile` | absent: `conversion.profile` applies; read by `rovo fetch --config` only | `resolve_fetch_config` |
 
 The file is the second of four layers, a later one winning key by key: the built-in
 defaults, `rovo.toml`, the `ROVO_<SECTION>__<FIELD>` environment variables, then the
@@ -80,6 +82,13 @@ any layer, makes the configuration invalid, and `rovo sync` names every bad key 
 standard error and in the refused report. The configuration's `hash`, in
 the report, is the first 16 hex digits of the SHA-256 of the resolved values as
 canonical JSON.
+
+The `[fetch]` section is `rovo fetch`'s alone: `rovo sync` accepts it and ignores it.
+`rovo fetch URL --config PATH` reads its own layers, a later one winning key by key: the
+built-in defaults, the file's shared sections, then its `[fetch]` section, wherever
+that sits in the file; no `ROVO_` variable is read. `[fetch]` holds `render_mode` and
+`profile` only; any other key in it is unknown and makes the configuration invalid, as
+in any section. Without `--config`, `rovo fetch` uses the built-in defaults.
 
 ## `.rovo/manifest.json`
 

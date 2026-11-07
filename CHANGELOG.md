@@ -200,5 +200,14 @@ policy.
   limiter; other requests are aborted. A render that fails falls back to the HTTP answer;
   a blocked answer never climbs. The tier a page climbed to is learned per host and path
   pattern (`tier_hints` in `.rovo/frontier.json`) and re-probed over HTTP every
-  `reprobe_every_syncs` runs; the report counts `render_escalations`. `rovo fetch URL
-  [--tier http|browser]` prints one page's Markdown and writes nothing.
+  `reprobe_every_syncs` runs; the report counts `render_escalations`, an escalation
+  that retires its host or stops on a tripped one included. A `Retry-After` on a
+  render's navigation pauses, counts and, past `retry_after_cap`, retires the host as an
+  HTTP answer's does. A sync under `render_mode = "auto"` or `"always"` is refused with
+  exit 2 before any request unless both the playwright package and its Chromium are
+  installed, the message naming the missing piece and the fixes (`playwright install
+  chromium`, or `render_mode = never`). `rovo fetch URL [--tier http|browser]
+  [--config PATH]` prints one page's Markdown and writes nothing; `--config` reads a
+  `rovo.toml`'s shared sections and then its own `[fetch]` section (`render_mode`,
+  `profile`), which `rovo sync` ignores, and a bad one exits 2. A discovery fetch makes
+  no further retry or hop once its own host has tripped.

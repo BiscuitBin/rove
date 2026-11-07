@@ -1,33 +1,41 @@
 """The browser tier (T19): render reasons, escalation, learned tiers, the climb's settlement.
 
-Each obligation test is named after the id `just plan-spec <module>` emits at 7d01367,
-dots and hyphens as underscores, and its docstring quotes the obligation. A
-`rule_failure` test makes exactly one `requires` clause false. The rest are the ticket's
-hand-written guarantees: the starting tier (FetchEntry guidance), `path_pattern` (T19
-Open points item 5's interim), SettleWalk's fallback and its one render escalation per
-climbing walk, BrowserRendersContentNeverAnswersBlocks with the browser tier usable,
-StopWalkOnTrippedHost's escalation disjunct, a render's bytes, and a TierHint round trip
-through frontier.json. Renders go through `FakeEngine` (tests/fakes.py), which answers
-every request through the crawl's callback, so the requests a render causes are the
-FakeFetcher's. Every count, cap and ratio is read from CONFIG.
+Each obligation test is named after the id `just plan-spec <module>` emits at 7d01367
+(PauseHostOnRenderRetryAfter's at e0f0c44), dots and hyphens as underscores, and its
+docstring quotes the obligation. A `rule_failure` test makes exactly one `requires`
+clause false. The rest are the ticket's hand-written guarantees: the starting tier
+(FetchEntry guidance), `path_pattern` (decided at e0f0c44: the first two segments, the
+query dropped), SettleWalk's fallback and its one render escalation per climbing walk,
+BrowserRendersContentNeverAnswersBlocks with the browser tier usable,
+StopWalkOnTrippedHost's escalation disjunct, a render's bytes, a TierHint round trip
+through frontier.json, and the maintainer's answers at e0f0c44: a render's navigation
+answer is an http answer's equal for Retry-After (it pauses the host, is counted, and
+past retry_after_cap retires the host), and an escalated walk counts its render
+escalation whatever its outcome, retiring its host or stopping on a tripped one. Renders
+go through `FakeEngine` (tests/fakes.py), which answers every request through the
+crawl's callback, so the requests a render causes are the FakeFetcher's. Every count,
+cap and ratio is read from CONFIG.
 """
 
 import dataclasses
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from fakes import FakeEngine, FakeFetcher, FixedClock, ScriptedFetcher, html_response
+from fakes import START, FakeEngine, FakeFetcher, FixedClock, ScriptedFetcher, html_response
 from rovo import _commands
 from rovo._convert.model import QualityFlag
 from rovo._crawl import model
 from rovo._crawl.model import (
+    RETIRED_HOP,
     BlockKind,
     BlockVerdict,
     FetchAttempt,
     Frontier,
     FrontierStatus,
+    HostBackedOff,
     LadderWalk,
     RenderMode,
     RenderReason,
@@ -49,9 +57,11 @@ from rovo._crawl.run import (
     fetch_entry,
     load_frontier,
     path_pattern,
+    pause_host_on_render_retry_after,
     prepare_run,
     remember_render_tier,
     render_reason_of,
+    retire_host_on_long_retry_after,
     run_crawl,
     save_frontier,
     select_batch,
@@ -68,6 +78,7 @@ from test_crawl import (
     PAGE,
     SEED,
     SITE,
+    answered,
     assert_fields,
     attempt_on,
     new_mirror,
@@ -877,7 +888,7 @@ def test_a_reprobe_due_hint_probes_http_and_a_reprobe_that_does_not_climb_keeps_
     ],
 )
 def test_path_pattern_keeps_the_first_two_segments(identity: str, pattern: str) -> None:
-    """T19 Open points item 5's interim: the identity's path cut to two segments."""
+    """TierHint's comment (crawl.allium 375 to 381 at e0f0c44): the first two segments, decided."""
     assert path_pattern(identity) == pattern
 
 
@@ -1091,3 +1102,218 @@ def test_a_climb_in_a_run_saves_its_hint_with_the_runs_id(tmp_path: Path) -> Non
             "tier": "browser",
         }
     ]
+
+
+# --- PauseHostOnRenderRetryAfter (e0f0c44) ------------------------------------------------
+
+SERVICE_UNAVAILABLE = 503
+TOO_MANY = 429
+WAIT = timedelta(seconds=4)
+
+
+def render_answered(out_dir: Path, response: SiteResponse) -> FetchAttempt:
+    """The seed's walk (http answered the SPA shell), and a browser attempt answering `response`.
+
+    The browser attempt is constructed, so PauseHostOnRenderRetryAfter is tried on its
+    own; nothing is requested for it.
+    """
+    _, _, walk = walked(out_dir, spa_site(), FakeEngine())
+    walk.escalated = True
+    return attempt_on(walk, response, tier=Tier.browser)
+
+
+def test_rule_success_PauseHostOnRenderRetryAfter(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter succeeds when all preconditions are met.
+
+    A browser attempt whose navigation answered a 503, and one a 429, with a
+    Retry-After under retry_after_cap, while honoured: the host is paused until at least
+    now + the Retry-After, the HostBackedOff raised carries that instant and is the
+    run's, and no retry is made (a render is never retried). The pause never shortens a
+    later one the host already had (later_of).
+    """
+    for status in (SERVICE_UNAVAILABLE, TOO_MANY):
+        attempt = render_answered(tmp_path / str(status), answered(SEED, status, retry_after=WAIT))
+        host = attempt.walk.host
+        attempts = list(attempt.walk.attempts)
+        backed_off = pause_host_on_render_retry_after(attempt)
+        assert isinstance(backed_off, HostBackedOff), status
+        assert backed_off.host is host
+        assert backed_off.until >= START + WAIT
+        assert host.paused_until == backed_off.until
+        assert backed_off in host.run.backoffs
+        assert attempt.walk.attempts == attempts
+    attempt = render_answered(
+        tmp_path / "later", answered(SEED, SERVICE_UNAVAILABLE, retry_after=WAIT)
+    )
+    host = attempt.walk.host
+    later = START + timedelta(days=1)
+    host.paused_until = later
+    backed_off = pause_host_on_render_retry_after(attempt)
+    assert backed_off is not None
+    assert backed_off.until < later
+    assert host.paused_until == later
+
+
+def test_rule_failure_PauseHostOnRenderRetryAfter_1(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.tier != http: an http attempt's Retry-After is HttpRetry's, not
+    this rule's; it pauses nothing here.
+    """
+    _, _, walk = walked(tmp_path, spa_site(), FakeEngine())
+    attempt = attempt_on(walk, answered(SEED, SERVICE_UNAVAILABLE, retry_after=WAIT))
+    assert pause_host_on_render_retry_after(attempt) is None
+    assert walk.host.paused_until is None
+
+
+def test_rule_failure_PauseHostOnRenderRetryAfter_2(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.walk.host.run.status = running.
+    """
+    attempt = render_answered(tmp_path, answered(SEED, SERVICE_UNAVAILABLE, retry_after=WAIT))
+    attempt.walk.host.run.status = RunStatus.finished
+    assert pause_host_on_render_retry_after(attempt) is None
+    assert attempt.walk.host.paused_until is None
+
+
+def test_rule_failure_PauseHostOnRenderRetryAfter_3(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.response.retry_after != null and attempt.response.retryable: a
+    retryable answer with no Retry-After, and a Retry-After on an answer that is not
+    retryable (a 200), pause nothing.
+    """
+    for name, response in (
+        ("no-retry-after", answered(SEED, SERVICE_UNAVAILABLE)),
+        ("ok", dataclasses.replace(html_response(SEED, RENDERED), retry_after=WAIT)),
+    ):
+        attempt = render_answered(tmp_path / name, response)
+        assert pause_host_on_render_retry_after(attempt) is None, name
+        assert attempt.walk.host.paused_until is None, name
+
+
+def test_rule_failure_PauseHostOnRenderRetryAfter_4(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter is rejected when requires clause fails.
+
+    requires: attempt.walk.host.run.policy.honor_retry_after (off only in owner testing,
+    here on unit inputs).
+    """
+    attempt = render_answered(tmp_path, answered(SEED, TOO_MANY, retry_after=WAIT))
+    run = attempt.walk.host.run
+    run.policy = dataclasses.replace(standard_policy(), honor_retry_after=False)
+    assert pause_host_on_render_retry_after(attempt) is None
+    assert attempt.walk.host.paused_until is None
+
+
+def test_rule_failure_PauseHostOnRenderRetryAfter_5(tmp_path: Path) -> None:
+    """Verify rule PauseHostOnRenderRetryAfter is rejected when requires clause fails.
+
+    requires: not attempt.retires_host: a Retry-After past retry_after_cap on a render's
+    navigation retires the host (retires_host, whatever the tier) rather than pausing it.
+    """
+    past = standard_policy().retry_after_cap + timedelta(seconds=1)
+    attempt = render_answered(tmp_path, answered(SEED, SERVICE_UNAVAILABLE, retry_after=past))
+    assert attempt.retires_host
+    assert pause_host_on_render_retry_after(attempt) is None
+    assert attempt.walk.host.paused_until is None
+
+
+# --- Guarantees: a render's Retry-After and its escalation, whatever the outcome ---------------
+
+
+def render_busy(retry_after: timedelta) -> ScriptedFetcher:
+    """The seed answers the SPA shell at http, then 503 with `retry_after` to the render."""
+    busy = answered(SEED, SERVICE_UNAVAILABLE, retry_after=retry_after)
+    return ScriptedFetcher({SEED: busy}, {SEED: [html_response(SEED, SPA_SHELL)]})
+
+
+def test_a_render_navigations_retry_after_pauses_counts_and_is_never_retried(
+    tmp_path: Path,
+) -> None:
+    """A render's navigation answered 503 with a Retry-After under the cap, in a run.
+
+    CountRetryAfter and PauseHostOnRenderRetryAfter (e0f0c44): the host is paused (one
+    HostBackedOff, the run's), retry_after_honored is 1, the page was requested twice
+    (the http try, the render's navigation) and the render never retried; the walk
+    counts its one render escalation.
+    """
+    fetcher = render_busy(WAIT)
+    engine = FakeEngine()
+    result = crawl_auto(tmp_path, fetcher, engine)
+    host = result.run.hosts[0]
+    assert engine.renders == [SEED]
+    assert fetcher.count(SEED) == len(["http", "render"])
+    assert host.retry_after_honored == 1
+    (backed_off,) = result.backed_off
+    assert backed_off.host is host
+    assert backed_off.until >= START + WAIT
+    assert not host.breaker_tripped
+    assert host.render_escalations == 1
+
+
+def test_a_render_navigations_retry_after_past_the_cap_retires_the_host(tmp_path: Path) -> None:
+    """A render's navigation answered 503 with a Retry-After past retry_after_cap, in a run.
+
+    retires_host and RetireHostOnLongRetryAfter whatever the tier (e0f0c44): the host's
+    breaker trips with no pause, the Retry-After is counted, and the escalated walk still
+    counts its render escalation.
+    """
+    past = standard_policy().retry_after_cap + timedelta(seconds=1)
+    fetcher = render_busy(past)
+    engine = FakeEngine()
+    result = crawl_auto(tmp_path, fetcher, engine)
+    host = result.run.hosts[0]
+    assert engine.renders == [SEED]
+    assert fetcher.count(SEED) == len(["http", "render"])
+    assert host.breaker_tripped
+    assert result.backed_off == ()
+    assert host.retry_after_honored == 1
+    assert host.render_escalations == 1
+
+
+def test_an_escalated_walk_that_retires_its_host_counts_its_escalation(tmp_path: Path) -> None:
+    """RetireHostOnLongRetryAfter (e0f0c44): if attempt.walk.escalated, render_escalations + 1.
+
+    A browser attempt past the cap on an escalated walk retires the host and counts one
+    render escalation; an http attempt past the cap on a walk that never climbed counts
+    none.
+    """
+    past = standard_policy().retry_after_cap + timedelta(seconds=1)
+    attempt = render_answered(tmp_path / "browser", answered(SEED, TOO_MANY, retry_after=past))
+    retired = retire_host_on_long_retry_after(attempt)
+    assert retired is not False
+    host = attempt.walk.host
+    assert host.breaker_tripped
+    assert attempt.walk.standing is attempt
+    assert Tier.browser in host.tiers_used
+    assert host.render_escalations == 1
+    _, _, walk = walked(tmp_path / "http", spa_site(), FakeEngine())
+    http = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=past))
+    assert retire_host_on_long_retry_after(http) is not False
+    assert walk.host.render_escalations == 0
+
+
+def test_an_escalated_walk_stopped_on_a_tripped_host_counts_its_escalation(
+    tmp_path: Path,
+) -> None:
+    """StopWalkOnTrippedHost (e0f0c44): if walk.escalated, render_escalations + 1.
+
+    An escalated walk whose render navigation was a hop refused onto its tripped host
+    stops, its row skipped_blocked, and counts one render escalation; a walk that never
+    climbed, stopped on a retryable http answer, counts none.
+    """
+    hop = SiteResponse(status=0, source_url=SEED, markup="", size=0, error=RETIRED_HOP)
+    attempt = render_answered(tmp_path / "browser", hop)
+    host = attempt.walk.host
+    assert host.breaker is not None
+    host.breaker.status = model.BreakerStatus.tripped
+    assert stop_walk_on_tripped_host(attempt) is not None
+    assert attempt.walk.entry.status is FrontierStatus.skipped_blocked
+    assert host.render_escalations == 1
+    _, _, walk = walked(tmp_path / "http", spa_site(), FakeEngine())
+    retry = attempt_on(walk, answered(SEED, SERVICE_UNAVAILABLE))
+    assert walk.host.breaker is not None
+    walk.host.breaker.status = model.BreakerStatus.tripped
+    assert stop_walk_on_tripped_host(retry) is not None
+    assert walk.host.render_escalations == 0

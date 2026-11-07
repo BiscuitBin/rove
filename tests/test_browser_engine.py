@@ -4,7 +4,8 @@ Two halves. The request callback a render is answered through is the crawl's: th
 `FakeEngine` (tests/fakes.py), a render under render_mode = always makes its navigation
 through `pace.follow`, waits at the host's limiter, reads an allowed origin's robots.txt
 before a subrequest to it, aborts a subrequest robots.txt disallows or that leaves the
-allowed hosts (T19 Open points item 4's interim) without requesting it, counts every
+allowed hosts (decided for now at e0f0c44, crawl.allium's open question on subresources
+outside the allowed hosts its interim) without requesting it, counts every
 response toward the render's size, never retries a subrequest and lets its Retry-After
 pause the host but never retire it; a navigation with no response is an answer with
 status 0 and the error set. `PlaywrightEngine` is driven over a stub
@@ -12,7 +13,7 @@ status 0 and the error set. `PlaywrightEngine` is driven over a stub
 API (`sync_playwright().start()`, `chromium.launch`, `route`, `Route.fulfill`,
 `Route.abort`, `Page.goto`, `Page.content`): it fulfils every request from the callback
 and never lets the browser make one itself, waits for the `load` state capped at
-CONFIG.render_max_wait (Open points item 3's interim), and leaves a redirected page at
+CONFIG.render_max_wait (decided at e0f0c44), and leaves a redirected page at
 the URL its content came from, so a relative subrequest resolves against it. Nothing
 here launches a browser or sleeps.
 """
@@ -41,8 +42,8 @@ from fakes import (
     html_response,
     text_response,
 )
-from rovo._crawl import model
-from rovo._crawl.browser import PlaywrightEngine
+from rovo._crawl import browser, model
+from rovo._crawl.browser import PlaywrightEngine, chromium_executable, missing_browser_piece
 from rovo._crawl.fetch import Fetcher, HttpxFetcher
 from rovo._crawl.model import FetchAttempt, RenderMode, Run, SiteResponse
 from rovo._crawl.pace import Timer
@@ -205,7 +206,7 @@ def test_every_request_a_render_causes_waits_at_the_hosts_limiter(tmp_path: Path
 
 
 def test_a_subrequests_retry_after_pauses_the_host_and_is_never_retried(tmp_path: Path) -> None:
-    """T19 Open points item 4's interim: a subrequest's Retry-After pauses, never retires.
+    """AttemptTier guidance (e0f0c44): a subrequest's Retry-After pauses, never retires.
 
     The subrequest is never retried; its Retry-After pauses its host, at most
     retry_after_cap, and never retires it; the render stands.
@@ -352,6 +353,9 @@ class Scenario:
     dom: dict[str, str] = field(default_factory=dict)
     # When False, goto returns None: the navigation got no response.
     respond: bool = True
+    # The path playwright reports for its Chromium; starting playwright fails when set.
+    executable: str = "/stub/ms-playwright/chromium/chrome"
+    start_fails: bool = False
     # What happened: each routed request and its route, launches, closes.
     routes: list[StubRoute] = field(default_factory=list)
     launches: list[dict[str, object]] = field(default_factory=list)
@@ -541,6 +545,11 @@ class StubBrowserType:
         """Chromium."""
         self.scenario = scenario
 
+    @property
+    def executable_path(self) -> str:
+        """Where playwright expects its Chromium binary, whether or not it is there."""
+        return self.scenario.executable
+
     def launch(self, **options: object) -> StubBrowser:
         """Launch the browser, recording its options."""
         self.scenario.launches.append(options)
@@ -569,7 +578,10 @@ class StubManager:
         self.playwright = StubPlaywright(scenario)
 
     def start(self) -> StubPlaywright:
-        """Start playwright."""
+        """Start playwright; fails as playwright does when its driver cannot start."""
+        if self.scenario.start_fails:
+            msg = "the driver did not start"
+            raise StubError(msg)
         return self.playwright
 
     def __enter__(self) -> StubPlaywright:
@@ -703,7 +715,7 @@ def test_playwright_engine_resolves_a_relative_subrequest_after_a_redirect(
 def test_playwright_engine_waits_for_load_capped_at_render_max_wait(
     scenario: Scenario, load_takes: timedelta, *, renders: bool
 ) -> None:
-    """T19 Open points item 3's interim: the load state, capped at render_max_wait.
+    """AttemptTier guidance (e0f0c44): the page's load state, capped at render_max_wait.
 
     A page that reaches load within CONFIG.render_max_wait is rendered; one that takes
     longer (still under playwright's own 30 s default) is not: render returns None.
@@ -744,3 +756,58 @@ def test_playwright_engine_renders_many_pages_in_one_browser(scenario: Scenario)
         engine.close()
     assert len(scenario.launches) == 1
     assert [url for url, navigation in answers.calls if navigation] == [SEED, other]
+
+
+# --- The engine probe: tier_installed(browser) (rovo.allium RefuseMissingEngine, e0f0c44) ---
+
+
+def test_chromium_executable_asks_playwright_without_launching(scenario: Scenario) -> None:
+    """chromium_executable starts playwright, reads chromium.executable_path, stops it.
+
+    No browser is launched; the path is returned as playwright reports it.
+    """
+    assert chromium_executable() == Path(scenario.executable)
+    assert scenario.launches == []
+    assert scenario.closed == ["playwright"]
+
+
+def test_chromium_executable_is_none_when_playwright_cannot_say(scenario: Scenario) -> None:
+    """A playwright that fails to start (its Error) gives no path, and nothing launches."""
+    scenario.start_fails = True
+    assert chromium_executable() is None
+    assert scenario.launches == []
+
+
+@pytest.mark.parametrize(
+    ("package", "binary", "piece"),
+    [
+        pytest.param(False, None, "the playwright package", id="no-package"),
+        pytest.param(True, None, "the Chromium browser", id="no-binary-path"),
+        pytest.param(True, "absent", "the Chromium browser", id="binary-not-on-disk"),
+        pytest.param(True, "chrome", None, id="installed"),
+    ],
+)
+def test_missing_browser_piece_names_the_package_or_the_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package: bool,  # noqa: FBT001  A parametrized column.
+    binary: str | None,
+    piece: str | None,
+) -> None:
+    """tier_installed(browser) holds when the playwright package and its Chromium are both there.
+
+    missing_browser_piece is None then; else it names the package, which is asked first
+    (the binary is never asked about without it), or the Chromium browser, when
+    playwright reports no path or one that is not on disk.
+    """
+    (tmp_path / "chrome").write_text("", encoding="utf-8")
+    asked: list[str] = []
+
+    def executable() -> Path | None:
+        asked.append("binary")
+        return None if binary is None else tmp_path / binary
+
+    monkeypatch.setattr(browser, "playwright_importable", lambda: package)
+    monkeypatch.setattr(browser, "chromium_executable", executable)
+    assert missing_browser_piece() == piece
+    assert asked == (["binary"] if package else [])

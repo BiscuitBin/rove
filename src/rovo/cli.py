@@ -126,7 +126,15 @@ def fetch_command(
     url: Annotated[str, typer.Argument(metavar="URL", help="The page to fetch.")],
     tier: Annotated[
         Literal["http", "browser", "stealth"] | None,
-        typer.Option("--tier", help="Fetch at this tier only; by default http."),
+        typer.Option("--tier", help="Fetch at this tier only; by default render_mode decides."),
+    ] = None,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            metavar="PATH",
+            help="A rovo.toml to read: its shared sections, then its [fetch] section.",
+        ),
     ] = None,
 ) -> None:
     """Print one page's Markdown. Nothing is written."""
@@ -138,7 +146,11 @@ def fetch_command(
     timer = SystemTimer()
     with HttpxFetcher(clock=timer) as fetcher:
         code = _commands.fetch(
-            url, fetcher=fetcher, clock=timer, tier=None if tier is None else Tier(tier)
+            url,
+            fetcher=fetcher,
+            clock=timer,
+            tier=None if tier is None else Tier(tier),
+            config_path=config,
         )
     raise typer.Exit(code.number)
 

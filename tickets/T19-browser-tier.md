@@ -66,8 +66,8 @@ is at `7c49df8`.
 
 | Class | Rules |
 | --- | --- |
-| **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `crawl.allium`: `RenderReason` (198) and `RenderMode` (209); `Run.usable_tiers` and `highest_tier` (259 to 264) as a run reaches them; `TierHint` (379 to 387) and its `reprobe_due`, persisted in `frontier.json` (`Frontier`, 289 to 292: "every learned tier"); `Host.tiers_used` and `render_escalations` (416, 419) as a climb sets them; `LadderWalk` (469 to 489) its `escalated`, `ok_http` (481) and `render_needed` (483); `FetchAttempt` (491 to 528) its `render_reason` (497) and `wants_escalation` (518 to 523; the `unsuccessful_challenge` conjunct on constructed inputs only, owner testing being T20's); the rendering config (581 to 585: `render_min_text_chars`, `render_max_wait`, `large_raw_html`, `reprobe_every_syncs`) and `soft_render_gain` (593); `FetchEntry` (1567) its starting tier (guidance 1592 to 1598: `browser` under `render_mode = always`, else the later of the breaker's tier and the hint's tier unless `reprobe_due`, else `http`) and `start_from`; `AttemptTier` (1601) at the browser tier: `fetch_or_render` renders (guidance 1633 to 1673: robots, the limiter, Retry-After and the standard policy before redirects and browser subrequests; in-scope redirects; a render waits for the load state capped at `render_max_wait`; a navigation with no response is an error; every response counts toward `max_bytes`), `classify_block` on a render, no `render_reason` off http; `Escalate` (1807 to 1818); `SettleWalk` (1820 to 1853) its full `stands` (a browser attempt that failed outright falls back to `latest(walk.ok_http)`; `render_added_nothing` keeps `latest(walk.soft_suspect)`) and its `render_escalations` count; `StopWalkOnTrippedHost`'s escalation disjunct (1871 to 1873) as a run reaches it; `RememberRenderTier` (1905 to 1925); `ConvertFetched` (2091) its `render_needed` from a run (2102) and a page's `tier` `browser`; `LearnedTierIsNeverHttp` (2336 to 2339); `SyncControl` (2370 to 2391) its `EnginesRefusedBeforeRequests`; `SiteExchange` (2393) its `BrowserRendersContentNeverAnswersBlocks` (2422 to 2426) with the browser tier present. `rovo.allium`: `Configuration.needs_browser` (98) and `render_mode` (88, default 258); `RefuseMissingEngine` (380 to 398); `StartSync`'s engine guards (483 to 484); `HostReport.tiers_used` and `render_escalations` (121, 124) as a climb sets them; `RefuseOwnerTestingFetch` (875 to 883), `RefuseMissingFetchTier` (885 to 890) and `FetchOneUrl` (892 to 910), the `rovo fetch` command; `MirrorCommands` (937) its `OperatorFetchesUrl` and `VerifyIndexReportExitCodes`' fetch codes (967 to 973). `mirror.allium`: `Tier` (251) and a page's `tier` (313, 868) set to `browser`. |
-| **Traversed, nothing new to do** | `render_reason_of` (T09, 1869), kept as built; `classify_block` and `FeedBreaker` (T18) over a browser attempt; `DisposeFetch` (1983) for a browser attempt (blocked with tier `browser`, failed, converted); `HttpRetry` (1746), http only; `CountRetryAfter` (1790), http only; `RefusalsInOrder` (`rovo.allium` 996), the engine refusal fifth as built; `TallyBlockedUrl` with a `browser` tier. |
+| **Realised** (every branch reachable in this slice, or constructible on unit inputs where noted) | `crawl.allium` (lines at `e0f0c44`): `RenderReason` (198) and `RenderMode` (209); `Run.usable_tiers` and `highest_tier` (259 to 264) as a run reaches them; `TierHint` (382 to 390) and its `reprobe_due`, persisted in `frontier.json` (`Frontier`, 289 to 292: "every learned tier"); `Host.tiers_used` and `render_escalations` (419, 422) as a climb sets them; `LadderWalk` (472 to 492) its `escalated`, `ok_http` (484) and `render_needed` (486); `FetchAttempt` (494 to 532) its `render_reason` (500) and `wants_escalation` (522 to 527; the `unsuccessful_challenge` conjunct on constructed inputs only, owner testing being T20's); the rendering config (585 to 589: `render_min_text_chars`, `render_max_wait`, `large_raw_html`, `reprobe_every_syncs`) and `soft_render_gain` (597); `FetchEntry` (1579) its starting tier (guidance 1604 to 1610: `browser` under `render_mode = always`, else the later of the breaker's tier and the hint's tier unless `reprobe_due`, else `http`) and `start_from`; `AttemptTier` (1613) at the browser tier: `fetch_or_render` renders (guidance 1645 to 1697: robots, the limiter, Retry-After and the standard policy before redirects and browser subrequests; in-scope redirects; a render waits for the load state capped at `render_max_wait`; a navigation with no response is an error; every response counts toward `max_bytes`), `classify_block` on a render, no `render_reason` off http; `Escalate` (1853 to 1864); `SettleWalk` (1866 to 1901) its full `stands` (a browser attempt that failed outright falls back to `latest(walk.ok_http)`; `render_added_nothing` keeps `latest(walk.soft_suspect)`) and its `render_escalations` count; `StopWalkOnTrippedHost`'s escalation disjunct (1919 to 1921) as a run reaches it; `RememberRenderTier` (1956 to 1976); follow-up `e0f0c44`: `PauseHostOnRenderRetryAfter` (1833 to 1849), `CountRetryAfter` (1818 to 1830) and `retires_host` (508 to 512) at any tier, the escalation counted by `RetireHostOnLongRetryAfter` and `StopWalkOnTrippedHost`, and `fetch_resource`'s stop on its own tripped host (`FetchRobots` guidance 868 to 875); `ConvertFetched` (2142) its `render_needed` from a run (2153) and a page's `tier` `browser`; `LearnedTierIsNeverHttp` (2387 to 2390); `SyncControl` (2421 to 2442) its `EnginesRefusedBeforeRequests`; `SiteExchange` (2444) its `BrowserRendersContentNeverAnswersBlocks` (2473 to 2477) with the browser tier present. `rovo.allium`: `Configuration.needs_browser` (106) and `render_mode` (96, default 266); `RefuseMissingEngine` (388 to 413); `StartSync`'s engine guards (498 to 499); `HostReport.tiers_used` and `render_escalations` (129, 132) as a climb sets them; `RefuseOwnerTestingFetch` (890 to 898), `RefuseFetchOnBadConfig` (900 to 912, follow-up), `resolve_fetch_config` (73 to 80, follow-up), `RefuseMissingFetchTier` (914 to 928) and `FetchOneUrl` (930 to 956), the `rovo fetch` command; `MirrorCommands` (983) its `OperatorFetchesUrl` and `VerifyIndexReportExitCodes`' fetch codes (1013 to 1019). `mirror.allium`: `Tier` (251) and a page's `tier` (313, 868) set to `browser`. |
+| **Traversed, nothing new to do** | `render_reason_of` (T09, 1917), kept as built; `classify_block` and `FeedBreaker` (T18) over a browser attempt; `DisposeFetch` (2034) for a browser attempt (blocked with tier `browser`, failed, converted); `HttpRetry` (1770), http only; `CountRetryAfter` (1818), at any tier since `e0f0c44` (Realised, follow-up); `RefusalsInOrder` (`rovo.allium` 1042), the engine refusal fifth as built; `TallyBlockedUrl` with a `browser` tier. |
 | **Specified as owner-testing only** (on constructed inputs here, never from a standard run) | `wants_escalation` on a verdict other than `none` (it needs `protection_escalation`); `LadderWalk.soft_suspect`, `render_added_nothing` and `SettleWalk`'s `latest(walk.soft_suspect)` branch (a soft attempt wants escalation only under `protection_escalation`); `unsuccessful_challenge`. |
 | **Later slices'** (T20) | Owner testing: `OwnerChallenge` and its rules, `PrepareAttempt`'s challenge offer, `BreakerEscalates`, the stealth tier and `RefuseMissingEngine`'s stealth half as anything but a refusal (no stealth engine exists, so `tier_installed(stealth)` is false), `RefuseInvalidOwnerRequest`, `SaveOwnership`, and the command-line spelling of `owner_test` for `rovo sync` and `rovo fetch`. |
 | **Outside this slice; reaching one still stops the run** | Of the eight raises at `7c49df8` (`ai_tmp/T19/notinthisslice-7c49df8.txt`), this slice removes two, `AttemptTier` (`run.py` 1373) and `Escalate` (2067), and adds none. The six that stay are owner-testing branches, as many of each: `PrepareRun` (256), `Discover` (327), `EnqueuePageLinks` (735), `RefollowUnchangedLinks` (776), `StartRun` (1929) and `BreakerEscalates` (2075). None is reachable from `_commands.sync`, which refuses an owner-testing request before a run starts. |
@@ -93,7 +93,7 @@ is at `7c49df8`.
   through `pace.follow`, exactly as an http try (in-scope redirects only, each hop's
   robots.txt read first, a disallowed hop or a hop onto a tripped host refused with the
   same error answers, the host's rate, Crawl-delay and pause, the `rovo` User-Agent, no
-  validators: a conditional fetch is http only, `FetchEntry` 1597 to 1598); a subrequest
+  validators: a conditional fetch is http only, `FetchEntry` 1609 to 1610); a subrequest
   to an origin of an allowed host after that origin's robots.txt is read (as a hop's
   is), under the host's limiter, aborted when robots.txt disallows it; a subrequest to
   any other origin aborted (the interim of Open points item 4). A redirected navigation
@@ -115,7 +115,7 @@ is at `7c49df8`.
   http only) and never has a `render_reason`, so it settles (`SettleWalk`): an ok render
   stands with tier `browser` and the host's `render_escalations` rises by one; a render
   that failed outright falls back to the walk's last ok http attempt, flagged
-  `render_needed` (`ConvertFetched` 2102); a blocked render stands blocked with tier
+  `render_needed` (`ConvertFetched` 2153 at `e0f0c44`); a blocked render stands blocked with tier
   `browser`, never falling back. Under `render_mode = never` `usable_tiers` is `[http]`,
   `next_tier` is null and the http attempt stands flagged `render_needed` (built, T09).
   Under `render_mode = always` the walk starts at the browser and has no http attempt.
@@ -147,11 +147,20 @@ is at `7c49df8`.
   is named and `[http]` otherwise, with no escalation (Open points item 1). An ok,
   unblocked HTML answer is converted under the profile and its Markdown body, without
   frontmatter, is printed to standard output, exit 0; a robots refusal, a block, a
-  non-HTML answer or a failed fetch prints no page and exits 1 (`VerifyIndexReportExitCodes`
-  967 to 973). It writes no file: no mirror, report, frontier or run, in memory only.
+  non-HTML answer or a failed fetch prints no page and exits 1 (`VerifyIndexReportExitCodes`,
+  `rovo.allium` 1013 to 1019 at `e0f0c44`). It writes no file: no mirror, report,
+  frontier or run, in memory only. **Superseded at `e0f0c44`** (Open points item 2,
+  answered): `rovo fetch` takes `--config PATH`; the configuration is
+  `resolve_fetch_config` (defaults, the file's shared sections, its `[fetch]`
+  `render_mode` and `profile`; no `ROVO_` variables), a bad one refused with exit 2
+  (`RefuseFetchOnBadConfig`); with no `--tier` the walk's tiers follow `render_mode` as
+  a sync's do, and with `--config` the file's `[scope]` bounds redirects.
 - **`tier_installed`.** Kept as built at T16: the browser tier is installed when
   `playwright` is importable; the stealth tier never is. A missing Chromium binary is not
   detected before the run: the first render fails outright (Open points item 6).
+  **Superseded at `e0f0c44`** (item 6, answered): installed is the package and its
+  Chromium binary (`missing_browser_piece`, a seam), refused up front with a message
+  naming the missing piece and both fixes.
 - **Browser tests outside `just check`.** With playwright in `.venv`, the tests marked
   `browser` would launch Chromium inside `just check` and `just coverage`, where they
   only skip without the extra today. `pytest.ini`'s `addopts` gains `-m "not browser"`,
@@ -211,12 +220,13 @@ record says `PASS`.
 
 | Path | Class | Content |
 | --- | --- | --- |
-| `src/rovo/_crawl/browser.py` | new | the `BrowserEngine` protocol, `PlaywrightEngine` (the one module that imports playwright, through `importlib`), the request callback a render is answered through, the subrequest gate (Facts) |
-| `src/rovo/_crawl/run.py` | shared, own lines | `attempt_tier` at the browser tier (`fetch_or_render` through the engine) and its `NotInThisSlice` gone; `escalate` (`Escalate`) in `_settle` where `NotInThisSlice("Escalate")` was; `settle_walk`'s full `stands` and its `render_added_nothing` guard; `remember_render_tier` (`RememberRenderTier`) after `feed_breaker`; `_starting_tier` reading the hint and `reprobe_due`; `path_pattern`; `tier_hints` encoded and decoded in `save_frontier` and `load_frontier`; the engine passed through `drive_run`, `fetch_entry` and `_settle`; `fetch_one` (`FetchOneUrl`'s black box); the docstrings that call the browser tier a later slice's |
-| `src/rovo/_crawl/model.py` | shared, own lines | `TierHint` and `Frontier.tier_hints`; nothing else unless step 4 shows a field missing |
-| `src/rovo/_crawl/pace.py` | shared, own lines | only what the subrequest gate needs from `follow` or the limiter, with its docstring |
-| `src/rovo/_commands.py` | shared, own lines | the engine seam on `sync`; `fetch` (`RefuseOwnerTestingFetch`, `RefuseMissingFetchTier`, `FetchOneUrl`); the module docstring |
-| `src/rovo/cli.py` | shared, own lines | the `fetch` command (`URL`, `--tier`), its lazy imports, the real `HttpxFetcher` and `SystemTimer` as `sync` builds them |
+| `src/rovo/_crawl/browser.py` | new | the `BrowserEngine` protocol, `PlaywrightEngine` (the one module that imports playwright, through `importlib`), the request callback a render is answered through, the subrequest gate (Facts); follow-up `e0f0c44`: the engine probe (`playwright_importable`, `chromium_executable`, `missing_browser_piece`) |
+| `src/rovo/_crawl/run.py` | shared, own lines | `attempt_tier` at the browser tier (`fetch_or_render` through the engine) and its `NotInThisSlice` gone; `escalate` (`Escalate`) in `_settle` where `NotInThisSlice("Escalate")` was; `settle_walk`'s full `stands` and its `render_added_nothing` guard; `remember_render_tier` (`RememberRenderTier`) after `feed_breaker`; `_starting_tier` reading the hint and `reprobe_due`; `path_pattern`; `tier_hints` encoded and decoded in `save_frontier` and `load_frontier`; the engine passed through `drive_run`, `fetch_entry` and `_settle`; `fetch_one` (`FetchOneUrl`'s black box); the docstrings that call the browser tier a later slice's; follow-up `e0f0c44`: `pause_host_on_render_retry_after`, `count_retry_after` and `retires_host` at any tier, a render escalation counted on retirement and on a tripped-host stop, `fetch_one` taking the configuration's tiers and scope |
+| `src/rovo/_crawl/model.py` | shared, own lines | `TierHint` and `Frontier.tier_hints`; nothing else unless step 4 shows a field missing; follow-up `e0f0c44`: `FetchAttempt.retires_host` loses `tier = http` |
+| `src/rovo/_crawl/pace.py` | shared, own lines | only what the subrequest gate needs from `follow` or the limiter, with its docstring; follow-up `e0f0c44`: `fetch_resource` makes no retry or hop once its own host has tripped (Open points item 1) |
+| `src/rovo/_commands.py` | shared, own lines | the engine seam on `sync`; `fetch` (`RefuseOwnerTestingFetch`, `RefuseMissingFetchTier`, `FetchOneUrl`); the module docstring; follow-up `e0f0c44`: `RefuseFetchOnBadConfig`, `config_path`, the missing-engine message naming the piece and both fixes, `_tier_installed` through the probe |
+| `src/rovo/_config.py` | shared, own lines (follow-up `e0f0c44`) | `resolve_fetch_config` and the `[fetch]` section, which `resolve_config` accepts and ignores |
+| `src/rovo/cli.py` | shared, own lines | the `fetch` command (`URL`, `--tier`), its lazy imports, the real `HttpxFetcher` and `SystemTimer` as `sync` builds them; follow-up `e0f0c44`: `--config PATH` |
 | `pyproject.toml` | shared, own lines | the `browser` extra's comment only: playwright is imported by `rovo._crawl.browser`; the range and `uv.lock` unchanged |
 | `pytest.ini` | shared, own lines | `addopts` gains `-m "not browser"`, with a comment saying `just e2e-browser` overrides it (Facts) |
 | `scripts/wheel_smoke.py` | shared, own lines | `rovo/_crawl/browser.py` in the expected package files and "twenty-eight" becomes "twenty-nine" |
@@ -226,23 +236,25 @@ record says `PASS`.
 | `tests/test_commands.py` | shared, own lines | the `RefuseMissingEngine` obligations of step 3 |
 | `tests/test_slice_boundaries.py` | shared, own lines (re-propagated) | `test_escalation_to_the_browser_stops_the_run` (T09) and the browser half of `test_a_browser_attempt_stops_and_a_tripped_hosts_rows_are_skipped` (T12, re-propagated by T18) become their behaviour, renamed, with ledger notes naming their origin slices and old names |
 | `tests/test_regressions.py` | shared, own lines (re-propagated) | `test_a_stopped_finalisation_persists_no_done_row` (T09, re-propagated by T15, T16 and T18): no later slice's branch is reachable from a standard sync after this slice, so its stop is injected with `RaisingFetcher` (`tests/fakes.py`) raising `NotInThisSlice` on the request for `next.html`, which `drive_run` lets escape, asserting no less than before; ledger note |
-| `tests/test_crawl.py` | shared, own lines (re-propagated) | only a test the red run shows red because a walk can now climb or a hint is now saved, with a ledger note naming its slice |
-| `tests/fakes.py` | shared, own lines | `FakeEngine`: renders from a map of URL to rendered markup, answering the navigation through the crawl's callback so the request is made and logged; records each render; hash-tracked |
+| `tests/test_crawl.py` | shared, own lines (re-propagated) | only a test the red run shows red because a walk can now climb or a hint is now saved, with a ledger note naming its slice; follow-up `e0f0c44`: T12's `CountRetryAfter` tests renumbered and the success test counting a render (hash-tracked by this ledger from then), and T12's `test_derived_FetchAttempt_retires_host` re-propagated to the tier-free `retires_host` (a render's answer past the cap retires the host) |
+| `tests/test_tripped_discovery.py` | new (follow-up `e0f0c44`) | Open points item 1: a discovery fetch stops on its own tripped host; hash-pinned in this slice's ledger |
+| `tests/fakes.py` | shared, own lines | `FakeEngine`: renders from a map of URL to rendered markup, answering the navigation through the crawl's callback so the request is made and logged; records each render; hash-tracked; follow-up `e0f0c44`: `probe_engine` |
 | `tests/test_render_regressions.py` | new | one test per divergence weed finds; hash-pinned in this slice's ledger |
 | `tests/e2e/test_render_sync.py` | new | the `just check` end-to-end scenarios (Acceptance criteria): a served site, a real `HttpxFetcher`, `FakeEngine`; no unit test is named `test_render_sync.py` |
 | `tests/e2e/test_browser_sync.py` | new | the real-browser scenarios, every test marked `browser`, `PlaywrightEngine` over a served site; run by `just e2e-browser` only; no unit test is named `test_browser_sync.py` |
 | `tests/fixtures/sites/spa/` | new | `robots.txt` (`User-agent: *`, `Disallow: /private/`, no Crawl-delay, no `Sitemap:`); `guide/start.html` (a prose page in `<main>`) linking `guide/app.html` and `guide/plain.html`; `guide/app.html`, an SPA shell (`<div id="root"></div>`, a root `_SPA_ROOTS` names, so its render reason is `spa_shell`) whose inline `<script>` writes a `<main>` with an `<h1>` and prose over `render_min_text_chars`, and which also loads `guide/style.css` and `/private/tracker.js`; `guide/app.rendered.html`, the DOM `FakeEngine` returns for it; `guide/plain.html`, a prose page; `guide/style.css`; two-space indentation per `.editorconfig` |
-| `docs/reference/cli.md` | shared, own lines | a `rovo fetch` section (usage, `--tier`, the refusals, exit codes 0, 1 and 2, nothing written); line 17's "later command" sentence; `rovo sync` under each `render_mode`, the escalation, the learned tier and the subrequest rules; 328 to 329 and the exit-code table's 1 keep only owner testing |
-| `docs/reference/mirror.md` | shared, own lines | `tier_hints` (121 to 122); a page's `tier` `browser`; `render_needed` from `render_mode = never` or a failed render; the report's `tiers_used` and `render_escalations`; 451 keeps only owner testing |
+| `docs/reference/cli.md` | shared, own lines | a `rovo fetch` section (usage, `--tier`, the refusals, exit codes 0, 1 and 2, nothing written); line 17's "later command" sentence; `rovo sync` under each `render_mode`, the escalation, the learned tier and the subrequest rules; 328 to 329 and the exit-code table's 1 keep only owner testing; follow-up `e0f0c44`: `--config`, the missing-engine refusal and its message (152 to 153, 274, 345 to 346, 367 to 382) |
+| `docs/reference/mirror.md` | shared, own lines | `tier_hints` (121 to 122); a page's `tier` `browser`; `render_needed` from `render_mode = never` or a failed render; the report's `tiers_used` and `render_escalations`; 451 keeps only owner testing; follow-up `e0f0c44`: the `[fetch]` section and the fetch's layers (49 to 80) |
 | `docs/reference/testing.md`, `docs/reference/configuration.md`, `docs/reference/commands.md` | shared, own lines | the `browser` marker deselected from `just check` (`pytest.ini`), `FakeEngine`, the two e2e modules and the fixture site; `commands.md`'s `e2e-browser` row only if its text turns false |
 | `docs/project/purpose-and-scope.md`, `docs/project/repository-map.md`, `docs/explanation/architecture.md` | shared, own lines | line 30 of purpose-and-scope (the browser tier no longer stops a sync); the new module and test files |
 | `README.md`, `AGENTS.md` | shared, own lines | only the sentences step 6's search shows false (AGENTS.md's "today `rovo init` and `rovo sync`" and "`_commands` (`init`, `sync` and `index`)"); `AGENTS.md`'s required phrases stay in always-visible text |
-| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: the browser tier, escalation, learned tiers, `rovo fetch` |
+| `CHANGELOG.md` | shared, own lines | one `Unreleased` Added entry: the browser tier, escalation, learned tiers, `rovo fetch`; follow-up `e0f0c44`: `--config`, the fail-fast engine check, a render's Retry-After |
 | `tickets/README.md`, `tickets/T19-browser-tier.md` | ticket | index row, graph, slice bullet, this ticket |
+| `tickets/T18-blocks-breaker.md`, `.allium-loop/T18-blocks-breaker.json` | ticket; gitignored (follow-up `e0f0c44`) | T18-3 item 1 marked ANSWERED, on the follow-up task's instruction |
 | `.allium-loop/T19-browser-tier.json`, `.allium-loop/T19-browser-tier.witness.json` | gitignored | the loop ledger and the witness record; never committed |
 
 `uv.lock`, `.coveragerc`, `ruff.toml`, `mypy.ini`, `Justfile`, `src/rovo/__init__.py`,
-`src/rovo/_exit.py`, `src/rovo/_config.py`, `src/rovo/_report.py`,
+`src/rovo/_exit.py`, `src/rovo/_report.py`,
 `src/rovo/_unfinished.py`, `src/rovo/_crawl/fetch.py`, `src/rovo/_crawl/sitemaps.py`,
 `src/rovo/_mirror/`, `src/rovo/_convert/`, `tests/e2e/conftest.py`,
 `tests/test_import_direction.py`, `docs/manifest.yml`, `docs/decisions/` and
@@ -337,6 +349,16 @@ a decision record, a specification or a dependency.
      `surface-provides.MirrorCommands` (`rovo fetch` completes the command set).
    - **`mirror`** (1), in `tests/test_escalation.py`: `enum-comparable.Tier`.
    - **`convert`**: none new.
+
+   Follow-up at `e0f0c44` (the maintainer's answers; `ai_tmp/T19/followup/owned.json`,
+   55): **`crawl`** gains `rule-success.PauseHostOnRenderRetryAfter` and
+   `rule-failure.PauseHostOnRenderRetryAfter.1` to `.5` (`tests/test_escalation.py`);
+   **`rovo`** gains `rule-success.RefuseFetchOnBadConfig`,
+   `rule-failure.RefuseFetchOnBadConfig.1`, `.2`, `rule-failure.RefuseMissingFetchTier.3`
+   and `rule-failure.FetchOneUrl.3` (`tests/test_fetch_command.py`), while
+   `RefuseMissingFetchTier.2` and `FetchOneUrl.2` now name the `settings.valid` clause.
+   T12's `CountRetryAfter` ids (`.3` to `.2`, `.4` to `.3`, `.2` removed) stay T12's,
+   re-propagated in place with a ledger note.
 
    Re-propagated, not new (each re-hashed in this slice's ledger with a note naming its
    origin slice; T09's to T18's ledgers are never edited): the tests the Files touched
@@ -566,74 +588,73 @@ verification output, each headed by its commit.
 
 ## Open points
 
-- **The T19 batched needs-user question: OPEN** (found while planning at `7d01367`;
-  copied into the ledger's `open_questions` as OPEN; any gap found later joins it). No
-  item blocks an owned obligation: each has the interim stated, built and pinned by the
-  tests named, and a changed answer moves only those tests.
+- **The T19 batched needs-user question: ANSWERED** (found while planning at `7d01367`,
+  item 9 in weed; the maintainer answered on 2026-11-06, written into the specification
+  at `e0f0c44`; `ai_tmp/T19/spec-answers/answers.md`). Each answer is built and pinned
+  by the tests named in the ledger's `open_questions`.
   1. **Carried from T18 (T18-3 item 1): the discovery side of the tripped-host stop.**
-     A `fetch_resource` hop onto another origin of the source's own host, whose
-     robots.txt read retires that host, ends the try as the error
-     `"redirect to a retired host"`; `fetch_resource` retries an error answer "as
-     HttpRetry does" (`FetchRobots` guidance, `crawl.allium` 843 to 851), and
-     `BreakerStopsTheRun` (2437 to 2445) and "no further discovery request goes to it"
-     (860 to 863) read as forbidding the next try, but no rule says so for a fetch
-     already under way, nor what the fetch then answers. Interim: unchanged (the next try
-     is made); none built and none pinned (`tests/test_blocks_regressions.py`'s C4 tests
-     pin a hop to a second host only).
-  2. **`rovo fetch`'s tiers and configuration.** `FetchOneUrl`'s guidance (`rovo.allium`
-     903 to 910) says "http may render for JavaScript", while `fetch_one(url, tier,
-     resolve_config(""))` uses the built-in defaults, whose `render_mode` is `never`
-     (258), and `--tier` names one tier. Does `rovo fetch` with no tier, or with
-     `--tier http`, climb to the browser when the answer needs rendering (and only when
-     the browser is installed?), and does `resolve_config("")` include the `ROVO_`
-     variables? Interim: the walk's tiers are `[tier]` when one is named, else `[http]`,
-     with no climb; `resolve_config("")` is `resolve_config`'s layers with no file, the
-     `ROVO_` variables included. Tests: `tests/test_fetch_command.py`.
-  3. **The render's load state.** `AttemptTier`'s guidance (1669 to 1670) says a render
-     "waits for the configured load state", but no configuration names one. Interim:
-     playwright's `load` state, capped at `render_max_wait`. Tests:
-     `tests/test_browser_engine.py`.
-  4. **Browser subrequests outside the allowed hosts, and their Retry-After.** "Every
-     request, redirect and browser subrequest respects robots, the limiter, Retry-After
-     and the standard policy" (`rovo.allium` 905 to 908; `AttemptTier` guidance 1633 to
-     1636), but the limiter and robots.txt are per host and origin of the run, and no
-     rule says whether a render may request an origin outside `allowed_hosts` (a CDN's
-     script, say), nor what a subrequest's Retry-After does (pause the host, retire it
-     past the cap?). Interim: a subrequest is made only to an origin of an allowed host,
-     after that origin's robots.txt is read and allows it, under that host's limiter, and
-     is never retried; any other subrequest is aborted unrequested; a subrequest's
-     Retry-After pauses its host (`later_of`, at most `retry_after_cap`) and never retires
-     it. Tests: `tests/test_browser_engine.py`, `tests/e2e/test_browser_sync.py`.
-  5. **`path_pattern`.** `TierHint.path_pattern` is commented `"/seg1/seg2"` (382) and
-     `path_pattern` is a black box whose contract is stated nowhere else. Interim: the
-     identity's path cut to its first two segments (`/guide/app.html` stays
-     `/guide/app.html`; `/a/b/c.html` is `/a/b`; `/` and a one-segment path stay as they
-     are). Tests: `tests/test_escalation.py`.
-  6. **`tier_installed(browser)`.** `rovo.allium` names it a black box; the refusal
-     (380 to 398) and `EnginesRefusedBeforeRequests` (`crawl.allium` 2387 to 2389) say a
-     missing engine is refused before any request. Is the engine the `playwright`
-     package, or the package and its browser binary? Interim (as built at T16): the
-     package is importable; a missing Chromium makes the first render fail outright, so
-     the page stands from its http answer flagged `render_needed`. Tests:
-     `tests/test_commands.py`'s `RefuseMissingEngine` tests.
-  7. **Cookies a render earns.** "Cookies a browser earns are shared only with that
-     host's http session" (1671 to 1672): must they be shared, or only never shared
-     elsewhere? Interim: every request a render causes is made by the run's http session
-     (Facts), so a `Set-Cookie` answer lands in that session's domain-scoped jar; a
-     cookie the page's script sets is not copied out of the browser. Tests:
-     `tests/test_browser_engine.py`.
+     Stop, no retry: once a `fetch_resource`'s own host has tripped, its retry or hop is
+     not made and the fetch ends with the answer it holds, the error `"redirect to a
+     retired host"` for a refused hop, the retryable answer for a retry not made
+     (`crawl.allium` `FetchRobots` guidance 868 to 875). Tests:
+     `tests/test_tripped_discovery.py`.
+  2. **`rovo fetch`'s tiers and configuration.** `rovo fetch URL [--tier T] [--config
+     PATH]`: `resolve_fetch_config` reads the built-in defaults, then the file's shared
+     sections, then an optional `[fetch]` section (`render_mode` and `profile` only; any
+     other key is invalid), never a `ROVO_` variable; a sync ignores `[fetch]`; a bad
+     configuration is refused with exit 2 (`RefuseFetchOnBadConfig`). `render_mode`
+     means what it means for a sync, `--tier` runs that tier only, and with `--config`
+     the file's `[scope]` bounds the redirects followed, else the URL's own host
+     (`rovo.allium` 73 to 80, 900 to 957). Tests: `tests/test_fetch_command.py`.
+  3. **The render's load state.** As built: the page's load state, capped at
+     `render_max_wait` (`AttemptTier` guidance, 1681 to 1682).
+  4. **Browser subrequests outside the allowed hosts.** As built for now (`AttemptTier`
+     guidance, 1687 to 1693), with a new `crawl.allium` open question (2566, OPEN, below)
+     as its interim.
+  5. **`path_pattern`.** As built: the first two segments, the query dropped (375 to
+     381).
+  6. **`tier_installed(browser)`.** Fail fast: installed means the `playwright` package
+     and its Chromium binary; a sync under `render_mode` auto or always, and `rovo
+     fetch` with `--tier browser` or no `--tier` under an effective auto or always, are
+     refused up front with exit 2, the message naming the missing piece and both fixes
+     (`playwright install chromium`, or `render_mode = never`) (`rovo.allium` 403 to
+     413, 914 to 929). The engine probe is a seam (`missing_browser_piece`), so no unit
+     test needs a real Chromium.
+  7. **Cookies a render earns.** As built: every request a render causes goes out on
+     the run's http session; a cookie the page's script sets is not copied out (1683 to
+     1686).
   8. **Undeclared helpers.** `starting_tier`, `first_render_reason` and
-     `render_added_nothing` are used (1576, 1910, 1814) but are not in `crawl.allium`'s
-     black-box list (47 to 57); their contracts are guidance prose (1592 to 1598, 1842 to
-     1844). Interim: as the guidance states. No test moves.
+     `render_added_nothing` are in the black-box list (53 to 55).
+  9. **A render navigation's Retry-After** (found in weed). Like http: it pauses the
+     host (`PauseHostOnRenderRetryAfter`), counts toward `retry_after_honored`, and past
+     `retry_after_cap` retires the host; `render_escalations` counts every escalation,
+     one that retires its host or stops on a tripped one included.
+- **The T19-2 batched needs-user question: OPEN** (found while propagating the
+  follow-up at `e0f0c44`; copied into the ledger's `open_questions`; any later gap joins
+  it). No item blocks an owned obligation and none is pinned by a test.
+  1. With `--config` and neither `[conversion]` nor `[fetch]` naming a profile, which
+     profile converts the page: `resolve_config`'s default (the catalogue's pick for the
+     file's first seed, else `generic`) or, as without `--config`, the catalogue's pick
+     for the fetched URL's host? Interim: the catalogue's pick for the fetched URL's
+     host, else `generic`.
+  2. A valid `--config` whose `[crawl]` sets `robots = "ignore"` or `stealth_mode =
+     "on"`: no fetch rule refuses it, and `FetchOneUrl`'s guidance names the standard
+     policy and tiers from `--tier` or `render_mode`. Interim: `rovo fetch` uses
+     neither key (robots respected, stealth never used, no refusal).
+  3. With `--config`, a fetched URL outside the file's `[scope]`: the guidance bounds
+     only its redirects. Interim: the URL itself is fetched; only its redirects are
+     bounded.
 - **Carried, OPEN, to T20** (from `.allium-loop/T18-blocks-breaker.json`, the T18-2
   residue): a challenge waiting when its host trips, then resolved, asks for a retry
   `AttemptTier` refuses (it requires an untripped host), and no rule settles the walk.
   Owner testing is T20's: nothing is built or pinned here.
-- **The specification's open questions.** The third `crawl.allium` one (2514, batch
-  concurrency) is on this slice's path only in that a render runs while no other row of
-  its batch is fetched (interim unchanged). The first and second (2512, 2513) and the
-  three `convert.allium` ones (486 to 488) are not on this slice's path.
+- **The specification's open questions.** The third `crawl.allium` one (2565 at
+  `e0f0c44`, batch concurrency) is on this slice's path only in that a render runs while
+  no other row of its batch is fetched (interim unchanged). The first and second (2563,
+  2564) and the three `convert.allium` ones (486 to 488) are not on this slice's path.
+  The fourth, new at `e0f0c44` at the maintainer's request (2566: may a render load
+  subresources from origins outside the allowed hosts?), is **OPEN**; its interim, as
+  built, requests only allowed hosts' origins.
 - **Unowned residue.** The earlier-reachable obligations step 3 lists as carried are
   named in the ledger so the last slice's review owns or assigns them.
 - **`NotInThisSlice`.** A development guard, not product behaviour: each later slice

@@ -14,7 +14,9 @@ every command that renders nothing never load it.
 """
 
 import importlib
+import importlib.util
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Protocol
 
 from rovo._crawl.model import CONFIG, SiteResponse
@@ -47,6 +49,39 @@ class BrowserEngine(Protocol):
 EngineFactory = Callable[[], BrowserEngine]
 
 
+def playwright_importable() -> bool:
+    """The playwright package is installed (found, not imported)."""
+    return importlib.util.find_spec("playwright") is not None
+
+
+def chromium_executable() -> Path | None:
+    """The Chromium binary playwright would launch, or None when it cannot say.
+
+    Playwright is started to ask and stopped again; no browser is launched.
+    """
+    api = importlib.import_module("playwright.sync_api")
+    try:
+        playwright = api.sync_playwright().start()
+    except api.Error:
+        return None
+    try:
+        return Path(playwright.chromium.executable_path)
+    finally:
+        playwright.stop()
+
+
+def missing_browser_piece() -> str | None:
+    """rovo.allium tier_installed(browser): the missing piece, or None when installed.
+
+    Installed is the playwright package and its Chromium binary (RefuseMissingEngine's
+    guidance); the binary is asked about only when the package is there.
+    """
+    if not playwright_importable():
+        return "the playwright package"
+    binary = chromium_executable()
+    return None if binary is not None and binary.exists() else "the Chromium browser"
+
+
 class PlaywrightEngine:
     """The one real BrowserEngine: headless Chromium through playwright.
 
@@ -56,8 +91,9 @@ class PlaywrightEngine:
     network. An answer whose content came from another URL (a redirect the crawl
     followed) is fulfilled as a redirect to that URL, and the browser's request for it
     is fulfilled with the answer itself, so the page stands at the URL its content came
-    from. The load state is `load` (T19's batched question, item 3), waited for at most
-    `CONFIG.render_max_wait`. A launch that fails (no Chromium) fails every render.
+    from. The load state is `load` (decided, AttemptTier guidance), waited for at most
+    `CONFIG.render_max_wait`. A launch that fails fails every render; a sync or fetch
+    that may render is refused up front when `missing_browser_piece` names one.
     """
 
     def __init__(self) -> None:

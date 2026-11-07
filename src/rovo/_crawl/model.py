@@ -206,7 +206,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 549 to 594), the one copy in code.
+# crawl.allium's config block (crawl.allium 555 to 600), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -783,11 +783,10 @@ class FetchAttempt:
 
     @property
     def retires_host(self) -> bool:
-        """A Retry-After past the cap retires the host."""
+        """A Retry-After past the cap retires the host, whatever the tier (a render's too)."""
         policy = self.walk.host.run.policy
         return (
-            self.tier is Tier.http
-            and self.response.retryable
+            self.response.retryable
             and self.response.retry_after is not None
             and policy.honor_retry_after
             and self.response.retry_after > policy.retry_after_cap
@@ -908,7 +907,7 @@ class ProgressEvent:
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2284)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2421)."""
 
     operator: Operator
     mirror: Mirror

@@ -4,7 +4,8 @@ The committed fixture site `spa` is served on 127.0.0.1 by `serve_site`: start.h
 an SPA shell, app.html (an empty #root its script fills), and a prose page, plain.html;
 robots.txt disallows /private/. `rovo init` runs through CliRunner; each sync runs
 `rovo._commands.sync`, and each fetch `rovo._commands.fetch`, in process over the real
-HttpxFetcher on a FixedClock, which never sleeps, with `tier_installed` injected and
+HttpxFetcher on a FixedClock, which never sleeps, with `tier_installed` injected (or
+the engine probe faked by `probe_engine`, so no real Chromium is consulted) and
 `FakeEngine` (tests/fakes.py) as the engine: it renders app.html as the committed
 app.rendered.html, making the render's navigation through the crawl, so it reaches the
 server's log. Requests are read off that log. A page path strips the scope prefix
@@ -21,7 +22,7 @@ from conftest import SITES, SiteServer
 from test_init_sync import load, page_root, split_page
 from typer.testing import CliRunner
 
-from fakes import FakeEngine, FixedClock, unopened_engine
+from fakes import FakeEngine, FixedClock, probe_engine, unopened_engine
 from rovo import _commands
 from rovo._crawl.fetch import HttpxFetcher, Validators
 from rovo._crawl.model import SiteResponse
@@ -212,21 +213,112 @@ def test_render_mode_always_renders_every_page(serve_site: SiteServer, tmp_path:
 
 
 def test_a_sync_needing_a_missing_engine_is_refused(
-    serve_site: SiteServer, tmp_path: Path
+    serve_site: SiteServer, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """render_mode = "auto" with the browser engine absent: exit 2 before any request.
 
     crawl-report.json is refused with "configured tier is not installed", no engine is
-    opened, and the server's log is empty.
+    opened, and the server's log is empty. Re-propagated by the T19 follow-up (the
+    refusal built at T16; spec e0f0c44): standard error names both ways forward.
     """
     base = serve_site("spa")
     out = initialised(base, tmp_path / "out", "auto")
+    capsys.readouterr()
     code, _ = synced(out, unopened_engine, installed=nothing_installed)
     assert code is ExitCode.usage
+    err = capsys.readouterr().err
+    assert "playwright install chromium" in err
+    assert "render_mode = never" in err
     data = load(out / "crawl-report.json")
     assert data["report_status"] == "refused"
     assert data["refusal_reason"] == "configured tier is not installed"
     assert serve_site.paths(base) == []
+
+
+def test_a_sync_with_chromium_missing_is_refused_with_the_fix(
+    serve_site: SiteServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A sync under render_mode = "auto" when the probe finds no Chromium: exit 2.
+
+    RefuseMissingEngine (rovo.allium at e0f0c44): tier_installed(browser) is the
+    playwright package and its Chromium binary. The engine probe, faked, finds the
+    package and a Chromium path that is not on disk; the sync, with the default
+    tier_installed (no injection), is refused before any request, standard error naming
+    the missing browser and both fixes, the report refused, no engine opened, the
+    server's log empty.
+    """
+    base = serve_site("spa")
+    out = initialised(base, tmp_path / "out", "auto")
+    probe_engine(monkeypatch, package=True, binary=tmp_path / "ms-playwright" / "chrome")
+    capsys.readouterr()
+    with HttpxFetcher() as fetcher:
+        code = _commands.sync(out, fetcher=fetcher, clock=FixedClock(), engine=unopened_engine)
+    assert code is ExitCode.usage
+    err = capsys.readouterr().err
+    for named in ("the Chromium browser", "playwright install chromium", "render_mode = never"):
+        assert named in err, named
+    data = load(out / "crawl-report.json")
+    assert data["report_status"] == "refused"
+    assert data["refusal_reason"] == "configured tier is not installed"
+    assert serve_site.paths(base) == []
+
+
+def test_rovo_fetch_with_a_config_whose_fetch_section_asks_auto_renders(
+    serve_site: SiteServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`rovo fetch URL --config PATH` whose [fetch] render_mode = "auto" (e0f0c44).
+
+    app.html is fetched at http, needs rendering, and climbs: the rendered heading is
+    printed, exit 0, the server saw robots.txt and then app.html twice (the http try,
+    the render's navigation), and nothing is written. plain.html, under the same
+    configuration, is fetched once and never rendered. Under [fetch] render_mode =
+    "never" app.html is printed as its http answer, with no render.
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    base = serve_site("spa")
+    app_url = f"{base}guide/app.html"
+    configs = tmp_path / "config"
+    configs.mkdir()
+    auto = configs / "auto.toml"
+    auto.write_text('[fetch]\nrender_mode = "auto"\n', encoding="utf-8")
+    never = configs / "never.toml"
+    never.write_text(
+        '[crawl]\nrender_mode = "auto"\n[fetch]\nrender_mode = "never"\n', encoding="utf-8"
+    )
+
+    def fetch(url: str, config: Path, engine: FakeEngine) -> ExitCode:
+        with HttpxFetcher() as fetcher:
+            return _commands.fetch(
+                url,
+                fetcher=fetcher,
+                clock=FixedClock(),
+                tier_installed=browser_installed,
+                engine=lambda: engine,
+                config_path=config,
+            )
+
+    rendering = FakeEngine({app_url: RENDERED})
+    assert fetch(app_url, auto, rendering) is ExitCode.ok
+    assert "# Interactive guide" in capsys.readouterr().out
+    assert rendering.renders == [app_url]
+    assert serve_site.paths(base) == [ROBOTS_PATH, APP_PATH, APP_PATH]
+    plain = FakeEngine()
+    assert fetch(f"{base}guide/plain.html", auto, plain) is ExitCode.ok
+    assert "# Plain guide" in capsys.readouterr().out
+    assert plain.renders == []
+    unused = FakeEngine({app_url: RENDERED})
+    assert fetch(app_url, never, unused) is ExitCode.ok
+    assert "# Interactive guide" not in capsys.readouterr().out
+    assert unused.renders == []
+    assert files_under(cwd) == []
 
 
 def test_rovo_fetch_prints_one_page_and_writes_nothing(

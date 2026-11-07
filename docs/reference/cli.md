@@ -148,8 +148,15 @@ HTTP only). A render makes no request of its own: its navigation is made as an H
 try is (robots.txt, redirects, the host's limiter, the `rovo/<version>` user agent),
 and each request the page makes is made the same way only to an allowed host whose
 robots.txt allows it, once, its `Retry-After` pausing the host for at most
-`retry_after_cap`; any other request is aborted. A sync whose `render_mode` is not
-`"never"` is refused before any request when playwright is not installed.
+`retry_after_cap`; any other request, one to a CDN included, is aborted. The navigation's
+own answer is an HTTP answer's equal for `Retry-After`: it pauses the host (the render is
+never retried), counts toward `retry_after_honored` and, past `retry_after_cap`, retires
+the host. A walk that climbed counts its `render_escalations` whatever its outcome,
+one that retires its host or stops on a tripped one included. A sync whose
+`render_mode` is not `"never"` is refused before any request unless both the playwright
+package and its Chromium (`playwright install chromium`) are installed; the message
+names the missing piece and the two ways forward, `playwright install chromium` or
+`render_mode = never`. The default, `"never"`, needs neither.
 
 A later `rovo sync` of the same mirror is incremental. Every page already in the mirror
 is fetched again, conditionally: the request carries the page's stored `ETag` as
@@ -272,7 +279,9 @@ transport error, a 429 or a 5xx is retried, robots.txt, sitemaps and `llms.txt` 
 doubling to 16 s), with 25% jitter either way, and at least the `Retry-After` an answer
 gives in seconds or as an HTTP date; nothing is requested from the host before that wait
 ends, and the host's `retry_after_honored` counts each honoured `Retry-After` that came with a 429
-or a 5xx. A `Retry-After` past `retry_after_cap` (120 s) on `/sitemap.xml`,
+or a 5xx, a render's navigation answer included. Once the host a robots.txt, sitemap or
+`llms.txt` request is for has tripped, that request makes no further retry or hop and
+ends with the answer it holds. A `Retry-After` past `retry_after_cap` (120 s) on `/sitemap.xml`,
 `/sitemap_index.xml`, `/llms.txt` or a child of an undeclared index ends that request
 silently, with no retry, and pauses the host for `retry_after_cap` (never shortening a
 longer pause); the sync then carries on. A page
@@ -299,8 +308,8 @@ a password form (a login wall), is converted and flagged `soft_block_suspected` 
 confidence; it never counts against the host. Each host has a breaker: once
 `min(breaker_window, breaker_min_outcomes)` (10) pages have settled and more than
 `block_rate_threshold` (0.2) of them were blocked or failed outright, the breaker trips.
-A `Retry-After` past `retry_after_cap` (120 s), however large, on a page, robots.txt or a
-declared sitemap, or an honoured `Crawl-delay` past it, retires the host the same way:
+A `Retry-After` past `retry_after_cap` (120 s), however large, on a page (rendered or
+not), robots.txt or a declared sitemap, or an honoured `Crawl-delay` past it, retires the host the same way:
 the answer stands (a page answering 429 is blocked, a 503 fails; robots.txt is refused;
 a declared sitemap is `sitemap_unavailable`). A tripped host gets no further request of
 any kind for the rest of the sync, robots.txt, sitemaps, `llms.txt` and redirect hops
@@ -343,7 +352,9 @@ requires confirmation"`); a `--url` that is not http or https, or not on an allo
 of the resolved scope (`allowed_hosts`, or the first seed's host when that is empty)
 (`"invalid or off-host target"`); a `--path` that is not a written page's path, a removed
 page's included (`"unknown target path"`); a browser or stealth engine the configuration
-needs that is not installed (`"configured tier is not installed"`); `robots = "ignore"`
+needs that is not installed, the browser's being the playwright package and its
+Chromium (`"configured tier is not installed"`; standard error names the missing piece
+and both fixes); `robots = "ignore"`
 (`"robots = ignore is only for an owner-testing run"`). The refusal is printed on
 standard error, and `crawl-report.json` is replaced by a refused report:
 `report_status: refused`, `run_id: null`, `exit_code: usage`, `refusal_reason` the text
@@ -364,22 +375,36 @@ Print one page's Markdown. Nothing is written.
 | Argument or option | Effect |
 | --- | --- |
 | `URL` | The page to fetch, an http or https URL. |
-| `--tier TIER` | Fetch at this tier only, `http`, `browser` or `stealth`; by default `http`. |
+| `--tier TIER` | Fetch at this tier only, `http`, `browser` or `stealth`; by default `render_mode` decides. |
+| `--config PATH` | Read this `rovo.toml`: its shared sections, then its `[fetch]` section. |
 
 `rovo fetch URL` fetches one page and prints its Markdown body, without frontmatter, on
-standard output, and exits 0. It needs no mirror and reads no `rovo.toml`: the profile
-is the one the catalogue picks by the URL's host, the scope is the one `rovo init` would
-derive from the URL (it decides which redirects are followed), and the policy is the
-standard one. The URL's `/robots.txt` is read first, and every request is paced and
-retried as a sync's is. With no `--tier`, or `--tier http`, the page is fetched over
-HTTP and never rendered; `--tier browser` renders it in the browser, as a sync does. It
-writes no file: no mirror, report, frontier or run.
+standard output, and exits 0. It needs no mirror. Without `--config` it uses the
+built-in defaults: the profile is the one the catalogue picks by the URL's host, the
+scope is the one `rovo init` would derive from the URL (it decides which redirects are
+followed), and `render_mode` is `"never"`. With `--config PATH` it reads that file's
+shared sections, then its `[fetch]` section, whose `render_mode` and `profile` override
+theirs ([the mirror reference](mirror.md#rovotoml) lists the keys); no `ROVO_` variable
+is read. The file's `[scope]` then decides which redirects are followed, by a sync's
+test, its seeds defaulting to the URL; with no profile named, the catalogue's pick for
+the URL's host applies. The policy is the standard one. The URL's `/robots.txt` is read
+first, and every request is paced and retried as a sync's is. `--tier` runs that tier
+only: `--tier http` is fetched over HTTP and never rendered, `--tier browser` renders the
+page in the browser, as a sync does. With no `--tier`, `render_mode` means what it means
+for a sync: `"never"` is HTTP only, `"auto"` starts over HTTP and climbs to the browser
+only when the page needs rendering, never to answer a block, and `"always"` starts at
+the browser. It writes no file: no mirror, report, frontier or run.
 
 It exits 1 and prints nothing when robots.txt disallows the URL (the page is never
 requested), or when the answer is blocked, is not HTML, is not a success, or never
 came. It exits 2 with no request, the problem on standard error, for `--tier stealth`
 or a URL that is not http or https (owner testing and the stealth tier need a mirror and
-an owner-testing sync), and for `--tier browser` when playwright is not installed.
+an owner-testing sync); for a `--config` that cannot be read or parsed, holds an unknown
+section or key or a bad value, names a profile the catalogue lacks or sets
+`unblocking.provider`, every bad key path named; and, when the page could be rendered
+(`--tier browser`, or no `--tier` under `render_mode` `"auto"` or `"always"`), when the
+playwright package or its Chromium is not installed, naming the missing piece and both
+fixes, as a sync does. `--tier http` is never refused for a missing engine.
 
 ## `rovo verify`
 

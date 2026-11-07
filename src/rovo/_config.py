@@ -1,7 +1,9 @@
 """Configuration layers for the command (rovo.allium): serves the command and the root.
 
-The layers are the built-in defaults, `<out>/rovo.toml`, the ROVO_<SECTION>__<FIELD>
-environment variables and the --set flags, a later layer winning key by key. May import the
+A sync's layers are the built-in defaults, `<out>/rovo.toml` (its [fetch] section
+ignored), the ROVO_<SECTION>__<FIELD> environment variables and the --set flags, a later
+layer winning key by key; `rovo fetch --config` reads the defaults, the file's shared
+sections, then its [fetch] section. May import the
 modules below it; never rovo._commands or rovo.cli.
 """
 
@@ -47,7 +49,7 @@ class RootConfig:
     refollow_unchanged_links: bool
 
 
-# rovo.allium's config block (rovo.allium 254 to 263), the one copy in code.
+# rovo.allium's config block (rovo.allium 262 to 271), the one copy in code.
 CONFIG = RootConfig(
     report_percentile=0.10,
     render_mode=RenderMode.never,
@@ -59,7 +61,7 @@ CONFIG = RootConfig(
 
 @dataclass(frozen=True, kw_only=True)
 class Configuration:
-    """The resolved configuration of one mirror (rovo.allium 73)."""
+    """The resolved configuration of one mirror (rovo.allium 81)."""
 
     valid: bool
     problems: tuple[str, ...]
@@ -105,7 +107,7 @@ class Configuration:
 
 @dataclass(frozen=True, kw_only=True)
 class SyncOptions:
-    """What one sync invocation asked for, beyond the configuration (rovo.allium 103)."""
+    """What one sync invocation asked for, beyond the configuration (rovo.allium 111)."""
 
     dry_run: bool
     confirmed: bool
@@ -191,15 +193,45 @@ def resolve_config(
     catalogue lacks.
     """
     problems: list[str] = []
-    try:
-        document = tomllib.loads(config_path(out_dir).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        document = {}
-        problems.append(f"{_CONFIG_FILE}: {error}")
-    entries = [*_file_entries(document), *_variable_entries(environ or {})]
+    shared = [
+        entry
+        for entry in _file_entries(_read_document(config_path(out_dir), problems))
+        if entry[0] != _FETCH  # A mirror's configuration accepts [fetch] and ignores it.
+    ]
+    entries = [*shared, *_variable_entries(environ or {})]
     entries.extend(_flag_entries(overrides, problems))
-    values = _read_entries(entries, problems)
-    settings = _with_defaults(values)
+    return _configuration(_read_entries(entries, problems, _SCHEMA), problems, None)
+
+
+def resolve_fetch_config(path: Path | None, url: str | None = None) -> Configuration:
+    """Realises rovo.allium resolve_fetch_config: defaults, the file's shared sections, [fetch].
+
+    With no path, the built-in defaults. With one, the file's shared sections as
+    resolve_config reads them, then its optional [fetch] section (render_mode and
+    profile only), whose keys override theirs key by key wherever [fetch] sits in the
+    file; no ROVO_ variable and no flag is read. Invalid, every problem named, as
+    resolve_config is. With no profile named, the profile is the catalogue's pick for
+    `url`, the fetched URL, else generic (the interim of T19-2, item 1).
+    """
+    problems: list[str] = []
+    entries = [] if path is None else _file_entries(_read_document(path, problems))
+    entries.sort(key=lambda entry: entry[0] == _FETCH)  # Stable: [fetch] last, so it wins.
+    values = _read_entries(entries, problems, {**_SCHEMA, _FETCH: _FETCH_KEYS})
+    return _configuration(values, problems, url)
+
+
+def _read_document(path: Path, problems: list[str]) -> dict[str, Any]:
+    """The TOML file at `path`; empty, the problem named, when it cannot be read or parsed."""
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        problems.append(f"{path.name}: {error}")
+        return {}
+
+
+def _configuration(values: dict[str, Any], problems: list[str], seed: str | None) -> Configuration:
+    """The values over the built-in defaults, the profile checked against the catalogue."""
+    settings = _with_defaults(values, seed)
     if profile_named(settings["profile_name"]) is None:
         problems.append(f"conversion.profile: no profile named {settings['profile_name']!r}")
     return Configuration(
@@ -308,6 +340,9 @@ _BAD = object()
 
 # One layer's setting: its section, its key (None for a section that is no table), its value.
 _Entry = tuple[str, str | None, object]
+# A section's keys: the Configuration field and the reader of its value; and the sections.
+_Keys = dict[str, tuple[str, Callable[[object], object]]]
+_Schema = dict[str, _Keys]
 
 
 def _file_entries(document: dict[str, Any]) -> list[_Entry]:
@@ -344,11 +379,13 @@ def _flag_entries(overrides: Sequence[str], problems: list[str]) -> list[_Entry]
     return entries
 
 
-def _read_entries(entries: Sequence[_Entry], problems: list[str]) -> dict[str, Any]:
+def _read_entries(
+    entries: Sequence[_Entry], problems: list[str], schema: _Schema
+) -> dict[str, Any]:
     """The settings by field, a later entry winning; each bad one named in `problems`."""
     values: dict[str, Any] = {}
     for section, key, value in entries:
-        keys = _SCHEMA.get(section)
+        keys = schema.get(section)
         if keys is None or key is None:
             problems.append(f"{section}: unknown section")
             continue
@@ -442,8 +479,8 @@ def _member(kind: type[enum.Enum]) -> Callable[[object], object]:
     return read
 
 
-# Each section's keys: the Configuration field and the reader of its value.
-_SCHEMA: dict[str, dict[str, tuple[str, Callable[[object], object]]]] = {
+# Each shared section's keys: the Configuration field and the reader of its value.
+_SCHEMA: _Schema = {
     "site": {"root_url": ("root_url", _url), "start_urls": ("start_urls", _urls)},
     "scope": {
         "allowed_hosts": ("allowed_hosts", _hosts),
@@ -467,12 +504,22 @@ _SCHEMA: dict[str, dict[str, tuple[str, Callable[[object], object]]]] = {
     "unblocking": {"provider": ("unblocking_provider", _string)},
 }
 
+# rovo fetch's own section: its keys override the shared ones for a one-off fetch.
+_FETCH = "fetch"
+_FETCH_KEYS: _Keys = {
+    "render_mode": ("render_mode", _member(RenderMode)),
+    "profile": ("profile_name", _string),
+}
 
-def _with_defaults(values: dict[str, Any]) -> dict[str, Any]:
-    """The built-in defaults, overridden key by key by the file's values."""
+
+def _with_defaults(values: dict[str, Any], seed: str | None = None) -> dict[str, Any]:
+    """The built-in defaults, overridden key by key by the file's values.
+
+    The default profile is the catalogue's pick for `seed`, by default the first seed.
+    """
     start_urls: tuple[str, ...] = values.get("start_urls", ())
     root_url: str | None = values.get("root_url")
-    seed = start_urls[0] if start_urls else root_url
+    seed = seed or (start_urls[0] if start_urls else root_url)
     default_profile = profile_for(seed, None) if seed is not None else None
     defaults: dict[str, Any] = {
         "root_url": None,

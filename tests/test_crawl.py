@@ -3022,8 +3022,11 @@ def test_derived_FetchAttempt_retryable(tmp_path: Path) -> None:
 def test_derived_FetchAttempt_retires_host(tmp_path: Path) -> None:
     """Verify derived value FetchAttempt.retires_host computes correctly.
 
-    An http answer worth a retry whose Retry-After is past retry_after_cap, while
-    Retry-After is honoured; on any try.
+    An answer worth a retry whose Retry-After is past retry_after_cap, while
+    Retry-After is honoured; on any try and whatever its tier (crawl.allium 502-513
+    at e0f0c44: the clause `tier = http` was removed, so a render's navigation answer
+    past the cap retires the host as an http answer does; re-propagated by T19,
+    origin T12).
     """
     _, _, walk = walked(tmp_path, site())
     cap = standard_policy().retry_after_cap
@@ -3035,7 +3038,8 @@ def test_derived_FetchAttempt_retires_host(tmp_path: Path) -> None:
         (answered(SEED, TOO_MANY, retry_after=cap), Tier.http, 1, False),
         (answered(SEED, TOO_MANY), Tier.http, 1, False),
         (dataclasses.replace(html_response(SEED, PAGE), retry_after=past), Tier.http, 1, False),
-        (answered(SEED, TOO_MANY, retry_after=past), Tier.browser, 1, False),
+        (answered(SEED, TOO_MANY, retry_after=past), Tier.browser, 1, True),
+        (answered(SEED, TOO_MANY, retry_after=cap), Tier.browser, 1, False),
     ]
     for response, tier, try_, expected in cases:
         attempt = attempt_on(walk, response, tier=tier, try_=try_)
@@ -3043,6 +3047,8 @@ def test_derived_FetchAttempt_retires_host(tmp_path: Path) -> None:
     walk.host.run.policy = dataclasses.replace(standard_policy(), honor_retry_after=False)
     ignored = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=past))
     assert ignored.retires_host is False
+    rendered = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=past), tier=Tier.browser)
+    assert rendered.retires_host is False
 
 
 def test_derived_FetchAttempt_failed_outright(tmp_path: Path) -> None:
@@ -3634,9 +3640,10 @@ def test_rule_failure_HttpRetry_2(tmp_path: Path) -> None:
 def test_rule_success_CountRetryAfter(tmp_path: Path) -> None:
     """Verify rule CountRetryAfter succeeds when all preconditions are met.
 
-    An http attempt whose retryable answer (a 429 or any 5xx) carries a Retry-After,
-    while honoured, counts once: every honoured Retry-After is counted (crawl.allium
-    ecfa257), a 500 and a 502 as much as a 429 or a 503.
+    An attempt whose retryable answer (a 429 or any 5xx) carries a Retry-After, while
+    honoured, counts once: every honoured Retry-After is counted (crawl.allium ecfa257),
+    a 500 and a 502 as much as a 429 or a 503. Re-propagated by T19 (origin T12, spec
+    e0f0c44): at any tier, a render's navigation answer counting as an http answer does.
     """
     _, _, walk = walked(tmp_path, site())
     host = walk.host
@@ -3645,6 +3652,9 @@ def test_rule_success_CountRetryAfter(tmp_path: Path) -> None:
     for counted, status in enumerate(statuses, start=1):
         assert count_retry_after(attempt_on(walk, answered(SEED, status, retry_after=wait)))
         assert host.retry_after_honored == counted, status
+    rendered = attempt_on(walk, answered(SEED, TOO_MANY, retry_after=wait), tier=Tier.browser)
+    assert count_retry_after(rendered)
+    assert host.retry_after_honored == len(statuses) + 1
 
 
 def test_rule_failure_CountRetryAfter_1(tmp_path: Path) -> None:
@@ -3664,20 +3674,11 @@ def test_rule_failure_CountRetryAfter_1(tmp_path: Path) -> None:
 def test_rule_failure_CountRetryAfter_2(tmp_path: Path) -> None:
     """Verify rule CountRetryAfter is rejected when requires clause fails.
 
-    requires: attempt.tier = http.
-    """
-    _, _, walk = walked(tmp_path, site())
-    response = answered(SEED, SERVICE_UNAVAILABLE, retry_after=timedelta(seconds=4))
-    assert not count_retry_after(attempt_on(walk, response, tier=Tier.browser))
-    assert walk.host.retry_after_honored == 0
-
-
-def test_rule_failure_CountRetryAfter_3(tmp_path: Path) -> None:
-    """Verify rule CountRetryAfter is rejected when requires clause fails.
-
     requires: attempt.response.retry_after != null and attempt.response.retryable.
     A retryable answer with no Retry-After, and a Retry-After on an answer that is not
-    retryable (a 200, a 404), count nothing.
+    retryable (a 200, a 404), count nothing. Re-propagated by T19 (origin T12, spec
+    e0f0c44): was test_rule_failure_CountRetryAfter_3; the clause `attempt.tier = http`
+    is gone, so its id is now .2.
     """
     _, _, walk = walked(tmp_path, site())
     wait = timedelta(seconds=4)
@@ -3691,11 +3692,12 @@ def test_rule_failure_CountRetryAfter_3(tmp_path: Path) -> None:
     assert walk.host.retry_after_honored == 0
 
 
-def test_rule_failure_CountRetryAfter_4(tmp_path: Path) -> None:
+def test_rule_failure_CountRetryAfter_3(tmp_path: Path) -> None:
     """Verify rule CountRetryAfter is rejected when requires clause fails.
 
     requires: attempt.walk.host.run.policy.honor_retry_after (off only in owner testing,
-    here on unit inputs).
+    here on unit inputs). Re-propagated by T19 (origin T12, spec e0f0c44): was
+    test_rule_failure_CountRetryAfter_4; the id is now .3.
     """
     run, _, walk = walked(tmp_path, site())
     run.policy = dataclasses.replace(standard_policy(), honor_retry_after=False)

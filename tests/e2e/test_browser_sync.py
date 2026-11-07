@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from fakes import FixedClock
 from rovo import _commands
-from rovo._crawl.browser import PlaywrightEngine
+from rovo._crawl.browser import PlaywrightEngine, missing_browser_piece
 from rovo._crawl.fetch import HttpxFetcher
 from rovo._exit import ExitCode
 from rovo._mirror.model import Tier
@@ -110,3 +110,47 @@ def test_rovo_fetch_renders_in_chromium(
     assert sorted(path for path in tmp_path.rglob("*") if path.is_file()) == []
     assert serve_site.paths(base)[0] == ROBOTS_PATH
     assert "/private/tracker.js" not in serve_site.paths(base)
+
+
+def test_the_engine_probe_finds_playwright_and_chromium() -> None:
+    """tier_installed(browser) (rovo.allium at e0f0c44): the package and its Chromium.
+
+    With the browser extra and `playwright install chromium` done, the real probe
+    reports nothing missing.
+    """
+    assert missing_browser_piece() is None
+
+
+def test_rovo_fetch_with_a_config_asking_always_renders_in_chromium(
+    serve_site: SiteServer,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`rovo fetch URL --config PATH`, [fetch] render_mode = "always", real Chromium.
+
+    No --tier and no injected tier_installed: the real probe finds the engine, the walk
+    starts at the browser, and the script-written heading is printed; exit 0, no file,
+    robots.txt first, app.html requested once (no http try), /private/tracker.js never.
+    """
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    config = tmp_path / "rovo.toml"
+    config.write_text('[fetch]\nrender_mode = "always"\n', encoding="utf-8")
+    base = serve_site("spa")
+    with HttpxFetcher() as fetcher:
+        code = _commands.fetch(
+            f"{base}guide/app.html",
+            fetcher=fetcher,
+            clock=FixedClock(),
+            engine=PlaywrightEngine,
+            config_path=config,
+        )
+    assert code is ExitCode.ok
+    assert f"# {HEADING}" in capsys.readouterr().out
+    assert sorted(path for path in cwd.rglob("*") if path.is_file()) == []
+    paths = serve_site.paths(base)
+    assert paths[0] == ROBOTS_PATH
+    assert paths.count("/guide/app.html") == 1
+    assert "/private/tracker.js" not in paths

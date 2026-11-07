@@ -222,7 +222,7 @@ def follow(  # noqa: PLR0913  One request's URL, its limiter and validators, and
     and its redirect_stop. A hop onto a host whose breaker has tripped is not requested
     and `ready` is not asked (its robots.txt is not read): it ends as the error answer
     RETIRED_HOP, as does a hop whose host the robots.txt read `ready` makes retires
-    (crawl.allium 834-838, 1636-1640). `ready(target)` gives the host name whose limiter
+    (crawl.allium 840-845, 1667-1671). `ready(target)` gives the host name whose limiter
     the hop waits at, or None when robots.txt disallows the hop, which ends as the error
     answer DISALLOWED_HOP.
     The final answer's redirect_hops are the URLs left behind, the requested one first.
@@ -308,11 +308,12 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
     `url`. A redirect stopped (a loop, the hop limit, out of scope) or a 3xx with no
     usable Location ends the tries as an error answer; a hop `follow` refuses as an error
     answer (a retired host, or robots.txt disallowing it) is retried as any error answer
-    is (crawl.allium 834 to 845, 1742 to 1743). `ready` gives a hop's host, or None when
-    robots.txt disallows it; by default the hop's open host, else its host name's pending
-    limiter (`pending_limiter`), with no robots.txt read (robots.txt itself is not
-    governed by robots.txt). The size covers every try's and every hop's bytes; no try
-    counts as a fetch attempt.
+    is (crawl.allium 840 to 852, 1664 to 1671), but once the fetch's own host has
+    tripped no retry is made: the fetch ends with the answer it holds (868 to 875).
+    `ready` gives a hop's host, or None when robots.txt disallows it; by default the
+    hop's open host, else its host name's pending limiter (`pending_limiter`), with no
+    robots.txt read (robots.txt itself is not governed by robots.txt). The size covers
+    every try's and every hop's bytes; no try counts as a fetch attempt.
     """
     policy = run.policy
     scope = run.target.scope
@@ -338,7 +339,9 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
             return dataclasses.replace(response, size=received, error=error)
         if response.retryable and response.retry_after is not None and policy.honor_retry_after:
             host.retry_after_honored += 1
-        if past_cap(response, policy) or not response.retryable or try_ >= CONFIG.http_attempts:
+        last = past_cap(response, policy) or not response.retryable or try_ >= CONFIG.http_attempts
+        # Once the fetch's own host has tripped, no retry is made (BreakerStopsTheRun).
+        if last or host.breaker_tripped:
             return dataclasses.replace(response, size=received)
         back_off(host, try_, response.retry_after)
         try_ += 1

@@ -14,7 +14,9 @@ the request is made, paced and logged by the crawl exactly as a real render's wo
 then asks the callback for each subrequest the page names, and returns the DOM its map
 holds for the URL (else the navigation's own markup). A URL mapped to None is a render
 that never reaches its load state. `unopened_engine` is an engine factory for a sync
-that must open no engine.
+that must open no engine. `probe_engine` makes rovo._crawl.browser's engine probe
+(tier_installed(browser): the playwright package and its Chromium binary, rovo.allium
+RefuseMissingEngine at e0f0c44) see a given install, so no test needs a real Chromium.
 
 `FixedClock` and `SteppingTimer` both satisfy the crawl's Timer seam (`now()` and
 `sleep(seconds)`) and both record every sleep they are asked for; neither sleeps for
@@ -29,6 +31,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+import pytest
+
+from rovo._crawl import browser
 from rovo._crawl.fetch import Fetcher, Validators
 from rovo._crawl.model import SiteResponse
 
@@ -257,6 +262,23 @@ def unopened_engine() -> FakeEngine:
     """An engine factory for a sync that must not open an engine: calling it fails."""
     msg = "no engine is opened by this sync"
     raise AssertionError(msg)
+
+
+def probe_engine(monkeypatch: pytest.MonkeyPatch, *, package: bool, binary: Path | None) -> None:
+    """Make the engine probe see the given install, with no real Chromium consulted.
+
+    `package` is whether the playwright package is found; `binary` is the path
+    playwright reports for its Chromium (None: it cannot say), which exists or not as
+    the test arranged it. With no package, asking for the binary fails the test: the
+    probe never asks for the browser of a package it does not have.
+    """
+
+    def executable() -> Path | None:
+        assert package, "the Chromium binary is probed only when playwright is installed"
+        return binary
+
+    monkeypatch.setattr(browser, "playwright_importable", lambda: package)
+    monkeypatch.setattr(browser, "chromium_executable", executable)
 
 
 class FixedClock:
