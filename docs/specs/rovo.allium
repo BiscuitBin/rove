@@ -811,8 +811,11 @@ rule RecordCrashAfterRun {
         ReportReady(run: run)
 
     @guidance
-        -- Decided: a crash after the run saves neither the manifest nor
-        -- the frontier, so the disk keeps the last finalisation's state.
+        -- Decided: a crash after the run has saved the manifest and the
+        -- frontier only if finalisation had finished before it: a crash in
+        -- finalisation saves neither, so the disk keeps the last finished
+        -- finalisation's state, while a crash as the report is assembled
+        -- comes after this run's finalisation saved both.
         -- The run's record still joins the mirror's run history with the
         -- run's own status, so next_run_id moves past it and the next sync
         -- takes the next id (crawl's RunIdentityIsUnique).

@@ -1742,8 +1742,12 @@ rule AttemptTier {
         -- now: a render's subrequest goes only to an origin of an allowed
         -- host, after that origin's robots.txt is read (RobotsRequested, as
         -- for a hop) and allows it, under that host's limiter; it is never
-        -- retried, and its Retry-After pauses the host that answered it
-        -- (later_of, at most retry_after_cap), never retiring it. Decided:
+        -- retried, and the Retry-After of a retryable answer (an error, a
+        -- 429 or a 5xx) pauses the host that answered it (later_of, at most
+        -- retry_after_cap), never retiring it; any other answer's
+        -- Retry-After pauses nothing. Decided: a subrequest whose method is
+        -- not GET or HEAD is aborted, never sent; a GET or HEAD subrequest
+        -- is fetched through rovo as above. Decided:
         -- as for a page's answer (FetchAttempt.answering_host_name), the
         -- host that answered is the host of the subrequest's last request,
         -- so a subrequest sent to one allowed host and redirected to

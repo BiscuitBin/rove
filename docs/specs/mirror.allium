@@ -155,7 +155,11 @@ value CrawlScope {
 }
 
 -- The YAML block at the top of every page file. Keys are sorted and absent
--- values are omitted. It carries no wall-clock time and none of the site's
+-- values are omitted. Decided: it is a strict subset of YAML, one
+-- key: <JSON value> line per key, the value JSON-encoded, which is the
+-- only form rovo writes and the only form verify reads; any other form,
+-- valid YAML included, does not parse (invalid_page_file). It carries no
+-- wall-clock time and none of the site's
 -- validators: fetch times, etag and last_modified live in the manifest,
 -- so an unchanged page's file never changes. Decided: sitemap_lastmod
 -- stays in it, so a sitemap lastmod that moves rewrites the page file.
@@ -1418,7 +1422,8 @@ rule VerifyPages {
         -- (unmanaged_file), while anything else at the mirror's root that
         -- is not a managed file (.git/, a README) is the operator's and is
         -- never reported; a page file
-        -- without the required frontmatter keys or that does not parse
+        -- without the required frontmatter keys or whose frontmatter does
+        -- not parse as one key: <JSON value> line per key (Frontmatter)
         -- (invalid_page_file); a body whose digest differs from the
         -- frontmatter's or the manifest's content_digest
         -- (digest_mismatch); a gate that fails on the current body against
@@ -1546,7 +1551,8 @@ surface MirrorContents {
 
     @guarantee PageFileProvenance
         -- Every page file starts with YAML frontmatter whose keys are
-        -- sorted. It always carries source_url, title, content_digest,
+        -- sorted, written one key: <JSON value> line per key (Frontmatter);
+        -- a hand edit into any other form is reported invalid_page_file. It always carries source_url, title, content_digest,
         -- quality_score, low_confidence, quality_flags, tier, method,
         -- profile and keywords; description, canonical_url, breadcrumbs,
         -- sitemap_lastmod, version and locale appear only when they have a

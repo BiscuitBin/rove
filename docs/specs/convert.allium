@@ -140,6 +140,7 @@ value QualityResult {
 -- The main content of one page, as extraction found it, with the metadata
 -- read from the document.
 value ExtractedContent {
+    source_url: String              -- the page URL extract was given; normalize tells a same-page link by it
     html: String                    -- the extracted main content, chrome stripped
     title: String                   -- first h1 in the content, else og:title, else <title>, else the URL
     description: String             -- meta description, else the first prose paragraph cut at config.description_max_chars
@@ -252,7 +253,9 @@ contract Fidelity {
         -- exactly one level-one heading (synthesised from the title when
         -- the content has none, extra ones demoted), renders heading ids
         -- in the profile's anchor style, keeps every source id as an
-        -- anchor, and ends with exactly one LF.
+        -- anchor, and ends with exactly one LF. Decided: a source id is an
+        -- id on an element inside the extracted content; the selected
+        -- content root's own id is not one, so it reaches no anchor.
 
     @invariant ScoreIsAFraction
         -- The gate weights sum to one, so score lies between 0 and 1, and
@@ -278,7 +281,11 @@ contract Fidelity {
         -- suffixes or anchor islands; embeds -> placeholders; sup, sub, kbd
         -- and mark -> kept inline HTML; math -> TeX delimiters or an
         -- island; footnotes -> [^n] with definitions; details -> an island
-        -- with Markdown inside. Element counts compare normalised against
+        -- with Markdown inside. Decided: only a same-page reference becomes
+        -- a footnote: a link that is a bare #id, or whose target with its
+        -- fragment dropped is the page's own URL (ExtractedContent.source_url,
+        -- its fragment dropped); a link to another page stays a link even
+        -- when its fragment matches a local footnote id. Element counts compare normalised against
         -- output, never raw against output, because tab expansion adds
         -- headings by design. When maintainers review a golden change, the
         -- output that keeps more of the page wins.
