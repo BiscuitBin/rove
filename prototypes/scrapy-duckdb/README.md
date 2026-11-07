@@ -314,3 +314,89 @@ agent's permission system as an irreversible deletion, and the maintainer chose 
 end of the prototype instead, once tickets 03 to 05 no longer need the guest's HTTP cache. Until
 then its code is read but not run, and ticket 03 reuses this machine rather than recreating it,
 so no second image pull or Scrapy install happens. The destroy sample is added when it runs.
+
+### Ticket 03: seeds to DuckDB
+
+One live crawl ran, on the `scrapy-proto` that ticket 02 left stopped, after review moment 1's
+valid finding was fixed. Moment 1 (gpt-6-astra) raised two findings. One was valid: a robots.txt
+fetch on a subdomain reached through a redirect escaped the exact-host guard, and `Guard` now
+checks the host first. The other was judged invalid: it asked for 429 and 503 to be kept for
+replay. Commands ran from `prototypes/scrapy-duckdb`, each through `uv run --offline` (uv makes
+no request; the guest does).
+
+```sh
+scrapyproto vm up
+scrapyproto crawl --start-url https://learn.microsoft.com/en-us/graph/api/overview --max-pages 25
+```
+
+The crawl's output, trimmed to the run lines, the stats and the summary:
+
+```text
+[crawl] run 20261107T111039Z-c29b: ['https://learn.microsoft.com/en-us/graph/api/overview'], hosts ['learn.microsoft.com'], max 25 pages
+[crawl] lock: taken
+[crawl] started in the guest with background=True (pid 114); log /out/scrapyproto/runs/20261107T111039Z-c29b/crawl.log
+[crawl] 0s: alive, 0 pages in the feed
+[crawl] exited 0; close reason closespider_pagecount; wall 26.5s
+downloader/request_count: 27
+downloader/response_status_count/200: 26
+downloader/response_status_count/301: 1
+httpcache/firsthand: 27
+httpcache/miss: 27
+httpcache/store: 27
+item_scraped_count: 25
+proto/frontier_left: 442
+proto/pages: 25
+proto/requests_issued: 25
+proto/robots_status/learn.microsoft.com: 200
+response_received_count: 26
+robotstxt/request_count: 1
+[load] feed lines 25, unique URLs 25, loaded 25
+---- summary (read back from DuckDB) ----
+run 20261107T111039Z-c29b: 25 pages in `pages` (25 distinct URLs), runs.pages = 25
+wall time: 26.5 s (guest clock, wrapper start to Scrapy exit)
+html bytes (UTF-8, as stored): 1880793 across 25 pages with html
+pages by status:   200: 25
+depth histogram:   0: 1, 1: 24
+store: .../ai_tmp/scrapy-duckdb/prototype.duckdb, 1323008 bytes after CHECKPOINT
+```
+
+The two tables are condensed here; the log prints them as columns. Robots allowed the crawl
+(robots.txt 200) and nothing was throttled. **The cap did not overshoot:** 25 pages, 25 items,
+25 spider requests. The 27 downloads are those 25, robots.txt and one redirect hop: the seed
+answered 301 to `...overview?view=graph-rest-1.0`, which the store keeps as `final_url`. 442 links
+were left unfollowed. The 25 pages are the seed and 24 of its links (depth 1), so this is a
+breadth sample, not a section of the docs.
+
+`scrapyproto runs` lists the one run (25 pages, 26.5 s). `scrapyproto sql` over `pages`:
+
+```text
+status  depth  pages  html_bytes
+------  -----  -----  ----------
+200     0      1      52746
+200     1      24     1828047
+```
+
+**Replay.** `crawl` with the same seed and cap plus `--replay` exited 0 in 0.3 s with close reason
+`closespider_pagecount`. Its full stats file has `httpcache/hit: 27` and
+`downloader/request_count: 27`, and no `httpcache/firsthand`, `httpcache/miss` or
+`httpcache/ignore` key. The live run had `httpcache/firsthand: 27`. Scrapy counts
+`downloader/request_count` in `DownloaderStats` (850), before `HttpCacheMiddleware` (900) answers
+from the cache, so all 27 requests, robots.txt included, were cache hits. `firsthand` is counted
+only for a response that came from the network. Hence no download reached the site. The replay
+loaded 25 pages, all 25 URLs the same as the live run's, with the same `content_hash` and depth
+(0 only-live, 0 only-replay). Inference, not measured: the cache serves each response as
+recorded, so the spider sees the same links in the same order and fills the cap with the same
+URLs. One 25-page run does not show that this holds for a larger crawl.
+The replay loaded into the same store as a second run, `20261107T111121Z-fe04`, so `pages` now
+holds 50 rows and the store is 2371584 bytes after `CHECKPOINT`.
+
+**Stopped machine.** After `vm down`, the same `crawl` printed the following, exited 1 and left the
+machine `stopped`:
+
+```text
+error: scrapy-proto is stopped; run `scrapyproto vm up` first. Nothing was requested.
+```
+
+Not shown by this run: the 30 s progress line (the crawl ended first), the deadline and kill path,
+the lock's `busy` and `stale` branches, and a throttled or robots-forbidden close. The per-item
+comparison in ticket 05 rests on these 25 pages.

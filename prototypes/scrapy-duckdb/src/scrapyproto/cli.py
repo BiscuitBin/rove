@@ -1,20 +1,24 @@
-"""PROTOTYPE command line: `scrapyproto vm up|status|down|destroy`, each a fresh process."""
+"""PROTOTYPE command line: `scrapyproto vm up|status|down|destroy`, `crawl`, `load`, `runs` and `sql`."""
 
+import json
 import secrets
 import time
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
+import duckdb
 import typer
 from smol import Machine, SmolError
 
-from scrapyproto import machine as m, state
+from scrapyproto import crawl as c, machine as m, state, store
 
 app = typer.Typer(name="scrapyproto", no_args_is_help=True, add_completion=False)
 vm = typer.Typer(no_args_is_help=True)
 app.add_typer(vm, name="vm", help="Drive the Scrapy microVM across invocations.")
 
 StateDir = Annotated[Path | None, typer.Option("--state-dir", help="Where state.json lives.")]
+Db = Annotated[Path, typer.Option("--db", help="The DuckDB store.")]
+FeedsDir = Annotated[Path, typer.Option("--feeds-dir", help="Where pulled feeds and run manifests live.")]
 
 NOT_OURS = (
     f"{m.MACHINE_NAME} exists but no state file here records this machine (another checkout's?); "
@@ -183,3 +187,180 @@ def vm_destroy(state_dir: StateDir = None) -> None:
     except (SmolError, OSError) as exc:
         _fail(exc, state_dir)
     _finish(state_dir)
+
+
+# ---- ticket 03: crawl, load, runs, sql ------------------------------------------------------------
+
+OK_REASONS = {"finished", "closespider_itemcount", "closespider_pagecount"}
+STAT_PREFIXES = (
+    "proto/", "httpcache/", "robotstxt/", "offsite/", "retry/", "downloader/request_count",
+    "downloader/response_count", "downloader/response_status_count", "downloader/exception_count",
+    "item_scraped_count", "response_received_count", "finish_reason", "elapsed_time_seconds", "log_count/ERROR",
+)
+LOG_TAIL = 30
+
+
+def _running_or_fail(state_dir: Path | None) -> Machine:
+    """Attach only to this checkout's machine, already running; otherwise exit 1 before any request."""
+    saved = state.load(state_dir)
+    mach = _open_or_fail(state_dir)
+    if mach is None:
+        _fail(f"no machine {m.MACHINE_NAME}; run `scrapyproto vm up` first. Nothing was requested.", state_dir)
+    if not m.owned(saved):
+        _fail(NOT_OURS, state_dir)
+    try:
+        now = mach.state()
+    except SmolError as exc:
+        _fail(exc, state_dir)
+    if now != "running":
+        _fail(f"{m.MACHINE_NAME} is {now}; run `scrapyproto vm up` first. Nothing was requested.", state_dir)
+    try:
+        # Running and owned: this attaches without a boot (a stop landing in between is the README's limit).
+        return m.connect_existing(state_dir)
+    except (SmolError, RuntimeError) as exc:
+        _fail(exc, state_dir)
+
+
+def _print_stats(stats: dict[str, object]) -> None:
+    typer.echo("---- scrapy stats (selected) ----")
+    for key in sorted(stats):
+        if key.startswith(STAT_PREFIXES):
+            typer.echo(f"{key}: {stats[key]}")
+
+
+def _host_paths(feeds_dir: Path, run_id: str) -> dict[str, Path]:
+    return {kind: feeds_dir / f"{run_id}.{kind}" for kind in ("jsonl", "run.json", "stats.json", "log")}
+
+
+@app.command("crawl")
+def crawl_cmd(  # noqa: PLR0913  the ticket's flags
+    start_url: Annotated[list[str], typer.Option("--start-url", help="A seed URL; repeatable.")],
+    max_pages: Annotated[int, typer.Option("--max-pages", help="Pages to fetch at most, enforced by the spider.")],
+    allowed_host: Annotated[
+        list[str] | None, typer.Option("--allowed-host", help="Exact host to stay on; default the seeds' hosts."),
+    ] = None,
+    replay: Annotated[
+        bool, typer.Option("--replay", help="Serve from the guest's HTTP cache; drop anything not in it."),
+    ] = False,
+    render: Annotated[
+        bool, typer.Option("--render", help="Print what would run in the guest, and exit; no machine call."),
+    ] = False,
+    state_dir: StateDir = None,
+    db: Db = store.DEFAULT_DB,
+    feeds_dir: FeedsDir = store.FEEDS_DIR,
+) -> None:
+    """Crawl from the seeds inside the guest, pull the feed, bulk-load it into DuckDB, print the summary."""
+    try:
+        p = c.plan(c.new_run_id(), start_url, allowed_host or [], max_pages, replay=replay)
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    if render:
+        typer.echo(c.render(p))
+        return
+    mach = _running_or_fail(state_dir)
+    typer.echo(f"[crawl] run {p.run_id}: {p.start_urls}, hosts {p.allowed_hosts}, max {p.max_pages} pages"
+        + (", replay from the guest cache" if p.replay else ""))
+    try:
+        c.prepare(mach, p)
+        typer.echo(f"[crawl] lock: {c.acquire(mach, p)}")
+        try:
+            pid = c.launch(mach, p)
+        except BaseException:
+            c.release(mach, p)
+            raise
+        typer.echo(f"[crawl] started in the guest with background=True (pid {pid}); log {p.run_dir}/crawl.log")
+        outcome = c.collect(mach, p, c.watch(mach, p, typer.echo))
+        if outcome.exit_code is None:
+            # The wrapper died before its own release; free the lock only if it still names this run.
+            c.release(mach, p)
+    except SmolError as exc:
+        _fail(f"lost the machine during run {p.run_id} (stopped by another process?): {exc}", state_dir)
+    except RuntimeError as exc:
+        _fail(exc, state_dir)
+    close_reason = str(outcome.stats.get("proto/close_reason", "unknown"))
+    wall = (
+        outcome.finished_epoch - outcome.started_epoch
+        if outcome.started_epoch is not None and outcome.finished_epoch is not None
+        else None
+    )
+    manifest = {
+        "run_id": p.run_id,
+        "start_urls": p.start_urls,
+        "scope": p.scope(),
+        "started_epoch": outcome.started_epoch,
+        "finished_epoch": outcome.finished_epoch,
+        "wall_seconds": wall,
+        "exit_code": outcome.exit_code,
+        "close_reason": close_reason,
+        "outcome": outcome.why,
+        "guest_run_dir": p.run_dir,
+    }
+    paths = _host_paths(feeds_dir, p.run_id)
+    # The manifest lands first: a feed on the host always has one, so `scrapyproto load` can recover it.
+    store.write_atomic(paths["run.json"], json.dumps(manifest, indent=1).encode())
+    if outcome.feed is not None:
+        store.write_atomic(paths["jsonl"], outcome.feed)
+    store.write_atomic(paths["stats.json"], json.dumps(outcome.stats, indent=1, sort_keys=True).encode())
+    store.write_atomic(paths["log"], outcome.log)
+    typer.echo(f"[crawl] {outcome.why}; close reason {close_reason}; wall "
+        + (f"{wall:.1f}s" if wall is not None else "unknown"))
+    typer.echo(f"[crawl] pulled to {feeds_dir}: feed " + ("yes" if outcome.feed is not None else "NONE")
+        + ", stats, log, run manifest")
+    _print_stats(outcome.stats)
+    if outcome.exit_code != 0 or close_reason not in OK_REASONS or outcome.feed is None:
+        tail = outcome.log.decode("utf-8", "replace").splitlines()[-LOG_TAIL:]
+        typer.echo(f"---- last {len(tail)} lines of crawl.log ----")
+        typer.echo("\n".join(tail))
+        hint = f"`scrapyproto load {p.run_id}` loads it" if outcome.feed is not None else "there is no feed"
+        _fail(f"the spider did not finish cleanly ({outcome.why}, {close_reason}); not loaded, {hint}", state_dir)
+    try:
+        pages, check = store.load(db, manifest, paths["jsonl"])
+    except (store.FeedError, duckdb.Error, OSError) as exc:
+        _fail(f"load failed, nothing written to the store: {exc}", state_dir)
+    _print_load(check, pages)
+    typer.echo("---- summary (read back from DuckDB) ----")
+    typer.echo(store.summary(db, p.run_id))
+    _finish(state_dir)
+
+
+def _print_load(check: store.FeedCheck, pages: int) -> None:
+    typer.echo(f"[load] feed lines {check.lines}, unique URLs {check.unique_urls}, loaded {pages}")
+    if check.duplicate_urls:
+        typer.echo(f"[load] {len(check.duplicate_urls)} duplicate URL lines dropped (earliest fetch kept): "
+            + ", ".join(check.duplicate_urls[:5]))
+
+
+@app.command("load")
+def load_cmd(run_id: str, db: Db = store.DEFAULT_DB, feeds_dir: FeedsDir = store.FEEDS_DIR) -> None:
+    """Bulk-load a pulled feed and its run manifest; for a crawl whose load did not happen."""
+    paths = _host_paths(feeds_dir, run_id)
+    try:
+        manifest = json.loads(paths["run.json"].read_text())
+        pages, check = store.load(db, manifest, paths["jsonl"])
+    except (store.FeedError, duckdb.Error, OSError, ValueError, KeyError) as exc:
+        typer.echo(f"error: load failed, nothing written to the store: {_one_line(exc)}", err=True)
+        raise typer.Exit(1) from exc
+    _print_load(check, pages)
+    typer.echo("---- summary (read back from DuckDB) ----")
+    typer.echo(store.summary(db, run_id))
+
+
+@app.command("runs")
+def runs_cmd(db: Db = store.DEFAULT_DB) -> None:
+    """List the runs table."""
+    try:
+        typer.echo(store.runs(db))
+    except (duckdb.Error, OSError) as exc:
+        typer.echo(f"error: {_one_line(exc)}", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("sql")
+def sql_cmd(query: str, db: Db = store.DEFAULT_DB) -> None:
+    """Print a query's result; the store is opened read-only."""
+    try:
+        typer.echo(store.sql(db, query))
+    except (duckdb.Error, OSError) as exc:
+        typer.echo(f"error: {_one_line(exc)}", err=True)
+        raise typer.Exit(1) from exc
