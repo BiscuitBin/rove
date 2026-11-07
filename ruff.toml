@@ -3,7 +3,9 @@ target-version = "py313"
 line-length = 99
 src = ["src", "tests"]
 # Normal discovery skips deliberately broken controls; generated paths are gitignored.
-extend-exclude = ["tests/fixtures/py-lint-violation"]
+# prototypes/ holds throwaway, standalone uv projects on throwaway branches, outside
+# the gate; it is never merged to main.
+extend-exclude = ["tests/fixtures/py-lint-violation", "prototypes"]
 # Leave force-exclude at its false default: explicitly named positive controls must run.
 
 [lint]
