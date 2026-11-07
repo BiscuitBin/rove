@@ -72,7 +72,9 @@ external entity DocumentationSite {
 
 -- Opaque owner-provided test access or an existing browser session for
 -- one declared host. Its contents stay outside this model, the report,
--- the log and every page file.
+-- the log and every page file. Decided, for now: no way to supply one
+-- exists, so an OwnerTestOptions' access is always empty and no request
+-- has access applied.
 external entity OwnerAccess {
     host: String
 }
@@ -236,7 +238,7 @@ entity Run {
     stealth_mode: StealthMode
     max_age: Duration?
     refollow_unchanged_links: Boolean   -- an unchanged page's stored links are queued again (RefollowUnchangedLinks)
-    targets: Set<String>                -- operator-named identities, or an owner-testing run's seeds
+    targets: Set<String>                -- operator-named identities; empty for an owner-testing run (decided), whose seeds are active_urls
     forced_refetch: Set<String>         -- refetched without validators: targets, else pages past max_age
     active_urls: Set<String>            -- owner testing: seeds plus admitted links
     recheckable_urls: Set<String>       -- full run: settled rows PrepareRun left alone, re-pended once when discovery names them (Enqueue)
@@ -753,8 +755,12 @@ rule Discover {
         -- sorted order. A targeted
         -- run opens only its targets' hosts, so their robots.txt is still
         -- read, and walks no seeds, sitemaps or llms.txt; an owner-testing
-        -- run likewise. Every host is opened before any sitemap, llms.txt
-        -- or page request to it.
+        -- run likewise. Decided: an owner-testing run's targets are empty
+        -- (an owner request names no URL or path, so StartSync resolves
+        -- none), so its discovery opens no host and its forced_refetch is
+        -- empty; each host of its seeds is opened by OpenHostForEntry
+        -- before its first fetch. Every host is opened before any sitemap,
+        -- llms.txt or page request to it.
         -- Discovery runs in one order, which is the discovery order
         -- next_pending breaks its last tie with (SelectBatch), so it decides
         -- the dry run's listing and which rows a page budget admits. The
@@ -1520,7 +1526,9 @@ rule OpenHostForEntry {
 
     @guidance
         -- A host a start URL names outside the allowed hosts is opened on
-        -- first use; its robots.txt is read before its first page.
+        -- first use; its robots.txt is read before its first page. An
+        -- owner-testing run's hosts are opened here too, since its
+        -- discovery opens none (Discover).
 }
 
 -- An entry on a known host at an origin whose robots.txt the run has not
@@ -1633,7 +1641,8 @@ rule AttemptTier {
         -- (soft, only once the host has a text baseline) or a login wall
         -- (soft). The challenge recognisers name no header, page marker,
         -- reference or cookie yet: until they are specified none is
-        -- recognised, and such an answer falls to the later checks.
+        -- recognised, and such an answer falls to the later checks (an
+        -- open question below).
         -- classify_block cannot see the try, so every 429 is hard, but
         -- only the standing attempt's verdict is disposed of and fed
         -- (DisposeFetch, FeedBreaker): a 429 blocks once HttpRetry's
@@ -1646,7 +1655,8 @@ rule AttemptTier {
         -- run.policy only for a selected owned host of an owner-testing
         -- run, the standard policy otherwise, before redirects, browser
         -- subrequests, robots, discovery and retries alike. OwnerAccess is
-        -- applied only to its exact declared host. In-scope redirects are
+        -- applied only to its exact declared host (decided, for now: none
+        -- is ever supplied, so none is applied). In-scope redirects are
         -- followed, at most discovery_max_redirects hops without a revisit,
         -- and recorded in redirect_hops; an out-of-scope, looping or
         -- over-limit redirect is not followed and comes back as
@@ -1750,7 +1760,13 @@ rule OwnerChallengeTimesOut {
 
 -- One rule settles every challenge, so a completion, an abandonment and
 -- a timeout cannot race. A resolved challenge re-requests the same tier;
--- the other outcomes keep the blocked result.
+-- the other outcomes keep the blocked result. Decided: a challenge never
+-- waits while its host trips. Under the batch-concurrency interim (an open
+-- question below) no other row is fetched while a challenge waits, and the
+-- waiting attempt has raised no AttemptReady and its walk has not settled,
+-- so neither RetireHostOnLongRetryAfter nor FeedBreaker can act on its
+-- host; a resolved challenge's TierRequested therefore never meets a
+-- tripped host.
 rule SettleChallenge {
     when: ChallengeSettled(challenge, outcome)
     requires: challenge.status = waiting
@@ -2545,8 +2561,9 @@ surface OwnerTesting {
         -- unverified is presented before any network request.
 
     @guarantee NoAutomaticSolving
-        -- The owner may complete the existing browser's challenge by hand.
-        -- No solver service is contacted. Completion triggers a fresh
+        -- The owner may complete the existing browser's challenge by hand
+        -- (how the owner answers is an open question below). No solver
+        -- service is contacted. Completion triggers a fresh
         -- response check; abandonment or expiry keeps the blocked result.
         -- Non-interactive runs never expose a waiting challenge.
 
@@ -2564,3 +2581,5 @@ open question "May a sitemap index on an allowed host point rovo at child sitema
 open question "Should a URL that fails on every sync be retried for ever, or retired after a number of syncs? Until decided, every failed row is re-pended on every sync and FrontierEntry.attempts keeps counting."
 open question "Should a batch run concurrently across hosts, and when, within the per-host limits SelectBatch allows? Until decided, a batch's rows run one at a time, which respects concurrency_per_host."
 open question "Should a render be allowed to load subresources (scripts, styles, XHR) from origins outside the allowed hosts, such as CDNs, still under robots and per-origin limiters? Until decided, only allowed hosts' origins are requested; restricting renders this way may leave pages that need third-party scripts unrendered."
+open question "Which signals mark a challenge: which headers, page markers, access-denied references or bot cookies should classify_block recognise as a challenge verdict? Until decided, none is recognised, so no run offers a challenge; the challenge rules are exercised only on constructed attempts through an internal seam."
+open question "How does the owner complete or abandon a waiting challenge, and should owner testing show a visible browser for it? Until decided, the browser stays headless and no prompt ships: OperatorCompletesChallenge and OperatorAbandonsChallenge reach a run only through an internal seam, and, with no challenge recognised, no run waits on one."

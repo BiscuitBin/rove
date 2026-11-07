@@ -409,7 +409,9 @@ rule RefuseMissingEngine {
         -- always) fails fast rather than at its first render. The message
         -- names the missing piece, the package or the browser binary, and
         -- the two ways forward: install it (playwright install chromium),
-        -- or set render_mode = never.
+        -- or set render_mode = never. Decided, for now: no stealth engine
+        -- exists, so tier_installed(stealth) is false and a configured
+        -- stealth_mode = on is always refused here (an open question below).
 }
 
 -- owner_request_problem returns the first problem of an owner-testing
@@ -425,7 +427,10 @@ rule RefuseMissingEngine {
 -- supplied; never both disabling a control and supplying its value;
 -- interactive challenges only with an interactive operator, rendering
 -- enabled, protection_escalation and an installed browser; access naming
--- only selected hosts. Confirmation cannot waive any of this.
+-- only selected hosts. Confirmation cannot waive any of this. Decided, for
+-- now: with an owner_test, a configuration's robots = ignore is accepted
+-- and ignored; robots is relaxed only by disabled_controls holding robots
+-- (effective_policy, StartSync).
 rule RefuseInvalidOwnerRequest {
     when: OperatorRequestsSync(operator, out_dir, options)
     let target = mirror/Mirror{out_dir: out_dir}
@@ -555,7 +560,10 @@ rule StartSync {
         -- for every number) and applies only this request's owner options:
         -- a disabled control clears its flag, a disabled rate or
         -- concurrency becomes null, a disabled breaker pause becomes zero;
-        -- the challenge timeout defaults to crawl's. resolve_targets
+        -- the challenge timeout defaults to crawl's. Decided, for now: the
+        -- configuration's robots key never reaches it, so an owner
+        -- request's robots = ignore in rovo.toml changes nothing; only
+        -- disabled_controls holding robots sets robots = ignore. resolve_targets
         -- normalises each named URL and maps each named path to the
         -- identity of the page that holds it. next_run_id is one more than
         -- the highest run id the mirror has seen. The run kind is update
@@ -613,6 +621,13 @@ rule AnnounceTrip {
 rule AnnounceOwnerWarning {
     when: crawl/OwnerTestingWarningIssued(operator, hosts, policy)
     ensures: ProgressReported(operator: operator, event: owner_testing_warning, host: null, until: null, url: null)
+
+    @guidance
+        -- Decided, for now: the warning's text goes to standard error on
+        -- every owner-testing run (here) and every owner refusal
+        -- (OwnerRefusalWarned, ReportRefusal), with or without
+        -- json_events; under json_events a run also emits this
+        -- owner_testing_warning event, which a refusal does not.
 }
 
 -- Decided: start is raised once, when the run is created.
@@ -951,7 +966,13 @@ rule FetchOneUrl {
         -- page needs rendering, never to bypass a block, and never is http
         -- only. Decided: with --config the file's [scope] decides which
         -- redirects are followed, by a sync's in-scope test; without it
-        -- the scope is the URL's own host. A robots refusal,
+        -- the scope is the URL's own host. Decided, for now: with --config
+        -- the URL itself is fetched even when the file's [scope] does not
+        -- admit it, [scope] bounding only redirects; with no profile named
+        -- in [conversion] or [fetch] the profile is the built-in default's,
+        -- the catalogue's pick for the fetched URL's host, else generic,
+        -- not the file's first seed's; and the file's robots and
+        -- stealth_mode are read and ignored, never refused. A robots refusal,
         -- challenge, block or failed fetch prints no page and exits
         -- partial.
 }
@@ -1035,7 +1056,9 @@ surface MirrorCommands {
         -- and owner_testing_warning (AnnounceOwnerWarning) as crawl raises
         -- them; done last, as the report is written (RankAndWriteReport).
         -- url is null on every event but page. Without json_events
-        -- ProgressReported has no sink: nothing is printed for it. A dry
+        -- ProgressReported has no sink: nothing is printed for it; the
+        -- owner warning's text still goes to standard error
+        -- (AnnounceOwnerWarning). A dry
         -- run still prints its frontier as plain text, as crawl's DryRun
         -- lists it: one identity per line, in next_pending order.
 
@@ -1047,7 +1070,9 @@ surface MirrorCommands {
     @guarantee OwnershipSavedThroughTheMirror
         -- Saving an ownership declaration is the mirror's
         -- OperatorSavesOwnership; it never starts a run and never relaxes
-        -- a standard run.
+        -- a standard run. Decided, for now: it and a sync's owner_test are
+        -- reached through the internal API only, with no command-line
+        -- spelling (an open question below).
 }
 
 -- The report as the operator reads it.
@@ -1101,3 +1126,10 @@ surface ReportView {
         -- report, the log or any page file; the requested owner options
         -- are serialised without them.
 }
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Which engine, and which dependency, should back the stealth tier? Until decided, no stealth engine is installed: tier_installed(stealth) is false, so a sync whose configuration sets stealth_mode = on is refused before any request (RefuseMissingEngine, exit 2) and no stealth attempt is ever made."
+open question "Which command should MirrorCommands provide to save or revoke an ownership declaration, and how should a sync request name each owner-testing option? Until decided, both are reached only through the internal API (OperatorSavesOwnership, SyncOptions.owner_test): the command line offers neither, and rovo fetch gains no owner option."
