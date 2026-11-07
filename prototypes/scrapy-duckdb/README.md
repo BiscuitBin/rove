@@ -149,5 +149,104 @@ same command and plays the three roles with its own subtasks.
 
 ## Verdict
 
-Written by ticket 06. Nothing has run yet; the rungs, timings and sample runs from
+Ticket 06 writes the final Verdict. Until then, the rungs, timings and sample runs from
 tickets 01 to 05 accumulate here as each lands.
+
+### Ticket 01: the spike
+
+Measured on one Mac, with `scrapy-proto` at 4 vCPU, 4 GiB RAM and 20 GiB storage. Anything
+not marked as inference or not measured was printed by a run.
+
+**Ladder.** Rung 1, `python:3.12` plus `pip install scrapy==2.20.0`, worked. Rungs 2 and 3
+were not tried, because rung 1 did not fail, so nothing is known about them.
+
+**Pins.**
+
+- Guest: Scrapy 2.20.0. It reports Python 3.12.16.
+- Host: DuckDB 2.0.0, `smolmachines` 1.32.4 and typer 0.27.3.
+- `uv.lock` lists a cp312 manylinux aarch64 wheel for DuckDB. Installing it in the guest is
+  ticket 05's and is not measured.
+- The `python:3.12` tag floats and no digest was recorded, so a recreated machine may boot a
+  different image.
+
+**First boot.**
+
+| Step | Time |
+| --- | --- |
+| `Machine.create` | 20.2 s |
+| `pip install` (118M of site-packages) | 21.8 s |
+| `scrapy runspider` (exit 0) | 2.2 s |
+| Whole run up to the final stop, including a deliberate 5 s wait after create | 51.0 s |
+
+Whether the image was already cached on this host at that boot is not measured, so 20.2 s is
+not a known cold-pull time. The log's label, "image pull and boot", is the spike's wording, not
+evidence of a pull. The item read back was `https://example.com/`, status 200, title "Example
+Domain", 577 HTML bytes. The fetch made two requests: robots.txt (a 404) and the page.
+
+**Feed round trip.** Only guest to host was measured. The 187-byte feed took 0.003 s with
+`read_file`. A 20971520-byte random file, read three times in each of three runs, matched its
+hash all nine times at 0.094 to 0.122 s, or 171.6 to 223.4 MB/s. So `exec`'s output cap does
+not limit `read_file`, at least at this size. Not measured: `write_file` speed, a real feed of
+this size, a file larger than this, and a file not freshly written.
+
+**`exec`.**
+
+- **Buffering:** blocking `exec` hands back its output only at exit. `exec_stream` is live: 20
+  stdout events over 20 s at a constant 0.108 s lag, clock skew included.
+- **Long runs:** commands of 660 s exited 0 with no timeout and with `timeout=900`. No implicit
+  timeout appeared up to 660 s; longer is not measured.
+- **Timeout:** `timeout=5` on a 60 s command does not raise. It returned exit 124 at 5.0 s, with
+  partial stdout and stderr kept and `command timed out after 5000ms` appended to stderr.
+  A background child was gone and the `TERM` trap never ran. Inference: this is SIGKILL or
+  equivalent, so Scrapy would get no graceful close, and `CLOSESPIDER_TIMEOUT` has to be the
+  guard. That setting closing a real run is not measured.
+- **Long output:** captured stdout stopped at 11534336 bytes (11 MiB) and stderr at 11542528 in
+  its one measurement. 8 MiB on each stream at once arrived whole. Past the cap the writer gets
+  SIGPIPE (141), and `exec` gives no truncation flag: a script that carries on can still exit
+  0. `exec_stream` ends with an `error` event naming the cap.
+- **Host SIGKILL during `exec` or `exec_stream`:** the guest command died too, at 6 of 20 ticks
+  in both. The machine stayed `running` and Scrapy stayed intact.
+- **`background=True`:** returned in 0.005 s with a pid, outlived a starter that exited
+  normally, and ran 660 s to its done marker. A `stop` killed it: pid gone, no marker. Surviving
+  a host SIGKILL of the starter is not measured, and the case for using it depends on that.
+- **Two processes:** nothing serialises them. A second process connected, ran `exec` and read a
+  file during a running `exec`. `stop()` during an `exec` raised `SmolError code=INTERRUPTED`;
+  that stop came from the same process, so a stop from another process doing the same is
+  inference.
+
+Inference, for ticket 03 to decide: `background=True` with a polled done marker fits a crawl of
+minutes better than blocking `exec` with a raised timeout, because it gives progress, avoids the
+capture cap and need not hold a host connection.
+
+**Scrapy across `stop` then `connect`.** It survived in all three main-path runs, reporting
+2.20.0 with no `pip` run after a fresh boot (guest uptime 0.39, 0.45 and 0.49 s), and from a
+fresh process in the last two. A file written with no sync just before `stop` was intact each
+time. `/out`, `/usr/local`, `/var/lib`, `/root` and `/workspace` kept a marker; `/tmp` did not,
+so nothing durable goes there. Connect from stopped took 0.1 s. Inference: this holds by design,
+since the root overlay's upper layer is `/storage/overlays/persistent-scrapy-proto/upper` on
+the `/dev/vda` ext4 disk. Not measured: SIGKILL of the VM process, a host reboot, and a `stop`
+during a `pip install`.
+
+**Corrections from measurement.** Both contradict or qualify what the tickets assumed; the
+ticket text stays as written.
+
+- **Something in the guest does listen.** Ticket 01 says nothing does. Scrapy 2.20 enables
+  `REMOTE_CONTROL_ENABLED` by default, and the spider's log shows `Remote control HTTP server
+  listening on port 39763`. The spike leaves it on and publishes no port. Its bind address and
+  whether anything outside the guest can reach it are not measured. Ticket 03's settings should
+  set it to `False`; the effect of that is not measured.
+- **`CLOSESPIDER_PAGECOUNT` counts the robots.txt response.** With the limit at 1 the stats show
+  `response_received_count: 2`, and the log shows `Closing spider (closespider_pagecount)` at
+  07:49:35, before the page's `fetched_at` of 07:49:36.98. Scrapy's `closespider.py:63` counts
+  on `response_received`. Inference: the page arrived only because its request had already been
+  dequeued. Ticket 03's `--max-pages` cannot treat this setting as an exact page count.
+
+**After review moment 1.**
+
+- Two fixes landed after the runs above: the state file is saved only after `create` returns,
+  and `connect_existing` refuses when there is no state file.
+- The main path then reran on the existing machine: 2.0 s, no `pip`, no fetch, ending stopped.
+  That run exercises the connect path only; the changed `create` path and the refusal were
+  checked with the SDK stubbed, never live.
+- Ownership is still only the state file's presence, so a stale file can accept a machine that
+  another checkout recreated. Ticket 02 inherits this.

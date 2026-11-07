@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scrapy-duckdb-prototype"
+version = "0.0.0"
+description = "PROTOTYPE: Scrapy inside a Smol Machines microVM, driven from a Typer command, pages in DuckDB."
+requires-python = ">=3.13"
+dependencies = [
+  # Exact: the SDK is Alpha and releases several times a week; the prototype records one.
+  "smolmachines==1.32.4",
+  # rovo's range, so the prototype's command reads like rovo's.
+  "typer>=0.27.3,<0.28",
+  # Exact: pinned at ticket 01's lock so tickets 03 and 05 need no re-lock. It has a cp312
+  # manylinux aarch64 wheel for the guest's 3.12 install in ticket 05.
+  "duckdb==2.0.0",
+]
+
+[project.scripts]
+scrapyproto = "scrapyproto.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scrapyproto"]
