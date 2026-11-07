@@ -23,8 +23,9 @@ boxes.
   no Docker daemon anywhere. Docker-in-VM is the fallback only if the direct boot fails.
 - crawl4AI needs an API token to bind its port to the guest's wildcard address; without
   one it binds loopback and the host sees a connection reset. The prototype generates a
-  token, passes it as the machine's environment and keeps it in a state file under
-  `ai_tmp/c4ai-proto/` at the repository root (gitignored, inside the worktree).
+  token, passes it as the machine's environment and keeps it in an owner-only (`0600`)
+  state file under `ai_tmp/c4ai-proto/` at the repository root (gitignored, inside the
+  worktree).
 - The machine is created persistent, detached and named, so separate processes reopen
   it by name. It is stopped, not deleted, between sessions, which keeps the machine's
   own disk. The plan assumed a delete forces a 2.9 GB re-pull; it does not: ticket 02
@@ -157,6 +158,7 @@ registry: []
 ---- state ----
 machine:  c4ai-proto
 state:    (no machine)
+endpoint: (no machine)
 health:   error: http://127.0.0.1:11235/health: <urlopen error [Errno 61] Connection refused>
 token:    absent
 ```
@@ -164,7 +166,21 @@ token:    absent
 After `destroy`, a fresh `vm up` through the create path took 3.8 s to healthy, not 54 s:
 `~/Library/Caches/smolvm/vms` went to 0 B but `image-seeds` kept its 7.4 GB, so the
 pulled image is a host-side cache, not per machine. `vm down` took between 0.7 s and
-10 s; the slow one followed a crawl, presumably a longer workload drain.
+10 s; the slow one followed a crawl, presumably a longer workload drain. A `vm down` issued
+3 s into a 10 s fetch took 10 s and the fetch completed with exit 0, which fits that drain.
+
+`vm up --port` applies only when creating. A different port on an existing machine is
+refused, because the published port is fixed at create:
+
+```text
+$ uv run c4ai vm up --port 11236
+error: c4ai-proto publishes port 11235, not 11236; `c4ai vm destroy` to change it
+(the state block follows)
+exit 1
+```
+
+A smol failure in any `vm` command prints a one-line reason, the state block and exits 1.
+Those branches were run only with simulated `SmolError`s, not with a real smol failure.
 
 ### Fetch (ticket 03)
 
@@ -198,6 +214,22 @@ $ uv run c4ai fetch https://this-host-does-not-exist.invalid/
 error: HTTP 400 from http://127.0.0.1:11235/md: URL blocked (SSRF protection): URL blocked
 exit 1
 
+$ uv run c4ai fetch https://example.com:1/ --json
+error: fetch failed: Unexpected error in _crawl_web at line 779 ... net::ERR_UNSAFE_PORT ...
+exit 1
+
+$ uv run c4ai fetch https://example.com:1/
+error: HTTP 502 from http://127.0.0.1:11235/md: Unexpected error in _crawl_web at line 779 ...
+exit 1
+
+$ uv run c4ai fetch https://example.com --filter bogus
+Invalid value for '--filter': 'bogus' is not one of 'raw', 'fit'.
+exit 2   (a usage error, before any request)
+
+$ uv run c4ai fetch https://example.com -o /nonexistent-dir/x.md
+error: cannot write /nonexistent-dir/x.md: [Errno 2] No such file or directory: '/nonexistent-dir/x.md'
+exit 1
+
 $ uv run c4ai vm down && uv run c4ai fetch https://example.com
 error: machine c4ai-proto is stopped, not running; run `c4ai vm up`
 exit 1
@@ -218,3 +250,10 @@ Facts from the fetch runs:
   returned content for python.org; the raw Markdown is the reliable field.
 - crawl4AI's SSRF guard rejects loopback and private URLs with HTTP 400, and reported an
   unresolvable host with the same message, likely because the check resolves the name.
+- `/crawl` answers HTTP 200 with top-level `success: true` even when the page failed; only
+  `results[0].success` tells, so `--json` checks that. `/md` answers 502 for the same page,
+  with a multi-line Python traceback as its detail, which the command collapses to a
+  bounded single line.
+- A target page's own HTTP error is not a fetch failure: in one run a page that answered
+  400 printed its error body as Markdown and exited 0, and `/md` exposes no status code. A
+  fetch tier built on this needs `/crawl`'s `status_code` to tell the two apart.

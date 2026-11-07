@@ -71,11 +71,15 @@ def wait_for_health(host_port: int, deadline_s: float = 900, every_s: float = 3)
         time.sleep(every_s)
 
 
-def state_block(machine: Machine | None, host_port: int, token_present: bool) -> str:
-    """The full state, printed at the end of every command."""
+def state_block(
+    machine: Machine | None, host_port: int, token_present: bool, open_error: str | None = None
+) -> str:
+    """The full state, printed at the end of every command; every field is always present."""
     lines = [f"machine:  {MACHINE_NAME}"]
-    if machine is None:
-        lines.append("state:    (no machine)")
+    if open_error:
+        lines += [f"state:    error: {open_error}", "endpoint: unknown (the machine did not open)"]
+    elif machine is None:
+        lines += ["state:    (no machine)", "endpoint: (no machine)"]
     else:
         try:
             lines.append(f"state:    {machine.state()}")

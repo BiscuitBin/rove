@@ -1,13 +1,23 @@
 """Stdlib HTTP calls to the crawl4AI API: /health, /md and /crawl."""
 
+import http.client
 import json
 import urllib.error
 import urllib.request
 from typing import Any
 
 
+MAX_REASON = 300
+
+
 class ApiError(Exception):
-    """An HTTP or connection failure, with a one-line reason."""
+    """An HTTP, connection or decoding failure, with a one-line reason."""
+
+
+def one_line(reason: object) -> str:
+    """Collapse a reason to a single bounded line: crawl4AI's 502 detail is a multi-line traceback."""
+    text = " ".join(str(reason).split())
+    return text if len(text) <= MAX_REASON else f"{text[: MAX_REASON - 3]}..."
 
 
 def _request(
@@ -23,18 +33,26 @@ def _request(
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if body else "GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  http to localhost
-            return json.loads(resp.read())
+            decoded = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode(errors="replace")
         try:
-            detail = json.loads(raw).get("detail", raw)
+            parsed = json.loads(raw)
         except ValueError:
-            detail = raw
-        msg = f"HTTP {exc.code} from {url}: {detail}"
+            parsed = raw
+        detail = parsed.get("detail", raw) if isinstance(parsed, dict) else raw
+        msg = one_line(f"HTTP {exc.code} from {url}: {detail}")
         raise ApiError(msg) from exc
-    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
-        msg = f"{url}: {exc}"
+    except (OSError, http.client.HTTPException) as exc:  # URLError and timeouts are OSError
+        msg = one_line(f"{url}: {exc}")
         raise ApiError(msg) from exc
+    except ValueError as exc:
+        msg = one_line(f"{url}: the response is not JSON: {exc}")
+        raise ApiError(msg) from exc
+    if not isinstance(decoded, dict):
+        msg = f"{url}: the response is not a JSON object"
+        raise ApiError(msg)
+    return decoded
 
 
 def health(base: str) -> dict[str, Any]:
