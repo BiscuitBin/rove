@@ -100,9 +100,9 @@ Surprises and facts worth keeping:
   not needed.
 - `Machine.endpoint(11235)` returns a local `http://127.0.0.1:11235` endpoint with empty
   headers; the "cloud only" docstring is stale.
-- `Machine.logs()` and `list_images()` are not usable on a stopped local machine
-  (`list_images` raises `INVALID_STATE`); the ladder's exec rungs would run only on a
-  started one.
+- `list_images()` raised `INVALID_STATE` on the stopped machine. `Machine.logs()` is
+  documented as cloud only and was not exercised, since no diagnostic rung was needed;
+  the ladder's exec rungs would run only on a started machine.
 - The host-side caches after one start: `~/Library/Caches/smolvm/image-seeds` 7.4 GB and
   `~/Library/Caches/smolvm/vms` 7.4 GB (sparse files; the registry reports 20 GiB
   storage). The machine survives `stop()` in the registry as `stopped`, persistent and
@@ -164,7 +164,7 @@ token:    absent
 After `destroy`, a fresh `vm up` through the create path took 3.8 s to healthy, not 54 s:
 `~/Library/Caches/smolvm/vms` went to 0 B but `image-seeds` kept its 7.4 GB, so the
 pulled image is a host-side cache, not per machine. `vm down` took between 0.7 s and
-10 s (the second time, with a crawl done, gunicorn drained longer).
+10 s; the slow one followed a crawl, presumably a longer workload drain.
 
 ### Fetch (ticket 03)
 
@@ -216,5 +216,5 @@ Facts from the fetch runs:
   tier built on this must expect some pages' no-script branches.
 - `/crawl` returned an empty `fit_markdown` for example.com while `/md` with `f=fit`
   returned content for python.org; the raw Markdown is the reliable field.
-- crawl4AI's SSRF guard rejects loopback and private URLs with HTTP 400, and reports an
-  unresolvable host the same way, since it resolves the name as part of the check.
+- crawl4AI's SSRF guard rejects loopback and private URLs with HTTP 400, and reported an
+  unresolvable host with the same message, likely because the check resolves the name.
