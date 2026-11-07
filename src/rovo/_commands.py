@@ -7,7 +7,10 @@ network, a browser or sleeping; `rovo.cli` builds the real ones.
 Only the mirror's modules load with this one: `verify`, `index` and `report` never crawl,
 so `init`, `sync` and `fetch` import the configuration, the crawl and the report inside
 their bodies, and `rovo verify`, `rovo index` and `rovo report` load neither httpx nor
-rovo._crawl.
+rovo._crawl. Owner testing has no command-line spelling yet (rovo.allium open question):
+`save_ownership` and `sync(owner_test=...)` are reached in process only, and no terminal
+prompt ships for a challenge (crawl.allium open question), so nothing here reads
+standard input.
 """
 
 import importlib.metadata
@@ -15,7 +18,7 @@ import json
 import os
 import sys
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,7 +53,14 @@ if TYPE_CHECKING:
     from rovo._convert.model import Profile
     from rovo._crawl.browser import BrowserEngine, EngineFactory
     from rovo._crawl.fetch import Fetcher
-    from rovo._crawl.model import BreakerTripped, ProgressEvent, Run
+    from rovo._crawl.model import (
+        BreakerTripped,
+        CrawlPolicy,
+        OwnerTestingWarningIssued,
+        OwnerTestOptions,
+        ProgressEvent,
+        Run,
+    )
     from rovo._crawl.pace import Timer
     from rovo._crawl.run import CrawlResult
     from rovo._report import CrawlReport
@@ -103,6 +113,8 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     overrides: Sequence[str] = (),
     json_events: bool = False,
     progress: "Callable[[ProgressEvent], None] | None" = None,
+    owner_test: "OwnerTestOptions | None" = None,
+    interactive: bool | None = None,
 ) -> ExitCode:
     """Realises rovo.allium's sync refusals in order, ReportRefusal, StartSync and the rest.
 
@@ -113,10 +125,15 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     request. A dry run discovers, prints the identity of each row it would fetch, one a
     line on standard output, and fetches, converts and writes no page; it saves the
     manifest, the frontier and the run, and writes the report. `progress` receives the
-    run's progress events, done last. A branch a later slice implements exits partial
-    and leaves the previous report in place. A run that may use the browser tier opens
-    one engine from `engine` (by default PlaywrightEngine) after every refusal, and
-    closes it when the run ends.
+    run's progress events, done last. A run that may use the browser tier opens one
+    engine from `engine` (by default PlaywrightEngine) after every refusal, and closes it
+    when the run ends. `interactive` is whether a person is at the terminal (by default
+    whether standard input is one; nothing reads it). `owner_test` makes the sync an
+    owner-testing request (in process only): RefuseInvalidOwnerRequest follows the
+    engine refusals, every refusal of it is in owner mode with the owner warning on
+    standard error, and the run it starts warns there, and as the owner_testing_warning
+    event, before its first request. The NotInThisSlice guard, which no branch raises
+    any more, still exits partial and leaves the previous report in place.
     """
     from rovo._config import (  # noqa: PLC0415  It loads rovo._crawl, which index never needs.
         SyncOptions,
@@ -134,15 +151,18 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     options = SyncOptions(
         dry_run=dry_run,
         confirmed=confirmed,
-        interactive=sys.stdin.isatty(),
+        interactive=sys.stdin.isatty() if interactive is None else interactive,
         json_events=json_events,
         urls=tuple(urls),
         paths=tuple(paths),
+        owner_test=owner_test,
     )
     problem = _start_problem(mirror, settings, options, tier_installed)
     if problem is not None:
         reason, detail = problem
         report_refusal(mirror, Operator(), options, settings, reason, clock=clock)
+        if owner_test is not None:  # OwnerRefusalWarned.
+            _warn_owner(owner_test.hosts, _owner_policy(settings, owner_test))
         return _refuse(f"sync: {detail}")
     opened = _open_engine(engine) if settings.needs_browser else None
     try:
@@ -153,6 +173,55 @@ def sync(  # noqa: PLR0913  The command's seams and one keyword per sync option.
     finally:
         if opened is not None:
             opened.close()
+
+
+def save_ownership(out_dir: Path, hosts: Iterable[str]) -> ExitCode:
+    """Realises mirror.allium SaveOwnership for the operator, in process (no CLI spelling).
+
+    The hosts, normalised as URL hosts, replace the manifest's declared_owned_hosts (an
+    empty set revokes them), saved atomically; no run starts and no request is made. A
+    missing mirror or a host outside the scope's allowed hosts exits usage, unchanged.
+    """
+    try:
+        mirror = load_mirror(out_dir)
+    except ManifestError as error:
+        return _refuse(f"ownership: no mirror in {out_dir} ({error})")
+    wanted = frozenset(hosts)
+    if not mirror.save_ownership(wanted):
+        named = ", ".join(sorted(wanted))
+        return _refuse(f"ownership: not every host is an allowed host of the mirror: {named}")
+    save_mirror(mirror)
+    return ExitCode.ok
+
+
+# The owner warning (crawl.allium PrepareRun guidance), on standard error.
+_OWNER_WARNING = (
+    "rovo: owner testing: these settings are only for websites you own; do not use them "
+    "on third-party websites. Ownership is self-declared, not verified."
+)
+
+
+def _warn_owner(hosts: frozenset[str], policy: "CrawlPolicy") -> None:
+    """The owner warning on standard error: the selected hosts and settings displayed."""
+    from rovo._crawl.model import standard_policy  # noqa: PLC0415  Only a sync loads the crawl.
+
+    standard = vars(standard_policy())
+    settings = ", ".join(
+        f"{name}={getattr(value, 'value', value)}"
+        for name, value in vars(policy).items()
+        if value != standard[name]
+    )
+    sys.stderr.write(
+        f"{_OWNER_WARNING} Hosts: {', '.join(sorted(hosts)) or 'none'}."
+        f" Settings: {settings or 'standard'}.\n"
+    )
+
+
+def _owner_policy(settings: "Configuration", owner_test: "OwnerTestOptions") -> "CrawlPolicy":
+    """The policy an owner request asks for, as effective_policy builds it."""
+    from rovo._config import effective_policy  # noqa: PLC0415  Only a sync loads the configuration.
+
+    return effective_policy(settings, owner_test)
 
 
 def _open_engine(engine: "EngineFactory | None") -> "BrowserEngine":
@@ -249,9 +318,13 @@ def _start_problem(
 
     The reason is the refused report's refusal_reason; the detail is standard error's.
     The browser engine is probed only when every earlier refusal passed and the
-    configuration may render.
+    configuration may render. owner_request_problem comes last: with no owner test, its
+    robots = ignore refusal; with one, the owner request's first problem (that clause
+    then accepts and ignores robots = ignore, decided).
     """
+    from rovo._config import OwnerRequest, owner_request_problem, scope_hash  # noqa: PLC0415  Only a sync loads the configuration.
     from rovo._crawl.model import RobotsMode  # noqa: PLC0415  Only a sync loads the crawl.
+    from rovo._crawl.run import load_runs  # noqa: PLC0415  Only a sync loads the crawl.
 
     bad_config = "invalid configuration"
     tier_missing = "configured tier is not installed"
@@ -295,7 +368,7 @@ def _start_problem(
         missing = None
     else:
         missing = _missing_engine(Tier.browser, tier_installed)
-    return problem or _first_problem(
+    engines = _first_problem(
         (
             (
                 missing is not None,
@@ -308,9 +381,24 @@ def _start_problem(
                 tier_missing,
                 "the configured stealth tier is not installed",
             ),
-            (settings.robots is not RobotsMode.respect, robots, robots),
         )
     )
+    if problem is not None or engines is not None:
+        return problem or engines
+    if options.owner_test is None:
+        return _first_problem(((settings.robots is not RobotsMode.respect, robots, robots),))
+    owner = owner_request_problem(
+        OwnerRequest(
+            options=options,
+            allowed_hosts=allowed,
+            declared_owned_hosts=mirror.declared_owned_hosts,
+            scope_hash=scope_hash(_scope(settings)),
+            runs={record.id: record for record in load_runs(mirror.out_dir)},
+            interactive_renders=settings.needs_browser,
+            browser_installed=lambda: _missing_engine(Tier.browser, tier_installed) is None,
+        )
+    )
+    return None if owner is None else (owner, owner)
 
 
 def _first_problem(problems: Sequence[tuple[bool, str, str]]) -> tuple[str, str] | None:
@@ -361,6 +449,7 @@ def _start_sync(
     )
     from rovo._crawl.run import (  # noqa: PLC0415  Only a sync loads the crawl.
         drive_run,
+        lineage_run,
         load_frontier,
         next_run_id,
         record_run,
@@ -381,7 +470,20 @@ def _start_sync(
     scope = scope_of(settings, profile)
     run_id = next_run_id(mirror.out_dir)
     kind = RunKind.update if mirror.is_populated else RunKind.initial
-    policy = effective_policy(settings)
+    owner_test = options.owner_test
+    policy = effective_policy(settings, owner_test)
+    mode = RunMode.standard if owner_test is None else RunMode.owner_testing
+    owned = frozenset[str]() if owner_test is None else owner_test.hosts
+    preceding = (
+        None if owner_test is None else lineage_run(mirror, owner_test.preceding_run_id, clock)
+    )
+    baseline = (
+        None
+        if preceding is None
+        else preceding
+        if preceding.mode is RunMode.standard
+        else preceding.baseline
+    )
     mirror.profile = profile
     mirror.scope = scope
     mirror.recorded_root_url = settings.root_url
@@ -396,7 +498,7 @@ def _start_sync(
         operator=operator,
         run_id=run_id,
         kind=kind,
-        mode=RunMode.standard,
+        mode=mode,
         report_status=ReportStatus.finished,
         exit_code=ExitCode.ok,
         configuration=settings,
@@ -407,15 +509,22 @@ def _start_sync(
         effective_policy=policy,
         robots_ignored=policy.robots is RobotsMode.ignore,
         targets=targets,
+        declared_owned_hosts=owned,
+        baseline_run_id=None if baseline is None else baseline.id,
+        preceding_run_id=None if preceding is None else preceding.id,
+        requested_owner_test=owner_test,
     )
     request = RunRequest(
         operator=operator,
         mirror=mirror,
         id=run_id,
         kind=kind,
-        mode=RunMode.standard,
+        mode=mode,
+        baseline=baseline,
+        preceding=preceding,
         scope_hash=scope_hash(scope),
-        owned_hosts=frozenset(),
+        owned_hosts=owned,
+        requested_owner_test=owner_test,
         policy=policy,
         dry_run=options.dry_run,
         interactive=options.interactive,
@@ -425,6 +534,11 @@ def _start_sync(
         refollow_unchanged_links=settings.refollow_unchanged_links,
         targets=targets,
     )
+
+    def warn(issued: "OwnerTestingWarningIssued") -> None:  # AnnounceOwnerWarning.
+        _warn_owner(issued.hosts, issued.policy)
+        if progress is not None:
+            progress(ProgressEvent(event="owner_testing_warning", host=None, until=None, url=None))
 
     def trip(tripped: "BreakerTripped") -> None:  # AnnounceTrip, live.
         event = announce_trip(report, tripped)
@@ -441,6 +555,7 @@ def _start_sync(
         on_failure=_failure_handler(mirror),
         on_trip=trip,
         engine=engine,
+        on_owner_warning=warn,
     )
     saved = False
     try:

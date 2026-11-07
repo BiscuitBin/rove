@@ -29,8 +29,9 @@ rebuilds the indexes offline, and `rovo report` prints the last report; a sync n
 host whose breaker trips or that is retired gets no further request and makes the sync
 exit 3. Under `render_mode = "auto"` or `"always"` a page that needs JavaScript is
 rendered in headless Chromium (the `browser` extra) and its tier is learned, and
-`rovo fetch URL` prints one page's Markdown and writes nothing. A branch a later slice
-implements (owner testing) stops the sync with exit 1. The API still exports `rovo.__version__` and nothing else. Around the
+`rovo fetch URL` prints one page's Markdown and writes nothing. Owner testing, a
+relaxed follow-up sync of hosts the operator declares as their own, is reached in
+process only until its command-line spelling is decided. The API still exports `rovo.__version__` and nothing else. Around the
 product the repository runs everything a change needs: lint and type gates with
 positive controls, a coverage floor, a wheel built and smoke-installed offline on every
 `just check`, the documentation and agent contracts, and CI. Each implementation ticket

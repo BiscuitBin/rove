@@ -23,6 +23,7 @@ from rovo._crawl.model import (
     Frontier,
     Host,
     HostBackedOff,
+    OwnerTestOptions,
     ProgressEvent,
     RobotsMode,
     Run,
@@ -32,6 +33,7 @@ from rovo._crawl.model import (
     UrlBlocked,
     UrlFailed,
     UrlSkippedBlocked,
+    standard_policy,
 )
 from rovo._exit import ExitCode as ExitCode  # noqa: PLC0414  An explicit re-export: callers import it from here.
 from rovo._mirror.model import (
@@ -185,7 +187,7 @@ class CrawlReport:
     declared_owned_hosts: frozenset[str] = frozenset()
     baseline_run_id: int | None = None
     preceding_run_id: int | None = None
-    requested_owner_test: None = None
+    requested_owner_test: OwnerTestOptions | None = None
     effective_policy: CrawlPolicy | None = None
     unresolved_urls: frozenset[str] = frozenset()
     robots_ignored: bool = False
@@ -356,15 +358,21 @@ def report_refusal(  # noqa: PLR0913  The SyncRefused trigger's parameters, and 
 ) -> CrawlReport:
     """Realises rovo.allium ReportRefusal: the refused report, written, and returned.
 
-    It starts no run and records none: only crawl-report.json is replaced.
+    It starts no run and records none: only crawl-report.json is replaced. An owner
+    request's refusal is in owner mode, with the requested options and the preceding id
+    it named, and treats no host as owned; its warning (OwnerRefusalWarned) is the
+    root's, on standard error.
     """
     now = clock.now()
+    owner_test = options.owner_test
     report = CrawlReport(
         mirror=target,
         operator=operator,
         run_id=None,
         kind=RunKind.update if target.is_populated else RunKind.initial,
-        mode=RunMode.standard,
+        mode=RunMode.owner_testing if options.is_owner_testing else RunMode.standard,
+        preceding_run_id=None if owner_test is None else owner_test.preceding_run_id,
+        requested_owner_test=owner_test,
         report_status=ReportStatus.refused,
         exit_code=ExitCode.usage,
         refusal_reason=reason,
@@ -531,22 +539,31 @@ def summarise(
 
 
 def host_reports(hosts: Sequence[Host], policy: CrawlPolicy) -> list[HostReport]:
-    """rovo.allium host_reports: one row per host, sorted by name."""
-    return [
-        HostReport(
-            host=host.name,
-            fetched=host.fetched,
-            blocked=host.blocked,
-            block_rate=host.block_rate,
-            tiers_used=host.tiers_used,
-            breaker_tripped=host.breaker_tripped,
-            robots_ignored=policy.robots is RobotsMode.ignore,
-            render_escalations=host.render_escalations,
-            retry_after_honored=host.retry_after_honored,
-            effective_policy=policy,
+    """rovo.allium host_reports: one row per host, sorted by name.
+
+    `policy` is the run's; each row reports the policy its host's requests ran under
+    (request_policy): an allowed but unselected host of an owner-testing run reports the
+    standard policy.
+    """
+    rows = []
+    for host in sorted(hosts, key=lambda host: host.name):
+        relaxed = not host.run.is_owner_testing or host.name in host.run.owned_hosts
+        row_policy = policy if relaxed else standard_policy()
+        rows.append(
+            HostReport(
+                host=host.name,
+                fetched=host.fetched,
+                blocked=host.blocked,
+                block_rate=host.block_rate,
+                tiers_used=host.tiers_used,
+                breaker_tripped=host.breaker_tripped,
+                robots_ignored=row_policy.robots is RobotsMode.ignore,
+                render_escalations=host.render_escalations,
+                retry_after_honored=host.retry_after_honored,
+                effective_policy=row_policy,
+            )
         )
-        for host in sorted(hosts, key=lambda host: host.name)
-    ]
+    return rows
 
 
 def encode_report(report: CrawlReport) -> dict[str, object]:
@@ -568,14 +585,14 @@ def encode_report(report: CrawlReport) -> dict[str, object]:
             "targeted": report.options.targeted,
             "urls": sorted(report.options.urls),
             "paths": sorted(report.options.paths),
-            "owner_test": None,
+            "owner_test": _owner_test(report.options.owner_test),
         },
         "tool_version": report.tool_version,
         "targets": sorted(report.targets),
         "declared_owned_hosts": sorted(report.declared_owned_hosts),
         "baseline_run_id": report.baseline_run_id,
         "preceding_run_id": report.preceding_run_id,
-        "requested_owner_test": None,
+        "requested_owner_test": _owner_test(report.requested_owner_test),
         "effective_policy": _policy(report.effective_policy),
         "unresolved_urls": sorted(report.unresolved_urls),
         "robots_ignored": report.robots_ignored,
@@ -653,6 +670,35 @@ def _policy(policy: CrawlPolicy | None) -> dict[str, object] | None:
         if isinstance(value, timedelta)
         else getattr(value, "value", value)
         for name, value in vars(policy).items()
+    }
+
+
+def _owner_test(options: OwnerTestOptions | None) -> dict[str, object] | None:
+    """The owner options as requested: sets sorted, durations in seconds.
+
+    SecretsNeverSerialised: an OwnerAccess's contents are never written; access is
+    encoded by host alone (always empty, decided for now: none can be supplied).
+    """
+    if options is None:
+        return None
+
+    def seconds(value: timedelta | None) -> float | None:
+        return None if value is None else value.total_seconds()
+
+    return {
+        "preceding_run_id": options.preceding_run_id,
+        "hosts": sorted(options.hosts),
+        "disabled_controls": sorted(control.value for control in options.disabled_controls),
+        "rate_per_host": options.rate_per_host,
+        "concurrency_per_host": options.concurrency_per_host,
+        "backoff_base": seconds(options.backoff_base),
+        "max_backoff": seconds(options.max_backoff),
+        "retry_after_cap": seconds(options.retry_after_cap),
+        "breaker_pause": seconds(options.breaker_pause),
+        "protection_escalation": options.protection_escalation,
+        "interactive_challenges": options.interactive_challenges,
+        "challenge_timeout": seconds(options.challenge_timeout),
+        "access": sorted(access.host for access in options.access),
     }
 
 

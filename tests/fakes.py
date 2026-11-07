@@ -18,6 +18,11 @@ that must open no engine. `probe_engine` makes rovo._crawl.browser's engine prob
 (tier_installed(browser): the playwright package and its Chromium binary, rovo.allium
 RefuseMissingEngine at e0f0c44) see a given install, so no test needs a real Chromium.
 
+`FakeChallengePrompt` satisfies the crawl's ChallengePrompt seam (T20; no real prompt
+ships, spec 39c1f9c): it answers each waiting OwnerChallenge from its script, in order,
+records the challenge, and advances a SteppingTimer by the scripted delay instead of
+sleeping, so an answer can arrive before or after the challenge's expires_at.
+
 `FixedClock` and `SteppingTimer` both satisfy the crawl's Timer seam (`now()` and
 `sleep(seconds)`) and both record every sleep they are asked for; neither sleeps for
 real. `FixedClock` never advances, so a test's timestamps stay where they were;
@@ -26,7 +31,7 @@ waits the limiter chose.
 """
 
 import itertools
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -35,7 +40,7 @@ import pytest
 
 from rovo._crawl import browser
 from rovo._crawl.fetch import Fetcher, Validators
-from rovo._crawl.model import SiteResponse
+from rovo._crawl.model import ChallengeStatus, OwnerChallenge, SiteResponse
 
 # The instant every FixedClock reads unless told otherwise: timezone-aware UTC.
 START = datetime(2026, 10, 31, 12, 0, 0, tzinfo=UTC)
@@ -314,6 +319,39 @@ class SteppingTimer:
         """Record the requested seconds and advance by them."""
         self.sleeps.append(seconds)
         self.instant += timedelta(seconds=seconds)
+
+
+class FakeChallengePrompt:
+    """A ChallengePrompt answering each challenge from a script; it never reads stdin.
+
+    Each call takes the next `(answer, delay)` of the script: it records the challenge,
+    calls `on_ask` (a test's probe of what the run had done when the owner was asked),
+    advances `timer` by `delay` (a SteppingTimer moves, nothing sleeps), and returns
+    `answer`: resolved, abandoned, or None for no answer. An exhausted script answers None.
+    """
+
+    def __init__(
+        self,
+        script: Sequence[tuple[ChallengeStatus | None, timedelta]] = (),
+        *,
+        timer: SteppingTimer | None = None,
+        on_ask: Callable[[OwnerChallenge], None] | None = None,
+    ) -> None:
+        """Answer from `script`, stepping `timer` by each delay."""
+        self.script = list(script)
+        self.timer = timer
+        self.on_ask = on_ask
+        self.asked: list[OwnerChallenge] = []
+
+    def __call__(self, challenge: OwnerChallenge) -> ChallengeStatus | None:
+        """Record the challenge; step the timer; the next scripted answer, else None."""
+        self.asked.append(challenge)
+        if self.on_ask is not None:
+            self.on_ask(challenge)
+        answer, delay = self.script.pop(0) if self.script else (None, timedelta(0))
+        if self.timer is not None:
+            self.timer.sleep(delay.total_seconds())
+        return answer
 
 
 def gaps(stamps: Sequence[tuple[str, datetime]]) -> list[timedelta]:

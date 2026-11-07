@@ -2320,7 +2320,12 @@ def test_entity_fields_FrontierEntry(tmp_path: Path) -> None:
 
 
 def test_entity_fields_Host(tmp_path: Path) -> None:
-    """Verify all declared fields on Host are present with correct types."""
+    """Verify all declared fields on Host are present with correct types.
+
+    Re-propagated by T20 (origin T09, spec fc9ad9f): Host gains the derived policy,
+    request_policy(run, name), read here by its code name request_policy; in a standard
+    run it is the run's policy.
+    """
     result = crawl_once(tmp_path, site())
     (host,) = result.run.hosts
     assert_fields(
@@ -2341,10 +2346,12 @@ def test_entity_fields_Host(tmp_path: Path) -> None:
             "sitemap_children_read",
             "sitemap_entries_admitted",
             "breaker",
+            "request_policy",
             "median_text",
             "has_text_baseline",
         ),
     )
+    assert host.request_policy == result.run.policy
     assert host.tiers_used == frozenset({Tier.http})
     assert host.breaker_tripped is False
     assert host.block_rate == 0
@@ -2941,7 +2948,12 @@ def test_entity_relationship_Host_breaker(tmp_path: Path) -> None:
 
 
 def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
-    """Verify all declared fields on FetchAttempt are present with correct types."""
+    """Verify all declared fields on FetchAttempt are present with correct types.
+
+    Re-propagated by T20 (origin T12, spec fc9ad9f): FetchAttempt gains
+    answering_host_name and answering_policy, the host of the answer's source_url and its
+    request policy; the seed's own answer is its walk host's, under the run's policy.
+    """
     _, _, walk = walked(tmp_path, site())
     (attempt,) = walk.attempts
     assert_fields(
@@ -2953,6 +2965,8 @@ def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
             "response",
             "verdict",
             "render_reason",
+            "answering_host_name",
+            "answering_policy",
             "retires_host",
             "retryable",
             "challenges",
@@ -2972,6 +2986,8 @@ def test_entity_fields_FetchAttempt(tmp_path: Path) -> None:
     assert attempt.failed_outright is False
     assert attempt.hop_refused is False
     assert attempt.wants_escalation is False
+    assert attempt.answering_host_name == walk.host.name
+    assert attempt.answering_policy == walk.host.run.policy
     assert list(getattr(attempt, "challenges", ["missing"])) == []
     assert getattr(attempt, "unsuccessful_challenge", None) is False
 

@@ -36,6 +36,8 @@ follows [Python packaging](../explanation/packaging.md).
 │   ├── test_blocks.py  test_blocks_regressions.py  Block verdicts, the breaker, retirement
 │   ├── test_verify.py         rovo verify's findings, one per reason
 │   ├── test_escalation.py  test_browser_engine.py  test_fetch_command.py  The browser tier, its engine, rovo fetch
+│   ├── test_owner_testing.py  test_owner_challenges.py  Owner testing and its challenge rules
+│   ├── test_carried_obligations.py  Obligations earlier slices reached and none assigned
 │   ├── e2e/                   End-to-end tests and their harness (conftest.py)
 │   │   ├── test_blocks_sync.py     Blocked pages, the breaker, host retirement, soft blocks
 │   │   ├── test_discovery_sync.py  Sitemaps, llms.txt and --dry-run over generated sites
@@ -45,6 +47,7 @@ follows [Python packaging](../explanation/packaging.md).
 │   │   ├── test_quality_sync.py    Islands, gates and flags, devsite tabs, rovo verify
 │   │   ├── test_render_sync.py     Escalation, render_mode, rovo fetch through FakeEngine
 │   │   ├── test_browser_sync.py    The spa site rendered in a real Chromium (just e2e-browser)
+│   │   ├── test_owner_sync.py      An owner-testing sync of the robots-disallow site
 │   │   └── test_second_sync.py     A second, incremental sync over generated sites
 │   └── fixtures/
 │       ├── py-lint-violation/ Positive controls for ruff and mypy

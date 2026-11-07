@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from typer import rich_utils
 from typer.testing import CliRunner
 
 from fakes import (
@@ -476,13 +477,19 @@ def test_surface_actor_MirrorCommands(tmp_path: Path, monkeypatch: pytest.Monkey
     assert files_under(tmp_path) == []
 
 
-def test_surface_provides_MirrorCommands() -> None:
+def test_surface_provides_MirrorCommands(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify provided operations on MirrorCommands appear/hide based on when conditions.
 
     Every operation an operator raises has its command: init, sync, verify, index,
     report and fetch, which takes URL, --tier (http, browser or stealth) and, with
-    OperatorFetchesUrl's config_path (e0f0c44), --config.
+    OperatorFetchesUrl's config_path (e0f0c44), --config. Re-propagated by T20 (origin
+    T19): help prints as plain text whatever the environment says about colour, as
+    tests/test_cli.py's plain_help_output fixture makes it. Typer forces a terminal,
+    ANSI codes and boxes when GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS is set, read once
+    at import into rich_utils.FORCE_TERMINAL; on GitHub Actions the codes split
+    "Usage: rovo fetch". False is what Typer's own _TYPER_FORCE_DISABLE_TERMINAL sets.
     """
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", False)
     runner = CliRunner(env={"COLUMNS": "200", "TERMINAL_WIDTH": "200"})
     listed = runner.invoke(app, ["--help"], prog_name="rovo")
     assert listed.exit_code == 0, listed.output

@@ -14,24 +14,31 @@ import json
 import math
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from rovo._convert.model import Profile
 from rovo._convert.profiles import profile_for, profile_named
 from rovo._crawl.model import (
     CrawlPolicy,
+    OwnerTestOptions,
+    PolitenessControl,
     RenderMode,
     RobotsMode,
+    RunMode,
+    RunStatus,
     StealthMode,
     standard_policy,
 )
 from rovo._mirror.model import CONFIG as MIRROR_CONFIG
 from rovo._mirror.model import CrawlScope
 from rovo._mirror.urls import hostname_of, is_http_url
+
+if TYPE_CHECKING:
+    from rovo._crawl.run import RunRecord
 
 _HASH_CHARS = 16
 _CONFIG_FILE = "rovo.toml"
@@ -115,7 +122,7 @@ class SyncOptions:
     json_events: bool
     urls: tuple[str, ...]
     paths: tuple[str, ...]
-    owner_test: None = None
+    owner_test: OwnerTestOptions | None = None
 
     @property
     def targeted(self) -> bool:
@@ -317,10 +324,210 @@ def scope_hash(scope: CrawlScope) -> str:
     )
 
 
-def effective_policy(settings: Configuration) -> CrawlPolicy:
-    """rovo.allium effective_policy, with no owner options: the standard policy afresh."""
-    del settings  # Only owner options change the policy, and this slice has none.
-    return standard_policy()
+# Each politeness control an owner request may disable, and the policy fields it sets.
+_DISABLED: dict[PolitenessControl, dict[str, object]] = {
+    PolitenessControl.robots: {"robots": RobotsMode.ignore},
+    PolitenessControl.crawl_delay: {"honor_crawl_delay": False},
+    PolitenessControl.rate: {"rate_per_host": None},
+    PolitenessControl.concurrency: {"concurrency_per_host": None},
+    PolitenessControl.retry_backoff: {"retry_backoff": False},
+    PolitenessControl.retry_after: {"honor_retry_after": False},
+    PolitenessControl.breaker_pause: {"breaker_pause": timedelta(0)},
+    PolitenessControl.breaker: {"breaker_enabled": False},
+}
+# The owner options that supply a value, each named as its policy field.
+_SUPPLIED = (
+    "rate_per_host",
+    "concurrency_per_host",
+    "backoff_base",
+    "max_backoff",
+    "retry_after_cap",
+    "breaker_pause",
+    "challenge_timeout",
+)
+# The controls whose value an owner request may also supply: never both (rovo.allium 417).
+_CONTROL_VALUES: dict[PolitenessControl, tuple[str, ...]] = {
+    PolitenessControl.rate: ("rate_per_host",),
+    PolitenessControl.concurrency: ("concurrency_per_host",),
+    PolitenessControl.retry_backoff: ("backoff_base", "max_backoff"),
+    PolitenessControl.retry_after: ("retry_after_cap",),
+    PolitenessControl.breaker_pause: ("breaker_pause",),
+}
+
+
+def effective_policy(
+    settings: Configuration, owner_test: OwnerTestOptions | None = None
+) -> CrawlPolicy:
+    """rovo.allium effective_policy (StartSync guidance): the standard policy afresh.
+
+    Only the owner options change it: each disabled control clears its flag (a disabled
+    rate or concurrency becomes null, a disabled breaker pause zero), each supplied value
+    replaces its default, and protection_escalation and interactive_challenges are
+    copied; the challenge timeout stays crawl's default unless supplied. The
+    configuration never reaches it (decided, for now): rovo.toml's robots = "ignore"
+    relaxes nothing.
+    """
+    del settings  # The configuration's own keys never relax the policy.
+    policy = standard_policy()
+    if owner_test is None:
+        return policy
+    changes: dict[str, object] = {
+        "protection_escalation": owner_test.protection_escalation,
+        "interactive_challenges": owner_test.interactive_challenges,
+    }
+    for name in _SUPPLIED:
+        value = getattr(owner_test, name)
+        if value is not None:
+            changes[name] = value
+    for control in owner_test.disabled_controls:
+        changes |= _DISABLED[control]
+    return replace(policy, **changes)  # type: ignore[arg-type]  # Fields by name, typed by _DISABLED and _SUPPLIED.
+
+
+def owner_request_problem(request: "OwnerRequest") -> str | None:
+    """rovo.allium owner_request_problem's owner half: the first problem, else None.
+
+    In the order rovo.allium 417 to 433 lists them: named URLs or paths; an empty host
+    set or one outside the allowed hosts; a host without a saved declaration; the
+    preceding run (in runs.json, finished, not dry, the same scope hash); the baseline
+    (the preceding run if standard, else its baseline: finished, not dry, not targeted,
+    standard, the same scope hash; a row written before T20 has no targeted field and is
+    never one); the supplied values; a control both disabled and given a value;
+    interactive challenges without an interactive operator, rendering, protection
+    escalation or an installed browser; access naming an unselected host. With no
+    owner test there is no problem here (the root's robots = ignore refusal is the
+    other half). Confirmation waives none of it.
+    """
+    owner_test = request.options.owner_test
+    if owner_test is None:
+        return None
+    if request.options.targeted:
+        return "an owner-testing request names no url or path"
+    return (
+        _host_problem(request, owner_test.hosts)
+        or _lineage_problem(request, owner_test.preceding_run_id)
+        or _option_problem(owner_test)
+        or _challenge_problem(request)
+        or _access_problem(owner_test)
+    )
+
+
+def _host_problem(request: "OwnerRequest", hosts: frozenset[str]) -> str | None:
+    """A non-empty subset of the allowed hosts, each with a saved declaration."""
+    if not hosts or not hosts <= request.allowed_hosts:
+        return "owner-testing hosts must be a non-empty subset of the allowed hosts"
+    undeclared = hosts - request.declared_owned_hosts
+    if undeclared:
+        return f"no saved ownership declaration for {', '.join(sorted(undeclared))}"
+    return None
+
+
+def _lineage_problem(request: "OwnerRequest", preceding_run_id: int) -> str | None:
+    """The preceding run, then the baseline it is or shares, as runs.json records them."""
+    preceding = request.runs.get(preceding_run_id)
+    if preceding is None or not _usable_run(preceding, request.scope_hash):
+        return f"no finished, non-dry preceding run {preceding_run_id} of this scope"
+    baseline = (
+        preceding
+        if preceding.mode == RunMode.standard.value
+        else request.runs.get(preceding.baseline_run_id or 0)
+    )
+    if baseline is None or not _baseline(baseline, request.scope_hash):
+        return "no finished, non-dry, non-targeted standard baseline run of this scope"
+    return None
+
+
+@dataclass(frozen=True, kw_only=True)
+class OwnerRequest:
+    """What owner_request_problem reads: the request and the mirror's state it names.
+
+    `runs` maps each runs.json row's id to the row; `browser_installed` is probed only
+    when interactive challenges are asked for.
+    """
+
+    options: SyncOptions
+    allowed_hosts: frozenset[str]
+    declared_owned_hosts: frozenset[str]
+    scope_hash: str
+    runs: Mapping[int, "RunRecord"]
+    interactive_renders: bool
+    browser_installed: Callable[[], bool]
+
+
+def _usable_run(record: "RunRecord", current_hash: str) -> bool:
+    """A preceding run: finished, not dry, the same scope hash."""
+    return (
+        record.status == RunStatus.finished.value
+        and not record.dry_run
+        and record.scope_hash == current_hash
+    )
+
+
+def _baseline(record: "RunRecord", current_hash: str) -> bool:
+    """A baseline: a usable standard run known not to be targeted."""
+    return (
+        _usable_run(record, current_hash)
+        and record.mode == RunMode.standard.value
+        and record.targeted is False
+    )
+
+
+def _option_problem(owner_test: OwnerTestOptions) -> str | None:
+    """A supplied value out of range, else a control both disabled and given a value."""
+    zero = timedelta(0)
+
+    def below(value: timedelta | None, least: timedelta, *, strictly: bool) -> bool:
+        return value is not None and (value <= least if strictly else value < least)
+
+    rate, concurrency = owner_test.rate_per_host, owner_test.concurrency_per_host
+    problems = (
+        # A Decimal rate holds neither NaN nor infinity (rovo.allium owner_request_problem).
+        (
+            rate is not None and (not math.isfinite(rate) or rate <= 0),
+            "rate_per_host must be positive",
+        ),
+        (concurrency is not None and concurrency <= 0, "concurrency_per_host must be positive"),
+        (below(owner_test.backoff_base, zero, strictly=False), "backoff_base is negative"),
+        (below(owner_test.max_backoff, zero, strictly=False), "max_backoff is negative"),
+        (below(owner_test.breaker_pause, zero, strictly=False), "breaker_pause is negative"),
+        (below(owner_test.retry_after_cap, zero, strictly=True), "retry_after_cap not positive"),
+        (
+            below(owner_test.challenge_timeout, zero, strictly=True),
+            "challenge_timeout must be finite and positive",
+        ),
+    )
+    problem = next((text for failed, text in problems if failed), None)
+    if problem is not None:
+        return problem
+    for control in sorted(owner_test.disabled_controls, key=lambda control: control.value):
+        names = _CONTROL_VALUES.get(control, ())
+        given = [name for name in names if getattr(owner_test, name) is not None]
+        if given:
+            return f"{control.value} is both disabled and given a value ({', '.join(given)})"
+    return None
+
+
+def _challenge_problem(request: OwnerRequest) -> str | None:
+    """Interactive challenges need an operator, rendering, escalation and a browser."""
+    owner_test = request.options.owner_test
+    if owner_test is None or not owner_test.interactive_challenges:
+        return None
+    if (
+        not request.options.interactive
+        or not request.interactive_renders
+        or not owner_test.protection_escalation
+        or not request.browser_installed()
+    ):
+        return (
+            "interactive challenges need an interactive operator, rendering enabled, "
+            "protection_escalation and an installed browser"
+        )
+    return None
+
+
+def _access_problem(owner_test: OwnerTestOptions) -> str | None:
+    """Access naming only selected hosts."""
+    return None if owner_test.access_within_hosts else "access names a host that is not selected"
 
 
 def encode_configuration(settings: Configuration) -> dict[str, object]:

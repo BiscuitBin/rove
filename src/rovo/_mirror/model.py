@@ -376,6 +376,19 @@ class Mirror:
         """The operator has declared an owned host."""
         return bool(self.declared_owned_hosts)
 
+    def save_ownership(self, hosts: frozenset[str]) -> bool:
+        """Realises mirror.allium SaveOwnership: True when the declaration was saved.
+
+        The hosts, normalised exactly as URL hosts, replace declared_owned_hosts; an empty
+        set revokes them; a host outside scope.allowed_hosts refuses the whole set, and a
+        wildcard is no host. Saving starts no run.
+        """
+        normalised = frozenset(hostname_of(f"http://{host.strip()}") for host in hosts)
+        if not normalised <= self.scope.allowed_hosts:
+            return False
+        self.declared_owned_hosts = normalised
+        return True
+
     def page(self, identity: str) -> "Page | None":
         """Page{mirror: this, identity: identity}, whatever its status."""
         return next((page for page in self.pages if page.identity == identity), None)

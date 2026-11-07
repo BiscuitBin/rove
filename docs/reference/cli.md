@@ -147,8 +147,10 @@ first two path segments) to start at the browser, kept as `tier_hints` in
 HTTP only). A render makes no request of its own: its navigation is made as an HTTP
 try is (robots.txt, redirects, the host's limiter, the `rovo/<version>` user agent),
 and each request the page makes is made the same way only to an allowed host whose
-robots.txt allows it, once, its `Retry-After` pausing the host for at most
-`retry_after_cap`; any other request, one to a CDN included, is aborted. The navigation's
+robots.txt allows it, once, its `Retry-After` pausing the host that answered it (after
+any redirect; the host it was sent to when that one is not open), under that host's
+policy, for at most `retry_after_cap`, never retiring a host or feeding a breaker; any
+other request, one to a CDN included, is aborted. The navigation's
 own answer is an HTTP answer's equal for `Retry-After`: it pauses the host (the render is
 never retried), counts toward `retry_after_honored` and, past `retry_after_cap`, retires
 the host. A walk that climbed counts its `render_escalations` whatever its outcome,
@@ -321,13 +323,22 @@ written. These and the host's remaining pages are listed under `skipped_urls` (i
 `--url` or `--path` sync, only the targets), the report has
 `breaker_tripped: true` and the host's `per_host` row its `blocked`, `block_rate` and
 `breaker_tripped`, and the sync exits 3. Another host's pages are still fetched.
+An answer belongs to the host that answered it: when a page, robots.txt, a sitemap or
+`llms.txt` redirects to another open host, that host's `Retry-After` pause, its
+`retry_after_honored` count and a retirement past `retry_after_cap` fall on that
+destination host, never on the host the request began at, and a page's redirected
+answer also feeds the destination host's breaker one outcome, so it can trip. The page
+itself, its tallies and its `per_host` row stay with the host it began at, and a
+redirected robots.txt's rules and `Crawl-delay` stay with the origin that asked for it.
 
 With `--json`, progress goes to standard output as one JSON object a line,
 `{"event": ..., "host": ..., "until": ..., "url": ...}`, keys sorted, `until` an ISO
 8601 UTC timestamp or `null`, `url` `null` on every event but `page`: `start` once, when
 the run is created, `page` once for each row a fetch settles (naming its host and its
 URL), `host_backoff` as a host is paused for a retry (naming the host and when the pause
-ends), `breaker_tripped` as a host's breaker trips (naming the host), and one `done`, last, once the report is written. A dry
+ends), `breaker_tripped` as a host's breaker trips (naming the host), `owner_testing_warning`
+once, before the first request of an owner-testing run (every field `null`), and one
+`done`, last, once the report is written. A dry
 run's listing stays plain text, ahead of its `done`. Without `--json` nothing is printed
 for progress, and a refused sync prints no event.
 
@@ -354,15 +365,54 @@ of the resolved scope (`allowed_hosts`, or the first seed's host when that is em
 page's included (`"unknown target path"`); a browser or stealth engine the configuration
 needs that is not installed, the browser's being the playwright package and its
 Chromium (`"configured tier is not installed"`; standard error names the missing piece
-and both fixes); `robots = "ignore"`
-(`"robots = ignore is only for an owner-testing run"`). The refusal is printed on
+and both fixes); `robots = "ignore"` in a standard sync
+(`"robots = ignore is only for an owner-testing run"`), or an invalid owner-testing
+request (see [Owner testing](#owner-testing)). The refusal is printed on
 standard error, and `crawl-report.json` is replaced by a refused report:
 `report_status: refused`, `run_id: null`, `exit_code: usage`, `refusal_reason` the text
 quoted above, the resolved `configuration` (with its `problems`), the `options` asked
 for, `effective_policy: null` and every count and list empty; it exits 2. A refused
-sync saves no manifest, frontier or run. When a run reaches a branch a later slice
-implements (owner testing), the sync stops, names the rule on standard error, exits 1
-and leaves the previous report in place.
+sync saves no manifest, frontier or run.
+
+### Owner testing
+
+An owner-testing sync retries, under a relaxed policy, the URLs a finished run left
+unresolved on hosts the operator has declared as their own. It has no command-line
+spelling yet (the specification's open question): it is reached in process only, through
+`rovo._commands.save_ownership(out_dir, hosts)`, which saves the declaration in the
+manifest (an empty set revokes it; a host outside the allowed hosts exits 2, nothing
+saved; no request is made), and `rovo._commands.sync(out_dir, ..., owner_test=...)`. The
+declaration alone relaxes nothing: a standard sync of a declared mirror is as polite as
+any. The request names a preceding run, its hosts, the politeness controls it disables
+and the values it supplies; `robots = "ignore"` in `rovo.toml` is accepted and ignored,
+and only disabling the `robots` control ignores robots.txt. It is refused, with exit 2
+and no request, after the refusals above and in this order: a `--url` or `--path`; no
+host, or a host outside the allowed hosts; a host without a saved declaration; no
+finished, non-dry preceding run of the current scope in `.rovo/runs.json`; no finished,
+non-dry, non-targeted standard baseline of that scope (the preceding run, or the one it
+followed); a rate or concurrency that is not positive, a backoff or pause that is
+negative, a retry cap or challenge timeout that is not positive; a control both disabled
+and given a value; interactive challenges without a person at the terminal, rendering,
+protection escalation and an installed browser; access naming an unselected host.
+`--yes` waives none of it. Its refused report is in `mode: owner_testing`, with the
+requested options and the preceding run's id.
+
+Every owner-testing run and every owner refusal prints a warning on standard error,
+before any request: the settings are only for websites the operator owns, ownership is
+self-declared, not verified, and the selected hosts and settings. The run seeds only the
+preceding run's unresolved URLs on the selected hosts within the scope (none means no
+fetch, never a full recrawl), reads no sitemap or `llms.txt`, and follows only links on
+those hosts that are unseen or unresolved. The relaxed policy applies to the selected
+hosts alone; every other host is fetched under the standard policy, and an answer a
+selected host's request is redirected to on another host is judged by that host's
+standard policy: its pause, its retirement and its breaker, which stays on even when the
+request disables the breaker. With protection
+escalation a host's breaker climbs a tier (pausing the host and lowering its rate)
+before it trips. No stealth engine exists, so a request that needs the stealth tier is
+refused, and no challenge is recognised or prompted for (both open questions). The run
+exits 1 when it leaves URLs unresolved; its report records the declared hosts, the
+baseline and preceding runs, the requested options (access never) and each host's
+effective policy.
 
 ## `rovo fetch`
 
@@ -475,7 +525,7 @@ JSON. It makes no request and writes nothing.
 | Status | Meaning |
 | --- | --- |
 | 0 | Success: a version line or help was printed, a mirror was created, a sync finished with nothing to report, a verify found nothing, the indexes were rebuilt, the report was printed, or a fetch printed its page. |
-| 1 | Partial: a sync recorded a failure, was interrupted or crashed, or stopped at a branch a later slice implements; or a fetch printed no page. |
+| 1 | Partial: a sync recorded a failure, was interrupted or crashed, or an owner-testing sync left URLs unresolved; or a fetch printed no page. |
 | 2 | Usage error: no command given (the help goes to standard output; standard error is empty), an unknown command (`No such command`), an unknown option (`No such option`), a missing or extra argument, a refused `init`, `sync`, `verify`, `index` or `fetch`, or `report` with no report; for the parser's errors, the usage line and the error go to standard error. |
 | 3 | Blocked: a host's breaker tripped, by its block rate or a host retirement. |
 | 4 | Quality: `fail_on_low_quality` is set and a page touched this run is low confidence, or a relative link in a page file is broken; or `rovo verify` found anything. |

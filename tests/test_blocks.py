@@ -20,6 +20,7 @@ import pytest
 from bs4 import BeautifulSoup
 
 from fakes import (
+    FakeEngine,
     FakeFetcher,
     FixedClock,
     html_response,
@@ -46,10 +47,12 @@ from rovo._crawl.model import (
     FrontierStatus,
     Host,
     LadderWalk,
+    OwnerTestOptions,
     ProgressEvent,
     RenderMode,
     RenderReason,
     Run,
+    RunMode,
     RunStatus,
     SiteResponse,
     UrlBlocked,
@@ -82,7 +85,6 @@ from rovo._crawl.run import (
 from rovo._exit import ExitCode
 from rovo._mirror.model import Mirror, Tier
 from rovo._mirror.state import load_mirror
-from rovo._unfinished import NotInThisSlice
 from spec_values import spec_enum, spec_float, spec_int
 from test_crawl import (
     DISALLOW_GUIDE,
@@ -884,12 +886,17 @@ def test_rule_failure_BreakerTrips_3(tmp_path: Path) -> None:
 
     requires: breaker.tier = breaker.highest_tier or not
     breaker.host.run.policy.protection_escalation: below the highest tier with protection
-    escalation on (owner testing's policy, on a constructed run), BreakerTrips does not
-    fire; through a run, the breaker that should act there stops at BreakerEscalates,
-    T20's rule, rather than tripping.
+    escalation on, in an owner-testing run on its owned host, BreakerTrips does not fire;
+    through a whole owner run, the breaker that should act at http climbs to the browser
+    (BreakerEscalates) rather than tripping. Re-propagated by T20 (origin T18), whose
+    whole-run half expected NotInThisSlice("BreakerEscalates") from an escalating policy
+    on a run whose mode was standard: the run is now an owner run following a finished
+    standard run that left the seeds unresolved, and asserts the climb.
     """
     escalating = dataclasses.replace(standard_policy(), protection_escalation=True)
     run, frontier, host = opened_host(tmp_path / "unit")
+    run.mode = RunMode.owner_testing
+    run.owned_hosts = frozenset({HOST})
     run.policy = escalating
     breaker = the_breaker(host)
     breaker.highest_tier = Tier.browser
@@ -907,10 +914,28 @@ def test_rule_failure_BreakerTrips_3(tmp_path: Path) -> None:
         for number, url in enumerate(seeds, 1)
     }
     mirror = seeded_mirror(tmp_path / "run", seeds)
-    escalating_run = request(mirror, render_mode=RenderMode.auto, policy=escalating)
-    with pytest.raises(NotInThisSlice) as stopped:
-        run_crawl(escalating_run, None, FakeFetcher(responses), FixedClock())
-    assert stopped.value.rule == "BreakerEscalates"
+    base = run_module.start_run(request(mirror), FixedClock())
+    assert base is not None
+    assert run_module.end_run(base, FixedClock())
+    base.unresolved_urls = frozenset(seeds)
+    owner_run = dataclasses.replace(
+        request(mirror, run_id=2, render_mode=RenderMode.auto, policy=escalating),
+        mode=RunMode.owner_testing,
+        baseline=base,
+        preceding=base,
+        owned_hosts=frozenset({HOST}),
+        requested_owner_test=OwnerTestOptions(
+            preceding_run_id=1, hosts=frozenset({HOST}), protection_escalation=True
+        ),
+    )
+    result = run_crawl(owner_run, None, FakeFetcher(responses), FixedClock(), engine=FakeEngine())
+    climbed = the_host(result.run)
+    assert not result.run.has_tripped_host
+    assert the_breaker(climbed).tier is Tier.browser
+    assert the_breaker(climbed).escalations == 1
+    assert the_breaker(climbed).status is BreakerStatus.watching
+    assert result.tripped == ()
+    assert any(event.host is climbed for event in result.backed_off)
 
 
 # --- classify_block, the main text and FeedBreaker (guarantees) ------------------------

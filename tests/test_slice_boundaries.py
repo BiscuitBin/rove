@@ -1,10 +1,10 @@
-"""Where this slice stops, and the corners of what it does that the obligation tests skip.
+"""Where each slice stopped, now realised, and the corners the obligation tests skip.
 
-Every branch a later slice implements raises NotInThisSlice; these tests prove each
-guard point is reached by the input that needs it, rather than a later slice's
-behaviour being silently skipped. No test asserts the message, and the slice that
-implements a branch replaces its test here. The rest covers the black boxes' corners:
-the render recognisers, path assignment, the rovo.toml readers and the page file.
+Each slice's branches a later slice implemented raised NotInThisSlice here; the slice
+that implemented a branch replaced its test with one asserting the behaviour, and T20,
+the last slice, replaced the last three (owner testing), so no test here expects the
+guard any more. The rest covers the black boxes' corners: the render recognisers, path
+assignment, the rovo.toml readers and the page file.
 """
 
 import dataclasses
@@ -42,6 +42,7 @@ from rovo._crawl.model import (
     RunKind,
     RunMode,
     RunRequest,
+    RunStatus,
     SiteResponse,
     StealthMode,
     standard_policy,
@@ -78,7 +79,6 @@ from rovo._mirror.model import (
 from rovo._mirror.state import ManifestError, load_mirror, manifest_path, save_mirror
 from rovo._mirror.urls import assign_path, normalise_url, pattern_matches, version_label
 from rovo._report import ExitCode
-from rovo._unfinished import NotInThisSlice
 from test_crawl import MAPS, MAPS_INDEX, PAST_CAP_DELAYS, PAST_CAP_IDS, past_cap, sitemapindex
 
 SITE = "http://docs.example"
@@ -153,7 +153,7 @@ def crawl(out_dir: Path, responses: dict[str, SiteResponse], **changes: object) 
     run_crawl(request(mirror, **changes), None, FakeFetcher(responses), FixedClock())
 
 
-# --- The guard points: each stops the run with NotInThisSlice ------------------------
+# --- The guard points of the earlier slices, each now realised --------------------------
 
 
 @pytest.mark.parametrize(
@@ -323,10 +323,23 @@ def test_a_devsite_page_converts(tmp_path: Path) -> None:
     assert "Example developers footer" not in page.converted_body
 
 
-def test_owner_testing_and_dry_runs_stop(tmp_path: Path) -> None:
-    """An owner-testing request is refused by StartRun; T13 realises the dry run."""
-    with pytest.raises(NotInThisSlice):
-        crawl(tmp_path / "owner", {}, mode=RunMode.owner_testing)
+def test_an_owner_request_without_its_authority_is_a_defect(tmp_path: Path) -> None:
+    """StartRun refuses an owner request with no baseline, preceding run or owned host.
+
+    Re-propagated by T20 from test_owner_testing_and_dry_runs_stop (T09), which expected
+    NotInThisSlice("StartRun") (T13 realised the dry run): the root refuses such a
+    request first, so drive_run meeting one is a defect, a ValueError naming StartRun's
+    requires, not a product stop; nothing is requested.
+    """
+    fetcher = FakeFetcher({SEED: html_response(SEED, PAGE)})
+    with pytest.raises(ValueError, match="StartRun"):
+        run_crawl(
+            request(new_mirror(tmp_path / "owner"), mode=RunMode.owner_testing),
+            None,
+            fetcher,
+            FixedClock(),
+        )
+    assert fetcher.requests == []
 
 
 def test_a_sitemap_filter_placeholder_is_filled(tmp_path: Path) -> None:
@@ -388,22 +401,43 @@ def test_a_declared_sitemap_past_the_cap_retires_the_host(
     ]
 
 
-def test_owner_testing_runs_stop(tmp_path: Path) -> None:
-    """Owner testing is a later slice's (T20): PrepareRun and Discover stop on it.
+def test_owner_testing_runs_prepare_their_follow_up_and_discover_nothing(
+    tmp_path: Path,
+) -> None:
+    """PrepareRun and Discover realise their owner-testing branches (T20).
 
-    Re-propagated by the T16 follow-up (origin T09, test_targeted_runs_stop): the targeted
-    run is realised (9a253a4, tests/test_targeted_run.py); the raises stay for an
-    owner-testing run alone.
+    Re-propagated by T20 from test_owner_testing_runs_stop (origin T09,
+    test_targeted_runs_stop, re-propagated by the T16 follow-up), which expected
+    NotInThisSlice from both: an owner run following a finished standard run whose seed
+    was left unresolved seeds that URL alone (a named row at depth 0), refetches nothing
+    by force (its targets are empty, decided), and its discovery requests nothing: no
+    seed, sitemap or llms.txt, no host opened before its first fetch.
     """
     mirror = new_mirror(tmp_path)
-    run = start_run(request(mirror, targets=frozenset({SEED})), FixedClock())
+    base = start_run(request(mirror), FixedClock())
+    assert base is not None
+    base.status = RunStatus.finished
+    base.unresolved_urls = frozenset({SEED})
+    owner = dataclasses.replace(
+        request(mirror, id=2, mode=RunMode.owner_testing),
+        baseline=base,
+        preceding=base,
+        owned_hosts=frozenset({HOST}),
+    )
+    run = start_run(owner, FixedClock())
     assert run is not None
-    run.mode = RunMode.owner_testing
     frontier = create_frontier(run, None)
-    with pytest.raises(NotInThisSlice):
-        prepare_run(run, frontier)
-    with pytest.raises(NotInThisSlice):
-        discover(run, frontier, FakeFetcher({}))
+    assert prepare_run(run, frontier)
+    assert run.forced_refetch == frozenset()
+    assert run.active_urls == frozenset({SEED})
+    (entry,) = frontier.entries
+    assert entry.identity == SEED
+    assert entry.status is FrontierStatus.pending
+    assert entry.depth == 0
+    fetcher = FakeFetcher({})
+    assert discover(run, frontier, fetcher)
+    assert fetcher.requests == []
+    assert run.hosts == []
 
 
 def test_a_browser_attempt_renders_and_a_tripped_hosts_rows_are_skipped(tmp_path: Path) -> None:
@@ -592,8 +626,13 @@ def page_content(html: str) -> ConvertedContent:
     return converted_content(extracted, normalized, body, measure(extracted, normalized, body))
 
 
-def test_enqueue_page_links_owner_branch_stops(tmp_path: Path) -> None:
-    """EnqueuePageLinks' owner-testing branch (owner_link_needed) is a later slice's."""
+def test_enqueue_page_links_owner_branch_admits_only_owned_needed_links(tmp_path: Path) -> None:
+    """EnqueuePageLinks' owner-testing branch admits an unseen link on an owned host only.
+
+    Re-propagated by T20 from test_enqueue_page_links_owner_branch_stops (T10), which
+    expected NotInThisSlice with no entry: with the link's host not owned nothing is
+    admitted; once it is, the unseen link (owner_link_needed) is discovered via link.
+    """
     mirror = new_mirror(tmp_path)
     run = start_run(request(mirror), FixedClock())
     assert run is not None
@@ -623,9 +662,12 @@ def test_enqueue_page_links_owner_branch_stops(tmp_path: Path) -> None:
         navigation_targets=(),
     )
     run.mode = RunMode.owner_testing
-    with pytest.raises(NotInThisSlice):
-        enqueue_page_links(run, frontier, found)
+    assert enqueue_page_links(run, frontier, found) == []
     assert frontier.entries == []
+    run.owned_hosts = frozenset({HOST})
+    (entry,) = enqueue_page_links(run, frontier, found) or []
+    assert entry.identity == f"{SITE}/guide/b.html"
+    assert frontier.entries == [entry]
 
 
 def test_an_island_restores_and_the_inline_style_anchors() -> None:

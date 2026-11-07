@@ -5,7 +5,9 @@ at its host name's limiter: the host's pause, then its rate slot, folded into on
 There is no burst: the starts of two requests to one host name are at least
 `1 / host.rate` apart, and at least `host.crawl_delay` apart when Crawl-delay is honoured
 (AttemptTier guidance). The wait is computed once from the timer and never looped on, so
-a timer that stands still cannot hang a run.
+a timer that stands still cannot hang a run. Every policy value read for one host is
+that host's request_policy: an owner-testing run's relaxed policy on a selected owned
+host only, the standard policy on every other host.
 
 `follow` is the one redirect follower: a 301, 302, 303, 307 or 308 with a Location is
 followed hop by hop, each hop under its destination host name's limiter, at most
@@ -116,7 +118,7 @@ def spacing(host: Host) -> timedelta:
     Crawl-delay is honoured: disabling one control never disables another.
     """
     gap = timedelta(0) if host.rate is None else timedelta(seconds=1 / host.rate)
-    if host.run.policy.honor_crawl_delay:
+    if host.request_policy.honor_crawl_delay:
         gap = max(gap, host.crawl_delay)
     return gap
 
@@ -142,7 +144,7 @@ def back_off(host: Host, try_: int, retry_after: timedelta | None) -> HostBacked
     The HostBackedOff is recorded on the run, which returns it through CrawlResult.
     """
     run = host.run
-    until = run.timer.now() + retry_wait(try_, retry_after, run.policy, run.draw)
+    until = run.timer.now() + retry_wait(try_, retry_after, host.request_policy, run.draw)
     host.paused_until = until if host.paused_until is None else max(host.paused_until, until)
     backed_off = HostBackedOff(host=host, until=until)
     run.backoffs.append(backed_off)
@@ -164,6 +166,16 @@ def past_cap(response: SiteResponse, policy: CrawlPolicy) -> bool:
     )
 
 
+def judged_host(host: Host, response: SiteResponse) -> Host:
+    """The host a discovery fetch's answer is judged by (crawl.allium FetchRobots, `judged`).
+
+    The open host of the response's source_url (for an error, of the URL last
+    requested), else the fetch's own host: a hop onto a host the run has not opened
+    (only robots.txt's, which opens none) is judged by the host that fetched.
+    """
+    return host.run.host(hostname_of(response.source_url)) or host
+
+
 def pause_for_cap(host: Host) -> HostBackedOff:
     """A speculative probe past the cap: pause the host until now + retry_after_cap.
 
@@ -171,7 +183,7 @@ def pause_for_cap(host: Host) -> HostBackedOff:
     longer pause; the HostBackedOff carries now + retry_after_cap and is recorded on the
     run (FetchSitemap, ReadLlmsTxt).
     """
-    return pause_host(host, host.run.policy.retry_after_cap)
+    return pause_host(host, host.request_policy.retry_after_cap)
 
 
 def pause_host(host: Host, wait: timedelta) -> HostBackedOff:
@@ -222,7 +234,7 @@ def follow(  # noqa: PLR0913  One request's URL, its limiter and validators, and
     and its redirect_stop. A hop onto a host whose breaker has tripped is not requested
     and `ready` is not asked (its robots.txt is not read): it ends as the error answer
     RETIRED_HOP, as does a hop whose host the robots.txt read `ready` makes retires
-    (crawl.allium 840-845, 1667-1671). `ready(target)` gives the host name whose limiter
+    (crawl.allium 869-873, 1722-1726). `ready(target)` gives the host name whose limiter
     the hop waits at, or None when robots.txt disallows the hop, which ends as the error
     answer DISALLOWED_HOP.
     The final answer's redirect_hops are the URLs left behind, the requested one first.
@@ -278,7 +290,7 @@ def pending_limiter(host: Host, target: str) -> Host:
         run.pending_limiters[name] = dataclasses.replace(
             host,
             name=name,
-            rate=run.policy.rate_per_host,
+            rate=run.request_policy(name).rate_per_host,
             crawl_delay=timedelta(0),
             paused_until=None,
             last_started=None,
@@ -300,7 +312,9 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
     Its tries are a page's http tries (FetchRobots guidance): a retryable answer is
     retried while try < http_attempts, each retry pausing the host and raising a
     HostBackedOff; every try whose retryable answer carries a Retry-After while
-    honor_retry_after holds adds one to the host's retry_after_honored. A Retry-After
+    honor_retry_after holds adds one to the host's retry_after_honored. "The host" of a
+    try is the one that answered it, under its request policy (`judged_host`): the
+    fetch's own host unless the answer was redirected to an open host. A Retry-After
     past retry_after_cap ends the tries with that answer, with no wait and no pause;
     whether it retires or pauses the host is the caller's to say. Every try sends the
     validators given, which only a sitemap with a snapshot has, on its first request.
@@ -308,14 +322,13 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
     `url`. A redirect stopped (a loop, the hop limit, out of scope) or a 3xx with no
     usable Location ends the tries as an error answer; a hop `follow` refuses as an error
     answer (a retired host, or robots.txt disallowing it) is retried as any error answer
-    is (crawl.allium 840 to 852, 1664 to 1671), but once the fetch's own host has
-    tripped no retry is made: the fetch ends with the answer it holds (868 to 875).
+    is (crawl.allium 863 to 875, 1720 to 1726), but once the fetch's own host has
+    tripped no retry is made: the fetch ends with the answer it holds (906 to 917).
     `ready` gives a hop's host, or None when robots.txt disallows it; by default the
     hop's open host, else its host name's pending limiter (`pending_limiter`), with no
     robots.txt read (robots.txt itself is not governed by robots.txt). The size covers
     every try's and every hop's bytes; no try counts as a fetch attempt.
     """
-    policy = run.policy
     scope = run.target.scope
     hop_host = ready or (
         lambda target: run.host(hostname_of(target)) or pending_limiter(host, target)
@@ -337,11 +350,14 @@ def fetch_resource(  # noqa: PLR0913  FetchRobots' fetch, and the hop's limiter.
                 else STOP_ERRORS[response.redirect_stop]
             )
             return dataclasses.replace(response, size=received, error=error)
+        # Each try is counted, paused and judged by the host that answered it.
+        judged = judged_host(host, response)
+        policy = judged.request_policy
         if response.retryable and response.retry_after is not None and policy.honor_retry_after:
-            host.retry_after_honored += 1
+            judged.retry_after_honored += 1
         last = past_cap(response, policy) or not response.retryable or try_ >= CONFIG.http_attempts
         # Once the fetch's own host has tripped, no retry is made (BreakerStopsTheRun).
         if last or host.breaker_tripped:
             return dataclasses.replace(response, size=received)
-        back_off(host, try_, response.retry_after)
+        back_off(judged, try_, response.retry_after)
         try_ += 1

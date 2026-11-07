@@ -94,7 +94,8 @@ in any section. Without `--config`, `rovo fetch` uses the built-in defaults.
 
 The mirror: `scope` (the `CrawlScope` the last run used), `profile` (a catalogue
 profile's name), `processing_signature` (a digest of the profile and the pinned
-locale), `declared_owned_hosts`, `recorded_root_url` (the root URL the last run used),
+locale), `declared_owned_hosts` (the hosts the operator declared as their own, set only
+by saving ownership), `recorded_root_url` (the root URL the last run used),
 `pages`, `aliases` and `links`. Each page row holds every `Page` field: its identity,
 path, source and canonical URLs, title, description, extraction method, tier (`http`,
 or `browser` for a page stored from a render), quality
@@ -143,7 +144,11 @@ discovery ends, once it has gone unrequested for more than
 `observed_url_retention_syncs` (3) runs; an unavailable or unreachable answer keeps it.
 An absent file holds no snapshot. `runs.json` holds `runs`, one row per run, oldest
 first: `id`, `kind`, `mode`, `status`, `scope_hash`, `dry_run`, `started_at`,
-`finished_at` and `unresolved_urls`. A run's id is one more than the highest id there.
+`finished_at`, `unresolved_urls`, `targeted` (a standard run that named `--url` or
+`--path`), `baseline_run_id` and `preceding_run_id` (an owner-testing run's lineage,
+`null` otherwise) and `owned_hosts` (sorted). A row written before these four fields
+existed lacks them and is never accepted as an owner-testing baseline. A run's id is one
+more than the highest id there.
 A sync that crashes after its run ended still records the run's row, though it saves
 neither the manifest nor the frontier, so its id is never reused; a refused sync records
 none.
@@ -463,9 +468,14 @@ crashed sync included: its `report_status` is `interrupted` and `error` holds a 
 writes a refused report instead: `report_status: refused`, `run_id: null`,
 `exit_code: usage`, `refusal_reason` naming the refusal, `effective_policy: null` and
 every count and list empty. `options` records what the sync asked for, `targeted`
-included (true when a `--url` or `--path` was named). `rovo report` prints the file.
-A sync that stops at a branch a later slice implements (owner testing), or that finds
-no mirror, leaves the previous report in place.
+included (true when a `--url` or `--path` was named). An owner-testing run's report
+records `declared_owned_hosts`, `baseline_run_id`, `preceding_run_id`,
+`requested_owner_test` (every option, sets sorted, durations in seconds, `access` as
+host names only) and its `effective_policy`; each `per_host` row carries the policy its
+host ran under, the standard one for a host that was not selected, and its own
+`robots_ignored`. A refused owner request's report has `mode: owner_testing`, the
+requested options and the preceding id it named. `rovo report` prints the file. A sync
+that finds no mirror leaves the previous report in place.
 
 ## Related pages
 

@@ -192,6 +192,17 @@ crawl's callback, as `tests/e2e/test_render_sync.py` does over the served `spa` 
 `PlaywrightEngine` is covered over a stub `playwright.sync_api` module in
 `tests/test_browser_engine.py`.
 
+Owner testing is reached in process only. `tests/test_owner_testing.py` holds its
+obligations and guarantees (the owner request and its refusals, the relaxed policy on
+selected hosts only, follow-up runs, the breaker's climb, the report's owner fields and
+saving ownership), `tests/test_owner_challenges.py` the challenge rules, and
+`tests/test_carried_obligations.py` the obligations earlier slices reached that no
+ticket assigned. No challenge recogniser or prompt ships, so a challenge verdict is
+constructed and the owner answers through `FakeChallengePrompt` (`tests/fakes.py`),
+which answers from a script, records each challenge and steps a `SteppingTimer`
+instead of sleeping; no test reads standard input. `tests/e2e/test_owner_sync.py` runs
+an owner-testing sync of the served `robots-disallow` site over a real `HttpxFetcher`.
+
 ## Coverage
 
 `just coverage` runs the suite under coverage and fails when the total over the `rovo`

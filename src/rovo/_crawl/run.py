@@ -1,20 +1,22 @@
-"""One standard run, RunRequested to RunEnded (crawl.allium 617 to 2329).
+"""One run, standard or owner testing, RunRequested to RunEnded (crawl.allium 638 to 2431).
 
 Each function realises the rule its docstring names and returns without effect when
 the rule's guards do not hold. Rules chain only where their docstrings say: Discover
 opens hosts and reads their sitemaps and llms.txt, OpenHost reads robots.txt, FetchEntry
 makes its first attempt. `run_crawl`
-drives the rest in the specification's order, one frontier row after another, and
-stops with NotInThisSlice where a later slice's branch would be taken. Every request,
-each redirect hop and each request a render causes included, waits its turn at its host
-name's limiter (rovo._crawl.pace) on the run's timer.
+drives the rest in the specification's order, one frontier row after another. Every
+request, each redirect hop and each request a render causes included, waits its turn at
+its host name's limiter (rovo._crawl.pace) on the run's timer, under that host's
+request_policy. A challenge PrepareAttempt offers waits on the run's ChallengePrompt;
+no prompt ships and no recogniser marks a challenge (crawl.allium open questions), so
+only a caller that passes both ever sees one.
 """
 
 import dataclasses
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import MAX_EMAX, Decimal, InvalidOperation
 from http import HTTPStatus
 from pathlib import Path
@@ -45,6 +47,10 @@ from rovo._crawl.model import (
     Breaker,
     BreakerStatus,
     BreakerTripped,
+    ChallengePrompt,
+    ChallengeSettled,
+    ChallengeStatus,
+    CrawlPolicy,
     DiscoveryFailed,
     DiscoveryProblem,
     DiscoverySource,
@@ -57,6 +63,8 @@ from rovo._crawl.model import (
     HostBackedOff,
     LadderWalk,
     ObservedUrl,
+    OwnerChallenge,
+    OwnerTestingWarningIssued,
     ProgressEvent,
     RedirectStop,
     RenderMode,
@@ -86,6 +94,7 @@ from rovo._crawl.pace import (
     back_off,
     fetch_resource,
     follow,
+    judged_host,
     past_cap,
     pause_for_cap,
     pause_host,
@@ -133,6 +142,8 @@ _RECHECKABLE = frozenset(
         FrontierStatus.skipped_not_html,
     }
 )
+# The tiers from the cheapest up: "later" in FetchEntry's starting_tier.
+_TIER_ORDER = (Tier.http, Tier.browser, Tier.stealth)
 _UNRESOLVED = frozenset(
     {
         FrontierStatus.pending,
@@ -159,6 +170,12 @@ class RunRecord:
     started_at: str
     finished_at: str | None
     unresolved_urls: tuple[str, ...]
+    # The lineage T20 added; a row written before it has none, and its targeted is None,
+    # so it is never accepted as a baseline (it cannot be shown non-targeted).
+    targeted: bool | None = None
+    baseline_run_id: int | None = None
+    preceding_run_id: int | None = None
+    owned_hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -254,17 +271,33 @@ def prepare_run(run: Run, frontier: Frontier | None) -> bool:
     every written page the scope admits, rechecks removed pages last and retries the
     failed, blocked and skipped rows the scope admits; its absent, duplicate, done and
     skipped_not_html rows, as they stood before, are noted in recheckable_urls for
-    Enqueue to re-pend once if discovery names one again. The owner-testing branch is a
-    later slice's.
+    Enqueue to re-pend once if discovery names one again. An owner-testing run refetches
+    its targets by force (none: decided) and seeds only its follow-up targets, the
+    preceding run's unresolved URLs on its selected hosts (`followup_targets`), as a
+    targeted run seeds its targets; OwnerTestingWarningIssued goes to the run's
+    on_owner_warning sink before any request.
     """
     if run.status is not RunStatus.running or frontier is None:
         return False
     if run.is_owner_testing:
-        raise NotInThisSlice(rule="PrepareRun")
+        preceding = frozenset[str]() if run.preceding is None else run.preceding.unresolved_urls
+        seeds = followup_targets(preceding, run.owned_hosts, run.target.scope)
+        run.forced_refetch = run.targets
+        run.active_urls = seeds
+        if run.on_owner_warning is not None:
+            run.on_owner_warning(
+                OwnerTestingWarningIssued(
+                    operator=run.operator, hosts=run.owned_hosts, policy=run.policy
+                )
+            )
     for entry in frontier.in_progress_entries:
         entry.status = FrontierStatus.pending
-    if run.targets:
-        _prepare_targets(run, frontier)
+    if run.is_owner_testing:
+        _pend_named(frontier, run.active_urls)
+    elif run.targets:
+        run.forced_refetch = run.targets
+        run.active_urls = run.targets
+        _pend_named(frontier, run.targets)
     else:
         _prepare_full(run, frontier)
     return True
@@ -290,11 +323,9 @@ def _prepare_full(run: Run, frontier: Frontier) -> None:
             entry.status = FrontierStatus.pending
 
 
-def _prepare_targets(run: Run, frontier: Frontier) -> None:
-    """PrepareRun's targeted branch: each target re-pended, or created as named."""
-    run.forced_refetch = run.targets
-    run.active_urls = run.targets
-    for identity in sorted(run.targets):
+def _pend_named(frontier: Frontier, seeds: frozenset[str]) -> None:
+    """PrepareRun's targeted and owner branches: each seed re-pended, or created as named."""
+    for identity in sorted(seeds):
         row = frontier.entry(identity)
         if row is None:
             frontier.entries.append(
@@ -325,14 +356,13 @@ def discover(run: Run, frontier: Frontier, fetcher: Fetcher) -> bool:
     Hosts are visited in sorted order: each is opened (its robots.txt read), then its
     sitemaps are queued and read (QueueSitemaps), then its llms.txt (ReadLlmsTxt), so
     every host is opened before any sitemap, llms.txt or page request to it. A targeted
-    run opens only its targets' hosts and walks no seed, sitemap or llms.txt; the
-    owner-testing branch is a later slice's.
+    run opens only its targets' hosts and walks no seed, sitemap or llms.txt; an
+    owner-testing run likewise, and its targets are empty (decided), so it opens none:
+    OpenHostForEntry opens each host before its first fetch.
     """
     if run.status is not RunStatus.running:
         return False
-    if run.is_owner_testing:
-        raise NotInThisSlice(rule="Discover")
-    if run.targeted:
+    if run.is_owner_testing or run.targeted:
         for target in sorted(run.targets):
             open_host(run, hostname_of(target), origin_of(target), fetcher)
         return True
@@ -365,7 +395,7 @@ def open_host(run: Run, name: str, origin: str, fetcher: Fetcher) -> Host | None
         run=run,
         name=name,
         origin=origin,
-        rate=run.policy.rate_per_host,
+        rate=run.request_policy(name).rate_per_host,
         crawl_delay=timedelta(0),
         paused_until=None,
         recent_text_lengths=[],
@@ -413,8 +443,9 @@ def fetch_robots(run: Run, name: str, origin: str, fetcher: Fetcher) -> SiteResp
         return None
     response = fetch_resource(robots_url(origin), run, host, fetcher)
     run.bytes_fetched += response.size
-    if past_cap(response, run.policy):
-        _trip(host)
+    judged = judged_host(host, response)
+    if past_cap(response, judged.request_policy):
+        _trip(judged)
     adopted = adopt_robots_rules(run, host, response, origin=origin)
     if adopted is not None:
         retire_host_on_long_crawl_delay(run, host, response)
@@ -448,7 +479,7 @@ def adopt_robots_rules(
     if not response.ok:
         return None
     rules, declared = parse_robots(response.markup)
-    past_cap = robots_crawl_delay_exceeds(declared, run.policy.retry_after_cap)
+    past_cap = robots_crawl_delay_exceeds(declared, host.request_policy.retry_after_cap)
     delay = None if past_cap else robots_crawl_delay(declared)
     policy = RobotsPolicy(
         run=run,
@@ -461,7 +492,7 @@ def adopt_robots_rules(
         declared_delay=declared,
     )
     run.robots_policies.append(policy)
-    if run.policy.honor_crawl_delay and delay is not None:
+    if host.request_policy.honor_crawl_delay and delay is not None:
         host.crawl_delay = max(host.crawl_delay, delay)
         if host.rate is not None and delay > timedelta(0):
             host.rate = min(host.rate, 1 / delay.total_seconds())
@@ -581,9 +612,10 @@ def retires_host_on_long_crawl_delay(run: Run, adopted: RobotsPolicy) -> bool:
     The robots.txt answered ok (AdoptRobotsRules created `adopted`), Crawl-delay is
     honoured, and its Crawl-delay is past retry_after_cap.
     """
-    if adopted.rules is None or not run.policy.honor_crawl_delay:
+    policy = run.request_policy(hostname_of(adopted.origin))
+    if adopted.rules is None or not policy.honor_crawl_delay:
         return False
-    return robots_crawl_delay_exceeds(adopted.declared_delay, run.policy.retry_after_cap)
+    return robots_crawl_delay_exceeds(adopted.declared_delay, policy.retry_after_cap)
 
 
 def retire_host_on_long_crawl_delay(
@@ -595,10 +627,12 @@ def retire_host_on_long_crawl_delay(
     host's watching breaker; any origin of the host retires the whole host. None when a
     guard fails or the breaker is not watching.
     """
-    if not response.ok or not run.policy.honor_crawl_delay:
+    del run  # The host's own run: its request_policy.
+    policy = host.request_policy
+    if not response.ok or not policy.honor_crawl_delay:
         return None
     _, declared = parse_robots(response.markup)
-    if not robots_crawl_delay_exceeds(declared, run.policy.retry_after_cap):
+    if not robots_crawl_delay_exceeds(declared, policy.retry_after_cap):
         return None
     return _trip(host)
 
@@ -661,12 +695,14 @@ def _deny_all(run: Run, origin: str, problem: DiscoveryProblem) -> DiscoveryFail
 def robots_allows(run: Run, url: str) -> bool:
     """crawl.allium robots_allows, for the user agent rovo, by the URL's own origin.
 
-    True under robots = ignore and for an origin whose stance is allow_all, false under
+    True under the URL's host's request_policy robots = ignore (only a selected owned host
+    of an owner-testing run that disabled robots) and for an origin whose stance is
+    allow_all, false under
     disallow_all or before the origin's robots.txt is known, else the parsed rules'
     answer: RFC 9309 matching as protego 0.7 implements it, the index.html fold and the
-    literal-$ copy included (crawl.allium 1097 to 1137).
+    literal-$ copy included (crawl.allium 1140 to 1184).
     """
-    if run.policy.robots is RobotsMode.ignore:
+    if run.request_policy(hostname_of(url)).robots is RobotsMode.ignore:
         return True
     policy = run.robots_policy(origin_of(url))
     if policy is None or policy.stance is RobotsStance.disallow_all:
@@ -733,13 +769,12 @@ def enqueue_page_links(
     """Realises crawl.allium EnqueuePageLinks; None when its guard does not hold.
 
     Each content, then navigation, target that is not the page itself and that the scope
-    allows at depth + 1 is raised as UrlDiscovered with the link priority, from the page.
-    The owner-testing branch (owner_link_needed) is a later slice's.
+    allows at depth + 1 is raised as UrlDiscovered with the link priority, from the page;
+    in an owner-testing run only one on a selected owned host that owner_link_needed
+    admits.
     """
     if run is None or run.status is not RunStatus.running:
         return None
-    if run.mode is not RunMode.standard:
-        raise NotInThisSlice(rule="EnqueuePageLinks")
     scope = found.candidate.mirror.scope
     depth = found.depth + 1
     discovered: list[FrontierEntry] = []
@@ -751,7 +786,7 @@ def enqueue_page_links(
             if not scope.allows(url, depth):
                 continue  # Tested first: a malformed URL is out of bounds, with no identity.
             identity = scope.identity_of(url)
-            if identity != found.page.identity:
+            if identity != found.page.identity and _owner_admits(run, frontier, identity):
                 discovered.append(
                     enqueue(
                         run,
@@ -773,14 +808,13 @@ def refollow_unchanged_links(
 
     Each of the page's stored outbound links, every kind, is tested again against the
     scope in force as EnqueuePageLinks tests a content link, so a link external under an
-    older scope is queued once the scope admits it. Navigation links are not stored.
+    older scope is queued once the scope admits it. Navigation links are not stored. An
+    owner-testing run queues only a link EnqueuePageLinks would admit in one.
     """
     if candidate.outcome is not CandidateOutcome.unchanged:
         return None
     if run is None or run.status is not RunStatus.running or not run.refollow_unchanged_links:
         return None
-    if run.mode is not RunMode.standard:
-        raise NotInThisSlice(rule="RefollowUnchangedLinks")
     scope = candidate.mirror.scope
     depth = candidate.depth + 1
     discovered: list[FrontierEntry] = []
@@ -788,7 +822,7 @@ def refollow_unchanged_links(
         if not scope.allows(link.target_identity, depth):
             continue  # Tested first, as EnqueuePageLinks does.
         identity = scope.identity_of(link.target_identity)
-        if identity != page.identity:
+        if identity != page.identity and _owner_admits(run, frontier, identity):
             discovered.append(
                 enqueue(
                     run,
@@ -803,7 +837,60 @@ def refollow_unchanged_links(
     return discovered
 
 
-# --- Sitemaps and llms.txt ----------------------------------------------------------
+def followup_targets(
+    unresolved: frozenset[str], owned_hosts: frozenset[str], scope: CrawlScope
+) -> frozenset[str]:
+    """crawl.allium followup_targets: the unresolved URLs on a selected host within the scope.
+
+    An empty set stays empty: never seeds or a full recrawl (PrepareRun guidance).
+    """
+    return frozenset(
+        url for url in unresolved if hostname_of(url) in owned_hosts and scope.within_bounds(url)
+    )
+
+
+# A row whose last outcome confirmed the URL is no page to mirror (owner_link_needed).
+_CONFIRMED = frozenset({FrontierStatus.absent, FrontierStatus.skipped_not_html})
+
+
+def owner_link_needed(run: Run, frontier: Frontier, identity: str) -> bool:
+    """crawl.allium owner_link_needed (EnqueuePageLinks guidance).
+
+    False for a confirmed absent or non-HTML URL or a stored, confident, non-challenge
+    page (a written page with no low confidence and no soft-block suspicion, the pages
+    FinishRun leaves out of unresolved_urls); true for an unseen or unresolved URL.
+    """
+    row = frontier.entry(identity)
+    if row is not None and row.status in _CONFIRMED:
+        return False
+    page = run.target.known_page(identity)
+    return page is None or _unsettled(page)
+
+
+def _unsettled(page: Page) -> bool:
+    """A stored page FinishRun counts unresolved: low confidence or a suspected soft block."""
+    return page.quality.low_confidence or QualityFlag.soft_block_suspected in page.quality.flags
+
+
+def _owner_admits(run: Run, frontier: Frontier, identity: str) -> bool:
+    """EnqueuePageLinks' owner clause: a standard run admits all, an owner run only needed links.
+
+    An owner-testing run admits a link only on a selected owned host (`run.owned_hosts`)
+    when owner_link_needed holds, so it never becomes a full recrawl.
+    """
+    if run.mode is RunMode.standard:
+        return True
+    return hostname_of(identity) in run.owned_hosts and owner_link_needed(run, frontier, identity)
+
+
+def request_policy(run: Run, host_name: str) -> CrawlPolicy:
+    """crawl.allium request_policy: run.policy for a selected owned host only.
+
+    The standard policy for every other host of an owner-testing run (AttemptTier
+    guidance), before redirects, subrequests, robots, discovery and retries alike; a
+    standard run's own policy (Run.request_policy).
+    """
+    return run.request_policy(host_name)
 
 
 def queue_sitemaps(run: Run, name: str) -> list[tuple[str, bool]] | None:
@@ -872,11 +959,12 @@ def fetch_sitemap(  # noqa: PLR0913  The SitemapDue trigger's parameters, and th
     run.bytes_fetched += response.size
     if snapshot is not None:
         snapshot.last_requested_run = run.id
-    if past_cap(response, run.policy):
+    judged = judged_host(host, response)
+    if past_cap(response, judged.request_policy):
         if declared:
-            _trip(host)
+            _trip(judged)
         else:
-            pause_for_cap(host)
+            pause_for_cap(judged)
     return response
 
 
@@ -1060,8 +1148,9 @@ def read_llms_txt(
         return None
     response = fetch_resource(url, run, host, fetcher, ready=_hop_host(run, fetcher))
     run.bytes_fetched += response.size
-    if past_cap(response, run.policy):
-        pause_for_cap(host)
+    judged = judged_host(host, response)
+    if past_cap(response, judged.request_policy):
+        pause_for_cap(judged)
     if not response.ok:
         return response
     scope = run.target.scope
@@ -1434,8 +1523,10 @@ class _Render:
     validators. Every later request, a subrequest, goes only to an allowed host that has
     not tripped, after its origin's robots.txt is read and only when that allows it,
     under that host's limiter, once: it is never retried, and its Retry-After pauses the
-    host, at most retry_after_cap, never retiring it (AttemptTier guidance, decided for
-    now; crawl.allium's open question on subresources outside the allowed hosts).
+    host that answered it (its last request's, else the host it was sent to), under that
+    host's request policy, at most retry_after_cap, never retiring it and never feeding a
+    breaker (AttemptTier guidance, decided for now; crawl.allium's open question on
+    subresources outside the allowed hosts).
     Anything else is aborted unrequested. Every answer's bytes count toward the render.
     """
 
@@ -1471,8 +1562,10 @@ class _Render:
                 ready=self.ready,
             )
             wait = response.retry_after if response.retryable else None
-            if wait is not None and run.policy.honor_retry_after:
-                pause_host(host, min(wait, run.policy.retry_after_cap))
+            answering = judged_host(host, response)
+            policy = answering.request_policy
+            if wait is not None and policy.honor_retry_after:
+                pause_host(answering, min(wait, policy.retry_after_cap))
         self.answers.append(response)
         return response
 
@@ -1488,7 +1581,8 @@ class _Render:
         """The render's answer: the navigation's, its markup the rendered DOM.
 
         Its size is every answer's. A render that gave no DOM, or no engine, is an
-        answer with status 0 and the error set (the navigation's own, when it had one).
+        answer with status 0 and the error set (the navigation's own, when it had one),
+        from the URL the navigation last requested (the walk's URL when it made none).
         """
         identity = self.walk.entry.identity
         dom = None if engine is None else engine.render(identity, self)
@@ -1496,25 +1590,140 @@ class _Render:
         first = self.answers[0] if self.answers else None
         if dom is None or first is None:
             error = (first.error if first is not None else None) or RENDER_FAILED
-            return SiteResponse(status=0, source_url=identity, markup="", size=size, error=error)
+            source_url = identity if first is None else first.source_url
+            return SiteResponse(status=0, source_url=source_url, markup="", size=size, error=error)
         return dataclasses.replace(first, markup=dom, size=size)
 
 
 def prepare_attempt(attempt: FetchAttempt) -> bool:
     """Realises crawl.allium PrepareAttempt: True when it raised AttemptReady.
 
-    A challenge is offered only in an owner-testing run, so a standard run's attempt is
-    always ready.
+    False when a challenge was offered (the walk marked, a waiting OwnerChallenge created
+    and recorded on the run, expiring the policy's challenge_timeout from now) or when
+    its guards do not hold. A challenge is offered once per walk, only to a person at the
+    terminal (run.interactive) of an owner-testing run with interactive challenges, on a
+    browser-or-higher attempt whose verdict is a challenge, when both the walk's host and
+    the host that answered (after any redirect) are owned by the run.
     """
     walk = attempt.walk
-    return walk.status is WalkStatus.walking and walk.host.run.status is RunStatus.running
+    run = walk.host.run
+    if walk.status is not WalkStatus.walking or run.status is not RunStatus.running:
+        return False
+    offer = (
+        run.is_owner_testing
+        and run.policy.interactive_challenges
+        and run.interactive
+        and attempt.tier is not Tier.http
+        and attempt.verdict.kind is BlockKind.challenge
+        and walk.host.name in run.owned_hosts
+        and not walk.challenge_offered
+        and hostname_of(attempt.response.source_url) in run.owned_hosts
+    )
+    if not offer:
+        return True
+    walk.challenge_offered = True
+    challenge = OwnerChallenge(
+        attempt=attempt,
+        expires_at=run.timer.now() + run.policy.challenge_timeout,
+        status=ChallengeStatus.waiting,
+    )
+    attempt.challenges.append(challenge)
+    run.challenges.append(challenge)
+    return False
+
+
+def owner_completes_challenge(challenge: OwnerChallenge) -> ChallengeSettled | None:
+    """Realises crawl.allium OwnerCompletesChallenge: ChallengeSettled(resolved), else None.
+
+    Its guards: the challenge waiting, the run's timer before expires_at, the run running
+    and owner testing, the walk walking, the walk's host owned.
+    """
+    walk = challenge.attempt.walk
+    run = walk.host.run
+    if (
+        challenge.status is not ChallengeStatus.waiting
+        or run.timer.now() >= challenge.expires_at
+        or run.status is not RunStatus.running
+        or not run.is_owner_testing
+        or walk.status is not WalkStatus.walking
+        or walk.host.name not in run.owned_hosts
+    ):
+        return None
+    return ChallengeSettled(challenge=challenge, outcome=ChallengeStatus.resolved)
+
+
+def owner_abandons_challenge(challenge: OwnerChallenge) -> ChallengeSettled | None:
+    """Realises crawl.allium OwnerAbandonsChallenge: ChallengeSettled(abandoned), else None."""
+    if challenge.status is not ChallengeStatus.waiting:
+        return None
+    if challenge.attempt.walk.host.run.status is not RunStatus.running:
+        return None
+    return ChallengeSettled(challenge=challenge, outcome=ChallengeStatus.abandoned)
+
+
+def owner_challenge_times_out(challenge: OwnerChallenge) -> ChallengeSettled | None:
+    """Realises crawl.allium OwnerChallengeTimesOut: ChallengeSettled(timed_out), else None.
+
+    It fires once the run's timer reaches expires_at, while the challenge waits.
+    """
+    if challenge.status is not ChallengeStatus.waiting:
+        return None
+    if challenge.attempt.walk.host.run.timer.now() < challenge.expires_at:
+        return None
+    return ChallengeSettled(challenge=challenge, outcome=ChallengeStatus.timed_out)
+
+
+def settle_challenge(
+    settled: ChallengeSettled, fetcher: Fetcher, engine: BrowserEngine | None = None
+) -> FetchAttempt | bool:
+    """Realises crawl.allium SettleChallenge; False when the challenge is not waiting.
+
+    Resolved: the same tier is requested again at try 1 (TierRequested), and the new
+    attempt is returned (False when AttemptTier's guards fail). Abandoned or timed out:
+    AttemptReady is raised with the blocked attempt (True).
+    """
+    challenge = settled.challenge
+    if challenge.status is not ChallengeStatus.waiting:
+        return False
+    challenge.status = settled.outcome
+    if settled.outcome is not ChallengeStatus.resolved:
+        return True
+    attempt = challenge.attempt
+    retried = attempt_tier(attempt.walk, attempt.tier, 1, fetcher, engine)
+    return False if retried is None else retried
+
+
+def await_challenge(challenge: OwnerChallenge) -> ChallengeSettled | None:
+    """The waiting challenge put to the run's ChallengePrompt: the settlement it reached.
+
+    The prompt answers by expires_at (OperatorCompletesChallenge,
+    OperatorAbandonsChallenge) or not at all; an answer whose rule's guards fail is no
+    answer. With no answer the run's timer waits out the deadline, and the challenge
+    times out (OwnerChallengeTimesOut). No prompt ships (crawl.allium open question):
+    with none, every challenge times out.
+    """
+    run = challenge.attempt.walk.host.run
+    answer = None if run.challenge_prompt is None else run.challenge_prompt(challenge)
+    if answer is ChallengeStatus.resolved:
+        settled = owner_completes_challenge(challenge)
+    elif answer is ChallengeStatus.abandoned:
+        settled = owner_abandons_challenge(challenge)
+    else:
+        settled = None
+    if settled is not None:
+        return settled
+    remaining = (challenge.expires_at - run.timer.now()).total_seconds()
+    if remaining > 0:
+        run.timer.sleep(remaining)
+    return owner_challenge_times_out(challenge)
 
 
 def http_retry(attempt: FetchAttempt, fetcher: Fetcher) -> HostBackedOff | None:
     """Realises crawl.allium HttpRetry, then its TierRequested: the HostBackedOff it raised.
 
-    The host is paused until now + retry_wait, never shortening a pause it had, and the
-    next http try waits that pause out at the limiter; the rate is never raised.
+    The answering host is paused until now + retry_wait under its request policy, never
+    shortening a pause it had, and the next http try, the walk's request again, waits
+    that pause out at the limiter; the rate is never raised.
     """
     walk = attempt.walk
     if not attempt.retryable:
@@ -1523,7 +1732,7 @@ def http_retry(attempt: FetchAttempt, fetcher: Fetcher) -> HostBackedOff | None:
         return None
     if walk.host.breaker_tripped:
         return None
-    backed_off = back_off(walk.host, attempt.try_, attempt.response.retry_after)
+    backed_off = back_off(_answering_host(attempt), attempt.try_, attempt.response.retry_after)
     attempt_tier(walk, Tier.http, attempt.try_ + 1, fetcher)
     return backed_off
 
@@ -1531,8 +1740,9 @@ def http_retry(attempt: FetchAttempt, fetcher: Fetcher) -> HostBackedOff | None:
 def retire_host_on_long_retry_after(attempt: FetchAttempt) -> BreakerTripped | bool:
     """Realises crawl.allium RetireHostOnLongRetryAfter; False when its guards do not hold.
 
-    The host's watching breaker trips (the BreakerTripped is returned; True when it had
-    already tripped), and the walk settles with the attempt standing, its tier used.
+    The answering host's watching breaker trips (the BreakerTripped is returned; True
+    when it had already tripped), and the walk settles with the attempt standing, its
+    tier used by the walk's own host.
     """
     walk = attempt.walk
     host = walk.host
@@ -1540,7 +1750,7 @@ def retire_host_on_long_retry_after(attempt: FetchAttempt) -> BreakerTripped | b
         return False
     if walk.status is not WalkStatus.walking or host.run.status is not RunStatus.running:
         return False
-    tripped = _trip(host)
+    tripped = _trip(_answering_host(attempt))
     walk.status = WalkStatus.settled
     walk.standing = attempt
     host.tiers_used = host.tiers_used | {attempt.tier}
@@ -1552,30 +1762,33 @@ def retire_host_on_long_retry_after(attempt: FetchAttempt) -> BreakerTripped | b
 def pause_host_on_render_retry_after(attempt: FetchAttempt) -> HostBackedOff | None:
     """Realises crawl.allium PauseHostOnRenderRetryAfter: the HostBackedOff it raised.
 
-    A render's navigation answer with a Retry-After under the cap pauses the host as
-    HttpRetry's wait does (`back_off`), though a render is never retried; None when a
+    A render's navigation answer with a Retry-After under the cap pauses the answering
+    host as HttpRetry's wait does (`back_off`), though a render is never retried; None when a
     guard does not hold.
     """
-    host = attempt.walk.host
+    host = _answering_host(attempt)
     response = attempt.response
     if attempt.tier is Tier.http or host.run.status is not RunStatus.running:
         return None
     if response.retry_after is None or not response.retryable:
         return None
-    if not host.run.policy.honor_retry_after or attempt.retires_host:
+    if not attempt.answering_policy.honor_retry_after or attempt.retires_host:
         return None
     return back_off(host, attempt.try_, response.retry_after)
 
 
 def count_retry_after(attempt: FetchAttempt) -> bool:
-    """Realises crawl.allium CountRetryAfter: True when it counted the Retry-After."""
-    host = attempt.walk.host
+    """Realises crawl.allium CountRetryAfter: True when it counted the Retry-After.
+
+    It counts on the answering host, under that host's request policy.
+    """
+    host = _answering_host(attempt)
     response = attempt.response
     if host.run.status is not RunStatus.running:
         return False
     if response.retry_after is None or not response.retryable:
         return False
-    if not host.run.policy.honor_retry_after:
+    if not attempt.answering_policy.honor_retry_after:
         return False
     host.retry_after_honored += 1
     return True
@@ -1735,7 +1948,7 @@ def feed_breaker(walk: LadderWalk) -> bool:
         return False
     if breaker is None or breaker.status is not BreakerStatus.watching:
         return False
-    if not host.run.policy.breaker_enabled:
+    if not host.request_policy.breaker_enabled:
         return False
     counted = standing.verdict.counts_against_host or standing.failed_outright
     breaker.outcomes = [*breaker.outcomes, counted][-CONFIG.breaker_window :]
@@ -1747,6 +1960,53 @@ def feed_breaker(walk: LadderWalk) -> bool:
     return True
 
 
+def feed_answering_breaker(walk: LadderWalk) -> bool:
+    """Realises crawl.allium FeedAnsweringBreaker: True when it fed the answering breaker.
+
+    A settled walk whose standing answer was redirected to another open host feeds that
+    host's watching breaker the same one outcome, under its request policy, and nothing
+    else: the page's tallies stay on the walk's host (FeedBreaker).
+    """
+    standing = walk.standing
+    if walk.status is not WalkStatus.settled or standing is None:
+        return False
+    answering = walk.host.run.host(standing.answering_host_name)
+    if answering is None or answering is walk.host:
+        return False
+    breaker = answering.breaker
+    if breaker is None or breaker.status is not BreakerStatus.watching:
+        return False
+    if not answering.request_policy.breaker_enabled:
+        return False
+    counted = standing.verdict.counts_against_host or standing.failed_outright
+    breaker.outcomes = [*breaker.outcomes, counted][-CONFIG.breaker_window :]
+    breaker.since_escalation += 1
+    return True
+
+
+def breaker_escalates(breaker: Breaker) -> HostBackedOff | None:
+    """Realises crawl.allium BreakerEscalates: the HostBackedOff it raised, else None.
+
+    A breaker that should act below its highest tier under breaker_enabled and
+    protection_escalation climbs one usable tier, counts the escalation, clears its
+    outcomes, lowers the host's rate to no less than min_host_rate (never raising it)
+    and pauses the host for breaker_pause, never shortening a longer pause.
+    """
+    host = breaker.host
+    policy = host.request_policy
+    if not breaker.should_act or breaker.tier is breaker.highest_tier:
+        return None
+    if not policy.breaker_enabled or not policy.protection_escalation:
+        return None
+    breaker.tier = _next_tier(host.run.usable_tiers, breaker.tier) or breaker.tier
+    breaker.escalations += 1
+    breaker.outcomes = []
+    breaker.since_escalation = 0
+    if host.rate is not None:
+        host.rate = min(host.rate, max(host.rate / 2, CONFIG.min_host_rate))
+    return pause_host(host, policy.breaker_pause)
+
+
 def breaker_trips(breaker: Breaker, frontier: Frontier) -> BreakerTripped | None:
     """Realises crawl.allium BreakerTrips: the BreakerTripped; None when its guards fail.
 
@@ -1756,7 +2016,7 @@ def breaker_trips(breaker: Breaker, frontier: Frontier) -> BreakerTripped | None
     """
     host = breaker.host
     run = host.run
-    policy = run.policy
+    policy = host.request_policy
     if not breaker.should_act or not policy.breaker_enabled:
         return None
     if breaker.tier is not breaker.highest_tier and policy.protection_escalation:
@@ -2017,11 +2277,18 @@ def finish_run(run: Run, frontier: Frontier) -> bool:
 def interrupt_run(run: Run, frontier: Frontier) -> bool:
     """Realises crawl.allium InterruptRun; False when the run is not running.
 
-    Every in-progress row returns to pending and the unresolved snapshot is taken; the
-    caller then ends the run (EndRun), interrupted. No challenge waits in this slice.
+    Every waiting challenge of a walking walk is abandoned (ChallengeSettled, which
+    SettleChallenge settles), every in-progress row returns to pending and the
+    unresolved snapshot is taken; the caller then ends the run (EndRun), interrupted.
     """
     if run.status is not RunStatus.running:
         return False
+    for challenge in run.challenges:
+        if (
+            challenge.status is ChallengeStatus.waiting
+            and challenge.attempt.walk.status is WalkStatus.walking
+        ):
+            challenge.status = ChallengeStatus.abandoned
     for entry in frontier.in_progress_entries:
         entry.status = FrontierStatus.pending
     run.unresolved_urls = _unresolved_urls(run, frontier)
@@ -2108,16 +2375,26 @@ def render_reason_of(response: SiteResponse) -> RenderReason | None:
 # --- The driver ---------------------------------------------------------------------
 
 
-def run_crawl(
+def run_crawl(  # noqa: PLR0913  The RunRequested trigger, its seams and the root's sinks.
     request: RunRequest,
     persisted: Frontier | None,
     fetcher: Fetcher,
     clock: Timer,
     *,
     engine: BrowserEngine | None = None,
+    challenge_prompt: ChallengePrompt | None = None,
+    on_owner_warning: Callable[[OwnerTestingWarningIssued], None] | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, then save the frontier and the run."""
-    result = drive_run(request, persisted, fetcher, clock, engine=engine)
+    result = drive_run(
+        request,
+        persisted,
+        fetcher,
+        clock,
+        engine=engine,
+        challenge_prompt=challenge_prompt,
+        on_owner_warning=on_owner_warning,
+    )
     save_run(result)
     return result
 
@@ -2187,6 +2464,8 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     on_failure: Callable[[Run, BaseException], None] | None = None,
     on_trip: Callable[[BreakerTripped], None] | None = None,
     engine: BrowserEngine | None = None,
+    challenge_prompt: ChallengePrompt | None = None,
+    on_owner_warning: Callable[[OwnerTestingWarningIssued], None] | None = None,
 ) -> CrawlResult:
     """Drive one run from RunRequested to RunEnded, saving nothing.
 
@@ -2199,10 +2478,18 @@ def drive_run(  # noqa: PLR0913  The RunRequested trigger, its seams and the roo
     interrupt, InterruptRun and EndRun end the run interrupted, else the error escapes.
     `on_trip` receives each BreakerTripped as it is raised (the root's AnnounceTrip).
     `engine` renders every browser attempt of the run; the caller opens and closes it.
+    `challenge_prompt` answers each challenge the run offers (none ships: with none a
+    challenge times out); `on_owner_warning` receives OwnerTestingWarningIssued (the
+    root's AnnounceOwnerWarning), before any request. An owner request StartRun refuses
+    (no baseline, preceding run or owned host) is a defect, since the root refuses it
+    first: a ValueError.
     """
     run = start_run(request, clock)
     if run is None:
-        raise NotInThisSlice(rule="StartRun")
+        message = "StartRun requires a baseline, a preceding run and an owned host"
+        raise ValueError(message)
+    run.challenge_prompt = challenge_prompt
+    run.on_owner_warning = on_owner_warning
     run.progress = progress
     run.on_backoff = on_backoff
     run.on_trip = on_trip
@@ -2343,14 +2630,22 @@ def _settle(
     StopWalkOnTrippedHost when the host has tripped and the walk needs another request;
     else HttpRetry while the attempt is retryable, then SettleWalk, else Escalate to the
     next tier. The rules' guards leave one of them to every attempt; a walk none of them
-    takes stays walking and is disposed of as nothing. Then FeedBreaker, RememberRenderTier,
-    and BreakerTrips when the breaker should act. BreakerEscalates (a breaker that should
-    act below the highest tier under protection_escalation, owner testing only) is a
-    later slice's branch.
+    takes stays walking and is disposed of as nothing. An attempt PrepareAttempt offers
+    a challenge for waits on the run's prompt (`await_challenge`), then SettleChallenge:
+    a resolved one tries the same tier again, an abandoned or timed-out one is ready as
+    it stands. Under the one-row-at-a-time interim nothing else is fetched and nothing is
+    fed meanwhile. Then FeedBreaker, FeedAnsweringBreaker, RememberRenderTier, and, for
+    each breaker fed that should act, BreakerTrips, else BreakerEscalates.
     """
     attempt: FetchAttempt | None = walk.attempts[-1]
     while attempt is not None:
-        prepare_attempt(attempt)
+        offered = not prepare_attempt(attempt) and attempt.challenges
+        if offered and attempt.challenges[-1].status is ChallengeStatus.waiting:
+            settled = await_challenge(attempt.challenges[-1])
+            retried = False if settled is None else settle_challenge(settled, fetcher, engine)
+            if isinstance(retried, FetchAttempt):
+                attempt = retried
+                continue
         pause_host_on_render_retry_after(attempt)
         if retire_host_on_long_retry_after(attempt) or stop_walk_on_tripped_host(attempt):
             break
@@ -2361,12 +2656,16 @@ def _settle(
         else:
             attempt = escalate(attempt, fetcher, engine)
     feed_breaker(walk)
+    fed = feed_answering_breaker(walk)
     remember_render_tier(walk)
-    breaker = walk.host.breaker
-    # A run feeds its breaker only while breaker_enabled holds, so a breaker that should
+    breakers = [walk.host.breaker]
+    if fed and walk.standing is not None:
+        breakers.append(_answering_host(walk.standing).breaker)
+    # A run feeds a breaker only while breaker_enabled holds, so a breaker that should
     # act and does not trip is one BreakerTrips leaves to BreakerEscalates.
-    if breaker is not None and breaker.should_act and breaker_trips(breaker, frontier) is None:
-        raise NotInThisSlice(rule="BreakerEscalates")
+    for breaker in breakers:
+        if breaker is not None and breaker.should_act and breaker_trips(breaker, frontier) is None:
+            breaker_escalates(breaker)
 
 
 def _store(run: Run, frontier: Frontier, walk: LadderWalk, clock: Clock) -> UrlFailed | None:
@@ -2448,9 +2747,76 @@ def load_runs(out_dir: Path) -> tuple[RunRecord, ...]:
     if not path.is_file():
         return ()
     return tuple(
-        RunRecord(**{**row, "unresolved_urls": tuple(row["unresolved_urls"])})
+        RunRecord(
+            **{
+                **row,
+                "unresolved_urls": tuple(row["unresolved_urls"]),
+                "owned_hosts": tuple(row.get("owned_hosts", ())),
+            }
+        )
         for row in read_json(path)["runs"]
     )
+
+
+def lineage_run(mirror: Mirror, run_id: int | None, clock: Timer) -> Run | None:
+    """The ended run `run_id` of runs.json, rebuilt as a read-only record, else None.
+
+    StartSync's preceding and baseline runs: id, kind, mode, scope hash, owned hosts,
+    dry run, status, times and unresolved URLs as the row holds them, with its own
+    baseline and preceding runs rebuilt alike. A row is never driven: its policy is the
+    standard policy and it has no host and no frontier.
+    """
+    records = {record.id: record for record in load_runs(mirror.out_dir)}
+    # Built oldest first, without recursion: an owner-run chain may outgrow the stack.
+    # A row's baseline and preceding runs are always older, so each is built first.
+    pending: list[int | None] = [run_id]
+    needed: set[int] = set()
+    while pending:
+        wanted = pending.pop()
+        record = None if wanted is None else records.get(wanted)
+        if record is not None and record.id not in needed:
+            needed.add(record.id)
+            pending.extend((record.baseline_run_id, record.preceding_run_id))
+    built: dict[int, Run] = {}
+    for record_id in sorted(needed):
+        run = _rebuilt(mirror, records[record_id], built, clock)
+        if run is not None:
+            built[record_id] = run
+    return None if run_id is None else built.get(run_id)
+
+
+def _rebuilt(mirror: Mirror, record: RunRecord, built: dict[int, Run], clock: Timer) -> Run | None:
+    """One runs.json row as a read-only Run, its older lineage taken from `built`."""
+    run = start_run(
+        RunRequest(
+            operator=Operator(),
+            mirror=mirror,
+            id=record.id,
+            kind=RunKind(record.kind),
+            mode=RunMode.standard,
+            scope_hash=record.scope_hash,
+            owned_hosts=frozenset(record.owned_hosts),
+            policy=standard_policy(),
+            dry_run=record.dry_run,
+            interactive=False,
+            render_mode=RenderMode.never,
+            stealth_mode=StealthMode.off,
+            targets=frozenset(),
+        ),
+        clock,
+    )
+    if run is None:  # A standard request always starts.
+        return None
+    run.mode = RunMode(record.mode)
+    run.baseline = None if record.baseline_run_id is None else built.get(record.baseline_run_id)
+    run.preceding = None if record.preceding_run_id is None else built.get(record.preceding_run_id)
+    run.status = RunStatus(record.status)
+    run.started_at = datetime.fromisoformat(record.started_at)
+    run.finished_at = (
+        None if record.finished_at is None else datetime.fromisoformat(record.finished_at)
+    )
+    run.unresolved_urls = frozenset(record.unresolved_urls)
+    return run
 
 
 def next_run_id(out_dir: Path) -> int:
@@ -2472,12 +2838,14 @@ def _append_run(run: Run) -> None:
         "started_at": timestamp(run.started_at),
         "finished_at": None if run.finished_at is None else timestamp(run.finished_at),
         "unresolved_urls": sorted(run.unresolved_urls),
+        "targeted": run.targeted,
+        "baseline_run_id": None if run.baseline is None else run.baseline.id,
+        "preceding_run_id": None if run.preceding is None else run.preceding.id,
+        "owned_hosts": sorted(run.owned_hosts),
     }
-    rows = [
-        vars(row) | {"unresolved_urls": list(row.unresolved_urls)}
-        for row in load_runs(run.target.out_dir)
-    ]
-    write_json(state_path(run.target.out_dir, _RUNS), {"runs": [*rows, record]})
+    path = state_path(run.target.out_dir, _RUNS)
+    rows = read_json(path)["runs"] if path.is_file() else []  # Earlier rows kept as written.
+    write_json(path, {"runs": [*rows, record]})
 
 
 def _encode_entry(entry: FrontierEntry) -> dict[str, object]:
@@ -2637,6 +3005,16 @@ def _selectable(run: Run, entry: FrontierEntry) -> bool:
     return scope.within_bounds(entry.identity) or run.target.known_page(entry.identity) is not None
 
 
+def _answering_host(attempt: FetchAttempt) -> Host:
+    """Host{run, name: attempt.answering_host_name}: the host that answered the attempt.
+
+    A page's redirect hop opens its host before requesting it, so the answering host is
+    open; the walk's own host stands in should it not be (as `judged_host` does).
+    """
+    walk = attempt.walk
+    return walk.host.run.host(attempt.answering_host_name) or walk.host
+
+
 def _trip(host: Host) -> BreakerTripped | None:
     """A watching breaker trips: the BreakerTripped, recorded and handed to the root's sink.
 
@@ -2728,13 +3106,18 @@ def _starting_tier(run: Run, entry: FrontierEntry) -> Tier:
     """FetchEntry's starting_tier: browser under render_mode = always; else the hint's.
 
     The tier learned for the entry's host and path pattern starts the walk unless the
-    hint is reprobe_due(run.id); else http. A breaker's tier rises only under
-    protection_escalation, an owner-testing run's (a later slice's), so it is ignored.
+    hint is reprobe_due(run.id); else http. In an owner-testing run the walk starts at
+    the later of that and the host breaker's tier; outside owner testing the breaker's
+    tier is ignored.
     """
     if run.render_mode is RenderMode.always:
         return Tier.browser
     hint = _hint(entry.frontier, entry.host_name, path_pattern(entry.identity))
-    return hint.tier if hint is not None and not hint.reprobe_due(run.id) else Tier.http
+    tier = hint.tier if hint is not None and not hint.reprobe_due(run.id) else Tier.http
+    host = run.host(entry.host_name)
+    if run.is_owner_testing and host is not None and host.breaker is not None:
+        tier = max(tier, host.breaker.tier, key=_TIER_ORDER.index)
+    return tier
 
 
 def _hint(frontier: Frontier, host_name: str, pattern: str) -> TierHint | None:

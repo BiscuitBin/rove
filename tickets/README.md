@@ -43,6 +43,7 @@ snapshot.
 | T17 | Conversion quality: every quality gate and flag, islands for what Markdown cannot carry, every tab panel, the mslearn and devsite profiles, fail_on_low_quality and rovo verify | `T17-quality-gates.md` | T16 | none | open |
 | T18 | Blocks and the breaker: block verdicts, blocked and skipped rows, the per-host breaker, host retirement on a long Crawl-delay or Retry-After, and exit 3 | `T18-blocks-breaker.md` | T17 | none | open |
 | T19 | The browser tier: render reasons, escalation from http to the browser, learned tiers, render_mode, the missing-engine refusal and rovo fetch | `T19-browser-tier.md` | T18 | none | open |
+| T20 | Owner testing: saved ownership, the owner-request refusal and warning, the relaxed policy on owned hosts, follow-up runs, breaker escalation and interactive challenges | `T20-owner-testing.md` | T19 | none | open |
 
 ## Dependency graph
 
@@ -50,7 +51,7 @@ snapshot.
 T00 ─┬─ T01 ─┐
      ├─ T02 ─┤
      ├─ T03 ─┼─ T05 ─┬─ T06
-     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18 ─ T19
+     └─ T04 ─┘       └─ T07 ─ T08 ─ T09 ─ T10 ─ T11 ─ T12 ─ T13 ─ T14 ─ T15 ─ T16 ─ T17 ─ T18 ─ T19 ─ T20
 ```
 
 - **Wave 0, T00.** The tracer bullet through every layer, the wheel included. Nothing
@@ -136,6 +137,17 @@ T00 ─┬─ T01 ─┐
   `"never"` stores the http answer flagged `render_needed`; a sync that needs a missing
   engine is refused; `rovo fetch` prints one page's Markdown and writes nothing; and
   `just e2e-browser` renders a JavaScript-only fixture page in Chromium.
+- **T20** is slice 12, the last: owner testing. An operator who saved an ownership
+  declaration for a host and has a finished standard run can run an owner-testing sync
+  of that host: the warning that ownership is self-declared is shown before any
+  request, the preceding run's unresolved URLs on the selected hosts are the seeds, and
+  only links on those hosts that are unseen or unresolved (`owner_link_needed`) are
+  followed, never a full recrawl, under the relaxed policy the owner options select and on those hosts alone, the
+  breaker climbs a tier before it trips, a challenge waits for the owner, and the report
+  records the declaration, the lineage and the effective policy; an invalid owner
+  request is refused with exit 2 and no request; no `NotInThisSlice` raise is left.
+  Until the maintainer answers, the owner options are reached in process only and the
+  stealth tier has no engine.
 
 ## How to pick up a ticket
 

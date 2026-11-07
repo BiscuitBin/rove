@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from protego import Protego
 
@@ -44,6 +44,19 @@ class RunMode(enum.Enum):
 
     standard = "standard"
     owner_testing = "owner_testing"
+
+
+class PolitenessControl(enum.Enum):
+    """A politeness control an owner-testing request may disable."""
+
+    robots = "robots"
+    crawl_delay = "crawl_delay"
+    rate = "rate"
+    concurrency = "concurrency"
+    retry_backoff = "retry_backoff"
+    retry_after = "retry_after"
+    breaker_pause = "breaker_pause"
+    breaker = "breaker"
 
 
 class DiscoverySource(enum.Enum):
@@ -163,6 +176,15 @@ class WalkStatus(enum.Enum):
     settled = "settled"
 
 
+class ChallengeStatus(enum.Enum):
+    """OwnerChallenge.status; resolved, abandoned and timed_out are terminal."""
+
+    waiting = "waiting"
+    resolved = "resolved"
+    abandoned = "abandoned"
+    timed_out = "timed_out"
+
+
 @dataclass(frozen=True, kw_only=True)
 class CrawlConfig:
     """crawl.allium's config block."""
@@ -206,7 +228,7 @@ class CrawlConfig:
     host_text_history: int
 
 
-# crawl.allium's config block (crawl.allium 555 to 600), the one copy in code.
+# crawl.allium's config block (crawl.allium 578 to 623), the one copy in code.
 CONFIG = CrawlConfig(
     max_pages=5000,
     max_bytes=2_147_483_648,
@@ -301,6 +323,45 @@ def standard_policy() -> CrawlPolicy:
         interactive_challenges=False,
         challenge_timeout=CONFIG.owner_challenge_timeout,
     )
+
+
+@dataclass(frozen=True, kw_only=True)
+class OwnerAccess:
+    """Opaque owner-provided test access for one declared host (crawl.allium 73 to 80).
+
+    Its contents stay outside the model, the report, the log and every page file; no way
+    to supply one exists (decided, for now), so an OwnerTestOptions' access is empty.
+    """
+
+    host: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class OwnerTestOptions:
+    """What an owner-testing request asks for (crawl.allium OwnerTestOptions).
+
+    Every optional value means "use the normal setting" when omitted; disabling a
+    control is the separate, explicit selection `disabled_controls`.
+    """
+
+    preceding_run_id: int
+    hosts: frozenset[str]
+    disabled_controls: frozenset[PolitenessControl] = frozenset()
+    rate_per_host: float | None = None
+    concurrency_per_host: int | None = None
+    backoff_base: timedelta | None = None
+    max_backoff: timedelta | None = None
+    retry_after_cap: timedelta | None = None
+    breaker_pause: timedelta | None = None
+    protection_escalation: bool = False
+    interactive_challenges: bool = False
+    challenge_timeout: timedelta | None = None
+    access: frozenset[OwnerAccess] = frozenset()
+
+    @property
+    def access_within_hosts(self) -> bool:
+        """Every access names a selected host."""
+        return all(access.host in self.hosts for access in self.access)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -517,7 +578,7 @@ class Run:
     preceding: "Run | None"
     scope_hash: str
     owned_hosts: frozenset[str]
-    requested_owner_test: None
+    requested_owner_test: OwnerTestOptions | None
     policy: CrawlPolicy
     dry_run: bool
     interactive: bool
@@ -564,6 +625,14 @@ class Run:
     skips: list["UrlSkippedBlocked"] = field(default_factory=list, repr=False)
     trips: list["BreakerTripped"] = field(default_factory=list, repr=False)
     on_trip: Callable[["BreakerTripped"], None] | None = field(default=None, repr=False)
+    # T20 seams: the prompt a waiting OwnerChallenge is put to (none ships; tests pass
+    # FakeChallengePrompt), and the root's sink for OwnerTestingWarningIssued.
+    challenge_prompt: "ChallengePrompt | None" = field(default=None, repr=False)
+    # Every OwnerChallenge PrepareAttempt offered in this run, so InterruptRun finds them.
+    challenges: list["OwnerChallenge"] = field(default_factory=list, repr=False)
+    on_owner_warning: Callable[["OwnerTestingWarningIssued"], None] | None = field(
+        default=None, repr=False
+    )
 
     @property
     def tripped_hosts(self) -> list["Host"]:
@@ -612,6 +681,17 @@ class Run:
     def byte_budget_left(self) -> bool:
         """bytes_fetched < config.max_bytes."""
         return self.bytes_fetched < CONFIG.max_bytes
+
+    def request_policy(self, host_name: str) -> CrawlPolicy:
+        """crawl.allium request_policy: the policy a request to `host_name` runs under.
+
+        run.policy for a selected owned host of an owner-testing run, the standard policy
+        for every other host of one; a standard run's own policy, which is the standard
+        policy (StandardRunsStayPolite), so a test's constructed policy still applies.
+        """
+        if self.is_owner_testing and host_name not in self.owned_hosts:
+            return standard_policy()
+        return self.policy
 
     def host(self, name: str) -> "Host | None":
         """Host{run: this, name: name}."""
@@ -683,6 +763,11 @@ class Host:
     # Implementation state beside paused_until: when the last request to the host name
     # started, from which the limiter spaces the next one (crawl.allium AttemptTier).
     last_started: datetime | None = field(default=None, repr=False)
+
+    @property
+    def request_policy(self) -> CrawlPolicy:
+        """The policy every request to this host runs under (Run.request_policy)."""
+        return self.run.request_policy(self.name)
 
     @property
     def median_text(self) -> float:
@@ -773,18 +858,35 @@ class FetchAttempt:
     response: SiteResponse
     verdict: BlockVerdict
     render_reason: RenderReason | None
-    # OwnerChallenge rows exist only in an owner-testing run (a later slice), so none here.
-    challenges: list[object] = field(default_factory=list, repr=False)
+    # OwnerChallenge with attempt = this; only an owner-testing run offers one.
+    challenges: list["OwnerChallenge"] = field(default_factory=list, repr=False)
+
+    @property
+    def answering_host_name(self) -> str:
+        """hostname_of(response.source_url): the host that answered.
+
+        The walk's own host unless the answer was redirected; for an error, the host of
+        the URL last requested (crawl.allium 514 to 524).
+        """
+        return hostname_of(self.response.source_url)
+
+    @property
+    def answering_policy(self) -> CrawlPolicy:
+        """request_policy(walk.host.run, answering_host_name): the answer is judged by it."""
+        return self.walk.host.run.request_policy(self.answering_host_name)
 
     @property
     def unsuccessful_challenge(self) -> bool:
-        """A challenge of this attempt was abandoned or timed out; none is offered yet."""
-        return False
+        """A challenge of this attempt was abandoned or timed out."""
+        return any(
+            challenge.status in {ChallengeStatus.abandoned, ChallengeStatus.timed_out}
+            for challenge in self.challenges
+        )
 
     @property
     def retires_host(self) -> bool:
-        """A Retry-After past the cap retires the host, whatever the tier (a render's too)."""
-        policy = self.walk.host.run.policy
+        """A Retry-After past the answering host's cap retires it, whatever the tier."""
+        policy = self.answering_policy
         return (
             self.response.retryable
             and self.response.retry_after is not None
@@ -818,13 +920,51 @@ class FetchAttempt:
         return (
             (self.render_reason is not None or self.verdict.kind is not BlockKind.none)
             and (
-                self.verdict.kind is BlockKind.none
-                or self.walk.host.run.policy.protection_escalation
+                self.verdict.kind is BlockKind.none or self.answering_policy.protection_escalation
             )
             and not (self.response.ok and not self.response.is_html)
             and not self.response.not_modified
             and not self.unsuccessful_challenge
         )
+
+
+@dataclass(kw_only=True, eq=False)
+class OwnerChallenge:
+    """A browser challenge an owner may complete by hand during an owner-testing run."""
+
+    attempt: FetchAttempt
+    expires_at: datetime
+    status: ChallengeStatus
+
+
+class ChallengePrompt(Protocol):
+    """The seam a waiting OwnerChallenge is put to (crawl.allium OwnerTesting's provides).
+
+    It answers by the challenge's expires_at with resolved (OperatorCompletesChallenge),
+    abandoned (OperatorAbandonsChallenge) or None, nothing (the challenge times out). No
+    prompt ships (the maintainer's answer, spec 39c1f9c); tests pass FakeChallengePrompt.
+    """
+
+    def __call__(self, challenge: OwnerChallenge) -> ChallengeStatus | None:
+        """The owner's answer to `challenge`, or None."""
+        ...
+
+
+@dataclass(frozen=True, kw_only=True)
+class ChallengeSettled:
+    """The ChallengeSettled trigger: a challenge's outcome, resolved, abandoned or timed out."""
+
+    challenge: OwnerChallenge
+    outcome: ChallengeStatus
+
+
+@dataclass(frozen=True, kw_only=True)
+class OwnerTestingWarningIssued:
+    """The OwnerTestingWarningIssued trigger PrepareRun raises before any request."""
+
+    operator: Operator
+    hosts: frozenset[str]
+    policy: CrawlPolicy
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -907,7 +1047,7 @@ class ProgressEvent:
 
 @dataclass(frozen=True, kw_only=True)
 class RunRequest:
-    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2421)."""
+    """The RunRequested trigger the root raises through SyncControl (crawl.allium 2527)."""
 
     operator: Operator
     mirror: Mirror
@@ -924,7 +1064,7 @@ class RunRequest:
     targets: frozenset[str]
     baseline: Run | None = None
     preceding: Run | None = None
-    requested_owner_test: None = None
+    requested_owner_test: OwnerTestOptions | None = None
     max_age: timedelta | None = None
     # rovo.allium's config default; StartSync always passes the configuration's value.
     refollow_unchanged_links: bool = True

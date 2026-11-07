@@ -629,10 +629,15 @@ verification output, each headed by its commit.
      host (`PauseHostOnRenderRetryAfter`), counts toward `retry_after_honored`, and past
      `retry_after_cap` retires the host; `render_escalations` counts every escalation,
      one that retires its host or stops on a tripped one included.
-- **The T19-2 batched needs-user question: OPEN** (found while propagating the
-  follow-up at `e0f0c44`; copied into the ledger's `open_questions`; any later gap joins
-  it). No item blocks an owned obligation and none is pinned by a test.
-  1. With `--config` and neither `[conversion]` nor `[fetch]` naming a profile, which
+- **The T19-2 batched needs-user question** (found while propagating the follow-up at
+  `e0f0c44`; copied into the ledger's `open_questions`). Items 1 and 3 ANSWERED by the
+  maintainer on 2026-11-06 (spec `39c1f9c`, recorded at T20,
+  `ai_tmp/T20/spec-answers/answers.md`); item 2 stays as the maintainer's answer to T20
+  item 6 leaves it ("stays as decided at T19"). No item blocks an owned obligation and
+  none is pinned by a test.
+  1. **ANSWERED:** no profile named in `[conversion]` or `[fetch]` means the catalogue's
+     pick for the fetched URL's host, else `generic`, the interim as built. The question
+     was: with `--config` and neither `[conversion]` nor `[fetch]` naming a profile, which
      profile converts the page: `resolve_config`'s default (the catalogue's pick for the
      file's first seed, else `generic`) or, as without `--config`, the catalogue's pick
      for the fetched URL's host? Interim: the catalogue's pick for the fetched URL's
@@ -641,9 +646,10 @@ verification output, each headed by its commit.
      "on"`: no fetch rule refuses it, and `FetchOneUrl`'s guidance names the standard
      policy and tiers from `--tier` or `render_mode`. Interim: `rovo fetch` uses
      neither key (robots respected, stealth never used, no refusal).
-  3. With `--config`, a fetched URL outside the file's `[scope]`: the guidance bounds
-     only its redirects. Interim: the URL itself is fetched; only its redirects are
-     bounded.
+  3. **ANSWERED:** the URL is fetched even outside `[scope]`, which bounds only
+     redirects, the interim as built. The question was: with `--config`, a fetched URL
+     outside the file's `[scope]`: the guidance bounds only its redirects. Interim: the
+     URL itself is fetched; only its redirects are bounded.
 - **Carried, OPEN, to T20** (from `.allium-loop/T18-blocks-breaker.json`, the T18-2
   residue): a challenge waiting when its host trips, then resolved, asks for a retry
   `AttemptTier` refuses (it requires an untripped host), and no rule settles the walk.

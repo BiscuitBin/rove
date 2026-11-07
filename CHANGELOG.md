@@ -211,3 +211,23 @@ policy.
   `rovo.toml`'s shared sections and then its own `[fetch]` section (`render_mode`,
   `profile`), which `rovo sync` ignores, and a bad one exits 2. A discovery fetch makes
   no further retry or hop once its own host has tripped.
+- Owner testing, reached in process only (`rovo._commands.save_ownership` and
+  `rovo._commands.sync(owner_test=...)`; no command-line spelling yet): a saved
+  ownership declaration, then a follow-up of a finished run that retries its unresolved
+  URLs on the declared hosts under a relaxed policy (robots, rate, backoff, Retry-After
+  and the breaker each relaxable) that applies to those hosts alone, after a warning on
+  standard error (and an `owner_testing_warning` event) that ownership is self-declared,
+  not verified. An invalid owner request is refused with exit 2 and no request; a run
+  that leaves URLs unresolved exits 1. With protection escalation a host's breaker
+  climbs a tier before it trips. `.rovo/runs.json` rows gain `targeted`,
+  `baseline_run_id`, `preceding_run_id` and `owned_hosts`, and the report records the
+  declaration, the lineage, the requested options (no access contents) and each host's
+  effective policy. No stealth engine, challenge recogniser or challenge prompt ships.
+  In every sync, an answer redirected to another open host is judged by that host: its
+  `Retry-After` pause, count and past-cap retirement fall on the destination host, never
+  the host the request began at, for pages, robots.txt, sitemaps and `llms.txt` alike,
+  and a redirected page answer also feeds the destination host's breaker. A render's
+  subrequest redirected to another open host pauses that host, under its own policy, on
+  a `Retry-After` (never retiring it or feeding a breaker), and a render that gave no
+  DOM after a redirected navigation is an error from the URL the navigation last
+  requested.
