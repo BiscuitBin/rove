@@ -102,7 +102,14 @@ def vm_status(state_dir: StateDir = None) -> None:
     """Reopen the machine by name, without starting it, and print the state."""
     saved = state.load(state_dir)
     port = _port(saved, None)
-    _finish(_open_or_fail(port, saved), port, saved)
+    mach = _open_or_fail(port, saved)
+    try:
+        if mach is not None:
+            mach.state()
+            mach.endpoint(m.GUEST_PORT)
+    except SmolError as exc:
+        _fail(exc, mach, port, saved)
+    _finish(mach, port, saved)
 
 
 @vm.command("down")

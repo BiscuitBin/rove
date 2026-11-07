@@ -179,8 +179,9 @@ error: c4ai-proto publishes port 11235, not 11236; `c4ai vm destroy` to change i
 exit 1
 ```
 
-A smol failure in any `vm` command prints a one-line reason, the state block and exits 1.
-Those branches were run only with simulated `SmolError`s, not with a real smol failure.
+A smol failure opening, creating, connecting, stopping or deleting the machine, or reading
+its state in `vm status`, prints a one-line reason and the state block, then exits 1. Those
+branches were run only with simulated `SmolError`s, not with a real smol failure.
 
 ### Fetch (ticket 03)
 

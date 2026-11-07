@@ -17,6 +17,7 @@ def load(state_dir: Path | None = None) -> dict[str, Any] | None:
     p = path(state_dir)
     if not p.exists():
         return None
+    p.chmod(0o600)  # A file written before saves were owner-only is tightened here.
     return json.loads(p.read_text())
 
 
