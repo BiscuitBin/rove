@@ -54,7 +54,7 @@
 -- render_added_nothing, start_from, next_tier, path_pattern,
 -- classify_block, render_reason_of, retry_wait, last_n, append,
 -- blocked_share, median, status_text, with_fetch_flags, unresolved_urls,
--- followup_targets, owner_link_needed, later_of, min, max, and the
+-- followup_targets, owner_link_needed, request_policy, later_of, min, max, and the
 -- convert Fidelity operations extract, normalize, convert, restore and
 -- measure. Their contracts are stated where they are used.
 use "./mirror.allium" as mirror
@@ -145,7 +145,7 @@ value BlockVerdict {
 value SiteResponse {
     status: Integer                     -- 0 when no response arrived
     error: String?                      -- transport error, when no response arrived
-    source_url: String                  -- the URL the response came from, after redirects
+    source_url: String                  -- the URL the response came from, after redirects; for an error, the URL last requested
     redirect_hops: List<String>         -- every URL left behind by a followed redirect
     redirect_location: String?          -- an unfollowed redirect's target
     redirect_stop: RedirectStop?        -- why it was not followed; set exactly when redirect_location is
@@ -410,6 +410,13 @@ entity RobotsPolicy {
 
 -- A host as seen by one run: its politeness state and its tallies. Rate,
 -- pauses and breaker state last one run; only render hints persist.
+-- Decided: every control that concerns one host reads the host's request
+-- policy. policy, request_policy(run, name), is run.policy when the run is owner
+-- testing and name is in run.owned_hosts, and the standard policy (every
+-- control enabled, robots respect, no escalation, no challenges, crawl's
+-- defaults for every number) otherwise, so an allowed but unselected host
+-- of an owner-testing run is treated as in a standard run. run.policy
+-- stays the run's snapshot for the report and for the run-level reads.
 entity Host {
     run: Run
     name: String                        -- host name, lower-cased, port dropped
@@ -428,6 +435,7 @@ entity Host {
 
     breaker: Breaker with host = this
 
+    policy: request_policy(run, name)
     median_text: median(recent_text_lengths)
     has_text_baseline: recent_text_lengths.count >= config.median_min_pages
     breaker_tripped: breaker?.status = tripped
@@ -439,7 +447,9 @@ entity Host {
 }
 
 -- The per-host circuit breaker. Default stated here (veto at review): it
--- counts one outcome per settled page fetch; hard blocks, challenges and
+-- counts one outcome per settled page fetch on the walk's host, and one
+-- more on the answering host when the standing answer was redirected
+-- there (FeedAnsweringBreaker); hard blocks, challenges and
 -- exhausted transport failures count, soft verdicts do not.
 entity Breaker {
     host: Host
@@ -501,17 +511,28 @@ entity FetchAttempt {
     verdict: BlockVerdict               -- classified when the attempt is created
     render_reason: RenderReason?        -- why an unblocked http answer still needs a browser
 
-    -- A Retry-After past the cap retires the host, whatever try this is
-    -- and whatever its tier: decided, a render's navigation answer is
-    -- tested as an http answer is. FetchRobots applies the same test to a
-    -- robots.txt try and FetchSitemap to a declared sitemap's; a
+    -- Decided: an answer is judged by the request policy of the host that
+    -- answered it, the host of its source_url: the walk's own host for an
+    -- answer that was not redirected, the destination host for one that
+    -- was. A redirected answer's Retry-After, backoff and verdict are
+    -- therefore governed by the destination host's request policy and
+    -- pause or retire that host, never the walk's (HttpRetry,
+    -- CountRetryAfter, PauseHostOnRenderRetryAfter,
+    -- RetireHostOnLongRetryAfter); the walk's host keeps its own policy
+    -- for its own requests.
+    answering_host_name: hostname_of(response.source_url)
+    answering_policy: request_policy(walk.host.run, answering_host_name)
+    -- A Retry-After past the cap retires the answering host, whatever try
+    -- this is and whatever its tier: decided, a render's navigation answer
+    -- is tested as an http answer is. FetchRobots applies the same test to
+    -- a robots.txt try and FetchSitemap to a declared sitemap's; a
     -- speculative probe's never retires the host, but pauses it for
     -- retry_after_cap (FetchSitemap, ReadLlmsTxt).
     retires_host:
         response.retryable
         and response.retry_after != null
-        and walk.host.run.policy.honor_retry_after
-        and response.retry_after > walk.host.run.policy.retry_after_cap
+        and answering_policy.honor_retry_after
+        and response.retry_after > answering_policy.retry_after_cap
     retryable:
         tier = http and response.retryable
         and try < config.http_attempts
@@ -523,7 +544,7 @@ entity FetchAttempt {
     hop_refused: response.error = "redirect to a retired host"
     wants_escalation:
         (render_reason != null or verdict.kind != none)
-        and (verdict.kind = none or walk.host.run.policy.protection_escalation)
+        and (verdict.kind = none or answering_policy.protection_escalation)
         and not (response.ok and not response.is_html)
         and not response.not_modified
         and not unsuccessful_challenge
@@ -782,7 +803,7 @@ rule OpenHost {
     when: HostOpened(run, name, origin)
     requires: run.status = running
     requires: not exists Host{run: run, name: name}
-    let policy = run.policy
+    let policy = request_policy(run, name)
     ensures:
         Host.created(
             run: run, name: name, origin: origin, rate: policy.rate_per_host, crawl_delay: 0.seconds,
@@ -810,16 +831,18 @@ rule FetchRobots {
     requires: exists host and not host.breaker_tripped
     requires: not exists RobotsPolicy{run: run, origin: origin}
     let response = fetch_resource(robots_url(origin), null, null, run, host)
-    let breaker = host.breaker
+    let answered = Host{run: run, name: hostname_of(response.source_url)}
+    let judged = if exists answered: answered else: host
+    let breaker = judged.breaker
     let retires_host =
         response.retryable and response.retry_after != null
-        and run.policy.honor_retry_after
-        and response.retry_after > run.policy.retry_after_cap
+        and judged.policy.honor_retry_after
+        and response.retry_after > judged.policy.retry_after_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
         if retires_host and exists breaker and breaker.status = watching:
             breaker.status = tripped
-            BreakerTripped(host: host)
+            BreakerTripped(host: judged)
         RobotsAnswered(run: run, host: host, origin: origin, response: response)
 
     @guidance
@@ -866,7 +889,19 @@ rule FetchRobots {
         -- sitemap's (FetchSitemap); a speculative probe's never does, but
         -- pauses the host for retry_after_cap instead (QueueSitemaps,
         -- FetchSitemap, ReadLlmsTxt). For robots.txt the answer then
-        -- stands: a 429 or 5xx is robots_refused.
+        -- stands: a 429 or 5xx is robots_refused. Decided: as for a page's
+        -- answer (FetchAttempt.answering_host_name), "the host" of each
+        -- try's wait, pause, HostBackedOff and retry_after_honored, and of
+        -- a past-cap retirement or pause, is the host that answered it,
+        -- the host of the response's source_url (for an error, of the URL
+        -- last requested), under that host's request policy: the fetch's
+        -- own host unless the answer was redirected. Decided: when that
+        -- host is not open (only a robots.txt hop, which opens no host,
+        -- can reach one), the fetch's own host stands in for it (judged).
+        -- The robots.txt, sitemap or llms.txt itself still belongs to the
+        -- fetch's own host and origin (RobotsAnswered, SitemapAnswered):
+        -- a redirected robots.txt's rules and Crawl-delay apply to the
+        -- origin that asked for it.
         -- Once a host's breaker has tripped, by a retirement or by its
         -- block rate, no further discovery request goes to it: this rule,
         -- QueueSitemaps, ReadRobotsBeforeSitemap, FetchSitemap and
@@ -887,7 +922,7 @@ rule FetchRobots {
 rule AdoptRobotsRules {
     when: RobotsAnswered(run, host, origin, response)
     requires: response.ok
-    let past_cap = robots_crawl_delay_exceeds(response, run.policy.retry_after_cap)
+    let past_cap = robots_crawl_delay_exceeds(response, host.policy.retry_after_cap)
     let declared_delay = if past_cap: null else: robots_crawl_delay(response)
     ensures:
         RobotsPolicy.created(
@@ -895,7 +930,7 @@ rule AdoptRobotsRules {
             crawl_delay: declared_delay, declared_sitemaps: robots_sitemaps(response, host.name),
             problem: null
         )
-        if run.policy.honor_crawl_delay and declared_delay != null:
+        if host.policy.honor_crawl_delay and declared_delay != null:
             host.crawl_delay = max(host.crawl_delay, declared_delay ?? 0.seconds)
             host.rate =
                 if host.rate != null and declared_delay > 0.seconds:
@@ -934,8 +969,8 @@ rule AdoptRobotsRules {
 rule RetireHostOnLongCrawlDelay {
     when: RobotsAnswered(run, host, origin, response)
     requires: response.ok
-    requires: run.policy.honor_crawl_delay
-    requires: robots_crawl_delay_exceeds(response, run.policy.retry_after_cap)
+    requires: host.policy.honor_crawl_delay
+    requires: robots_crawl_delay_exceeds(response, host.policy.retry_after_cap)
     let breaker = host.breaker
     ensures:
         if exists breaker and breaker.status = watching:
@@ -1040,11 +1075,13 @@ rule FetchSitemap {
     let frontier = Frontier{mirror: run.target}
     let snapshot = SitemapSnapshot{frontier: frontier, url: url}
     let response = fetch_resource(url, snapshot?.etag, snapshot?.last_modified, run, host)
-    let breaker = host.breaker
+    let answered = Host{run: run, name: hostname_of(response.source_url)}
+    let judged = if exists answered: answered else: host
+    let breaker = judged.breaker
     let past_cap =
         response.retryable and response.retry_after != null
-        and run.policy.honor_retry_after
-        and response.retry_after > run.policy.retry_after_cap
+        and judged.policy.honor_retry_after
+        and response.retry_after > judged.policy.retry_after_cap
     let retires_host = declared and past_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
@@ -1052,10 +1089,10 @@ rule FetchSitemap {
             snapshot.last_requested_run = run.id
         if retires_host and exists breaker and breaker.status = watching:
             breaker.status = tripped
-            BreakerTripped(host: host)
+            BreakerTripped(host: judged)
         if past_cap and not declared:
-            host.paused_until = later_of(host.paused_until, now + run.policy.retry_after_cap)
-            HostBackedOff(host: host, until: now + run.policy.retry_after_cap)
+            judged.paused_until = later_of(judged.paused_until, now + judged.policy.retry_after_cap)
+            HostBackedOff(host: judged, until: now + judged.policy.retry_after_cap)
         SitemapAnswered(run: run, host: host, url: url, declared: declared, response: response)
 
     @guidance
@@ -1102,7 +1139,8 @@ rule FetchSitemap {
         -- test, and an admitted sitemap is fetched at its URL as written.
         -- robots_allows(run, url) reads the RobotsPolicy of the URL's own
         -- origin, origin_of(url), never another origin of the same host:
-        -- it is true under robots = ignore, true when that origin's stance
+        -- it is true when the URL's host's request policy (Host.policy)
+        -- has robots = ignore, true when that origin's stance
         -- is allow_all, false under disallow_all, and otherwise the parsed
         -- rules' answer for the user agent rovo. That answer, the parsing
         -- it rests on and the choice of the group that applies to rovo are
@@ -1265,15 +1303,17 @@ rule ReadLlmsTxt {
     requires: robots_allows(run, llms_txt_url(name))
     let scope = run.target.scope
     let response = fetch_resource(llms_txt_url(name), null, null, run, host)
+    let answered = Host{run: run, name: hostname_of(response.source_url)}
+    let judged = if exists answered: answered else: host
     let past_cap =
         response.retryable and response.retry_after != null
-        and run.policy.honor_retry_after
-        and response.retry_after > run.policy.retry_after_cap
+        and judged.policy.honor_retry_after
+        and response.retry_after > judged.policy.retry_after_cap
     ensures:
         run.bytes_fetched = run.bytes_fetched + response.size
         if past_cap:
-            host.paused_until = later_of(host.paused_until, now + run.policy.retry_after_cap)
-            HostBackedOff(host: host, until: now + run.policy.retry_after_cap)
+            judged.paused_until = later_of(judged.paused_until, now + judged.policy.retry_after_cap)
+            HostBackedOff(host: judged, until: now + judged.policy.retry_after_cap)
         if response.ok:
             for url in llms_txt_targets(response, llms_txt_url(name)):
                 if scope.identity_of(url) != null:
@@ -1654,7 +1694,12 @@ rule AttemptTier {
         -- fetch_or_render applies request_policy(run, destination host):
         -- run.policy only for a selected owned host of an owner-testing
         -- run, the standard policy otherwise, before redirects, browser
-        -- subrequests, robots, discovery and retries alike. OwnerAccess is
+        -- subrequests, robots, discovery and retries alike. Decided: each
+        -- request is paced and robots-checked by the host it goes to
+        -- (Host.policy), and the answer is judged, for its Retry-After,
+        -- backoff and escalation, by the host that answered it
+        -- (FetchAttempt.answering_policy); for an answer that was not
+        -- redirected both are the walk's own host. OwnerAccess is
         -- applied only to its exact declared host (decided, for now: none
         -- is ever supplied, so none is applied). In-scope redirects are
         -- followed, at most discovery_max_redirects hops without a revisit,
@@ -1787,8 +1832,8 @@ rule HttpRetry {
     when: AttemptReady(attempt)
     requires: attempt.retryable
     requires: attempt.walk.status = walking and attempt.walk.host.run.status = running and not attempt.walk.host.breaker_tripped
-    let host = attempt.walk.host
-    let policy = host.run.policy
+    let host = Host{run: attempt.walk.host.run, name: attempt.answering_host_name}
+    let policy = attempt.answering_policy
     let retry_until = now + retry_wait(attempt.try, attempt.response.retry_after, policy)
     ensures:
         host.paused_until = later_of(host.paused_until, retry_until)
@@ -1801,12 +1846,17 @@ rule HttpRetry {
         -- nothing; a Retry-After on any retryable answer (a 429, any 5xx
         -- such as a 500, 502 or 503) lengthens it when honor_retry_after
         -- is enabled. A retry never shortens a required
-        -- host pause and never raises a host's rate. Retry counts and
-        -- request timeouts stay finite. A robots.txt, sitemap or llms.txt
+        -- host pause and never raises a host's rate. Decided: the pause
+        -- falls on the answering host under its request policy
+        -- (answering_policy), which is the walk's own host unless the answer
+        -- was redirected; the retry itself is the walk's request again.
+        -- Retry counts and request timeouts stay finite. A robots.txt, sitemap or llms.txt
         -- try through fetch_resource is retried the same way (FetchRobots).
 }
 
--- A Retry-After beyond the cap retires the host for the run, on any try,
+-- A Retry-After beyond the cap retires the answering host for the run
+-- (FetchAttempt.answering_host_name: the walk's own host unless the answer
+-- was redirected, never the walk's host for a redirected answer), on any try,
 -- the last included, a robots.txt try (FetchRobots) or a declared
 -- sitemap's (FetchSitemap) through fetch_resource too, never a speculative
 -- probe's, which pauses the host for retry_after_cap instead (FetchSitemap,
@@ -1819,11 +1869,12 @@ rule RetireHostOnLongRetryAfter {
     requires: attempt.retires_host
     requires: attempt.walk.status = walking and attempt.walk.host.run.status = running
     let host = attempt.walk.host
-    let breaker = host.breaker
+    let answering = Host{run: host.run, name: attempt.answering_host_name}
+    let breaker = answering.breaker
     ensures:
         if exists breaker and breaker.status = watching:
             breaker.status = tripped
-            BreakerTripped(host: host)
+            BreakerTripped(host: answering)
         attempt.walk.status = settled
         attempt.walk.standing = attempt
         host.tiers_used = host.tiers_used + { attempt.tier }
@@ -1835,19 +1886,21 @@ rule CountRetryAfter {
     when: attempt: FetchAttempt.created
     requires: attempt.walk.host.run.status = running
     requires: attempt.response.retry_after != null and attempt.response.retryable
-    requires: attempt.walk.host.run.policy.honor_retry_after
-    ensures: attempt.walk.host.retry_after_honored = attempt.walk.host.retry_after_honored + 1
+    requires: attempt.answering_policy.honor_retry_after
+    let host = Host{run: attempt.walk.host.run, name: attempt.answering_host_name}
+    ensures: host.retry_after_honored = host.retry_after_honored + 1
 
     @guidance
         -- Every honoured Retry-After is counted, on any retryable answer
         -- (a 429 or any 5xx), the one that retires the host included, at
         -- any tier: decided, a render's navigation answer counts as an
-        -- http answer does. A robots.txt, sitemap or llms.txt try through
+        -- http answer does. Decided: it counts on the answering host,
+        -- under that host's request policy. A robots.txt, sitemap or llms.txt try through
         -- fetch_resource is counted the same way (FetchRobots).
 }
 
--- Decided: a render's navigation answer with a Retry-After pauses the host
--- as an http answer's does (HttpRetry's wait), though a render is never
+-- Decided: a render's navigation answer with a Retry-After pauses the
+-- answering host as an http answer's does (HttpRetry's wait), though a render is never
 -- retried; past retry_after_cap it retires the host instead
 -- (RetireHostOnLongRetryAfter).
 rule PauseHostOnRenderRetryAfter {
@@ -1855,10 +1908,10 @@ rule PauseHostOnRenderRetryAfter {
     requires: attempt.tier != http
     requires: attempt.walk.host.run.status = running
     requires: attempt.response.retry_after != null and attempt.response.retryable
-    requires: attempt.walk.host.run.policy.honor_retry_after
+    requires: attempt.answering_policy.honor_retry_after
     requires: not attempt.retires_host
-    let host = attempt.walk.host
-    let pause_until = now + retry_wait(attempt.try, attempt.response.retry_after, host.run.policy)
+    let host = Host{run: attempt.walk.host.run, name: attempt.answering_host_name}
+    let pause_until = now + retry_wait(attempt.try, attempt.response.retry_after, attempt.answering_policy)
     ensures:
         host.paused_until = later_of(host.paused_until, pause_until)
         HostBackedOff(host: host, until: pause_until)
@@ -1950,20 +2003,44 @@ rule StopWalkOnTrippedHost {
         -- feed a tripped breaker.
 }
 
--- One breaker outcome per settled page fetch.
+-- One breaker outcome per settled page fetch, on the walk's own host,
+-- under its request policy, whichever host answered.
 rule FeedBreaker {
     when: walk: LadderWalk.status transitions_to settled
     requires: walk.status = settled
     let host = walk.host
     let breaker = host.breaker
     requires: exists breaker and breaker.status = watching
-    requires: host.run.policy.breaker_enabled
+    requires: host.policy.breaker_enabled
     let counted = walk.standing.verdict.counts_against_host or walk.standing.failed_outright
     ensures:
         breaker.outcomes = last_n(append(breaker.outcomes, counted), config.breaker_window)
         breaker.since_escalation = breaker.since_escalation + 1
         if walk.standing.response.ok and walk.standing.verdict.kind = none and walk.standing.response.main_text > 0:
             host.recent_text_lengths = last_n(append(host.recent_text_lengths, walk.standing.response.main_text), config.host_text_history)
+}
+
+-- Decided: a standing answer redirected to another host also feeds that
+-- answering host's breaker, under its request policy, so an unselected
+-- host keeps its breaker even when an owner run disables the walk's host's.
+-- It is fed the same one outcome, the standing attempt's verdict counting
+-- against the host or its failing outright, and nothing else: the page's
+-- tallies (fetched, blocked, tiers_used, render_escalations,
+-- recent_text_lengths) and its report row stay on the walk's host
+-- (FeedBreaker, SettleWalk, DisposeFetch). The answering host can then
+-- trip (BreakerTrips) and take no further request.
+rule FeedAnsweringBreaker {
+    when: walk: LadderWalk.status transitions_to settled
+    requires: walk.status = settled
+    let answering = Host{run: walk.host.run, name: walk.standing.answering_host_name}
+    requires: exists answering and answering != walk.host
+    let breaker = answering.breaker
+    requires: exists breaker and breaker.status = watching
+    requires: answering.policy.breaker_enabled
+    let counted = walk.standing.verdict.counts_against_host or walk.standing.failed_outright
+    ensures:
+        breaker.outcomes = last_n(append(breaker.outcomes, counted), config.breaker_window)
+        breaker.since_escalation = breaker.since_escalation + 1
 }
 
 -- Only a tier that stood is remembered: a render that failed and fell back
@@ -1998,8 +2075,8 @@ rule BreakerEscalates {
     when: breaker: Breaker.should_act
     requires: breaker.status = watching
     requires: breaker.tier != breaker.highest_tier
-    requires: breaker.host.run.policy.breaker_enabled
-    requires: breaker.host.run.policy.protection_escalation
+    requires: breaker.host.policy.breaker_enabled
+    requires: breaker.host.policy.protection_escalation
     let host = breaker.host
     ensures:
         breaker.tier = next_tier(host.run.usable_tiers, breaker.tier) ?? breaker.tier
@@ -2007,8 +2084,8 @@ rule BreakerEscalates {
         breaker.outcomes = []
         breaker.since_escalation = 0
         host.rate = if host.rate != null: min(host.rate, max(host.rate / 2, config.min_host_rate)) else: null
-        host.paused_until = later_of(host.paused_until, now + host.run.policy.breaker_pause)
-        HostBackedOff(host: host, until: now + host.run.policy.breaker_pause)
+        host.paused_until = later_of(host.paused_until, now + host.policy.breaker_pause)
+        HostBackedOff(host: host, until: now + host.policy.breaker_pause)
 }
 
 -- Default stated here (veto at review): a fetch refused after a trip is
@@ -2020,8 +2097,8 @@ rule BreakerEscalates {
 rule BreakerTrips {
     when: breaker: Breaker.should_act
     requires: breaker.status = watching
-    requires: breaker.host.run.policy.breaker_enabled
-    requires: breaker.tier = breaker.highest_tier or not breaker.host.run.policy.protection_escalation
+    requires: breaker.host.policy.breaker_enabled
+    requires: breaker.tier = breaker.highest_tier or not breaker.host.policy.protection_escalation
     let host = breaker.host
     let run = host.run
     let frontier = Frontier{mirror: run.target}
@@ -2407,7 +2484,7 @@ invariant LearnedTierIsNeverHttp {
 
 invariant HostRateNeverRises {
     for h in Hosts:
-        h.rate != null implies h.run.policy.rate_per_host != null and h.rate <= h.run.policy.rate_per_host
+        h.rate != null implies h.policy.rate_per_host != null and h.rate <= h.policy.rate_per_host
 }
 
 invariant InteractiveChallengeIsOwnerOnly {

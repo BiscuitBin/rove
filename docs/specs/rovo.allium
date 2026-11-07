@@ -690,7 +690,7 @@ rule CloseRun {
         report.report_status = if run.status = interrupted: interrupted else: finished
         report.error = run.error
         report.unresolved_urls = run.unresolved_urls
-        report.per_host = host_reports(run.hosts, run.policy)
+        report.per_host = host_reports(run.hosts)
         report.discovered = discovered_count(run)
         report.fetched = run.fetch_attempts
         report.bytes_fetched = run.bytes_fetched
@@ -702,7 +702,10 @@ rule CloseRun {
 
     @guidance
         -- host_reports makes one HostReport per host, sorted by name, with
-        -- robots_ignored from the policy and block_rate over the host's
+        -- effective_policy that host's request policy (crawl's
+        -- Host.policy: the run's policy for a selected owned host of an
+        -- owner-testing run, the standard policy for every other host),
+        -- robots_ignored from that policy and block_rate over the host's
         -- settled fetches. discovered_count is the number of frontier rows
         -- after discovery. Finalisation runs after an interrupted run too,
         -- so links and indexes stay consistent with whatever was stored.
