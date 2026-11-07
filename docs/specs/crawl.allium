@@ -1650,12 +1650,12 @@ rule FetchEntry {
 
     @guidance
         -- starting_tier is browser under render_mode = always; otherwise
-        -- the later of the host breaker's tier and the hint's tier, unless
-        -- the hint's reprobe_due(run.id) says to probe http again; else
-        -- http. It is always one of run.usable_tiers, and outside owner
-        -- testing it ignores a breaker tier raised by protection
-        -- escalation. A conditional fetch sends the stored etag and
-        -- last-modified; validators are always http-only.
+        -- the later of the host breaker's tier and the hint's tier, else http.
+        -- Decided: a hint whose reprobe_due(run.id) holds is dropped, never the
+        -- breaker's tier: the start is then the breaker's tier, else http. It is
+        -- always one of run.usable_tiers; outside owner testing it ignores a
+        -- breaker tier raised by protection escalation. A conditional fetch
+        -- sends the stored etag and last-modified; validators are always http-only.
 }
 
 rule AttemptTier {
