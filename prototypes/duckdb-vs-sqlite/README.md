@@ -28,6 +28,11 @@ metadata-only select, and an upsert of one row at a time. Each measurement runs 
 fresh subprocess and reports the child's own peak RSS and wall time. DuckDB queries run
 twice, at the default memory limit and under a 512 MB limit.
 
+Insert throughput is measured separately, on the five stores plus the two SQLite stores
+in WAL mode: 10,000 rows inserted one transaction at a time and 256 rows at a time, into
+an empty store and into one already holding 50,000 rows, with two row mixes. The results
+page's "Insert throughput" section has the table.
+
 ## The corpus
 
 Five labelled regimes, between 20k and 150k rows and about 2 GB raw in total:
@@ -56,9 +61,12 @@ Nothing is added to the project's dependencies.
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust --limit 2000
 uv run prototypes/duckdb-vs-sqlite/load_stores.py
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 ```
 
-The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
+The fourth command needs only the corpus, not the stores, and accepts `--populate` and
+`--insert` to run at smaller sizes (the results file is then named after them). The
+first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
 build needs roughly 17 GB there: the corpus file, the five stores and the download cache.

@@ -1,18 +1,20 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06 with the three commands below, on an Apple M5 Pro (18 cores, 64 GB)
+Measured on 2026-11-06 with the four commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python. Every number on this page comes from one run of the
-three commands below, except the tracer-bullet figures named in the first caveat:
+four commands below, except the tracer-bullet figures named in the first caveat:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
 uv run prototypes/duckdb-vs-sqlite/load_stores.py --per-regime
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 ```
 
-The raw output of the second and third commands is kept beside the data, under
-`ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`), which is gitignored.
+The raw output of the last three commands is kept beside the data, under
+`ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`), which
+is gitignored.
 
 ## The question
 
@@ -161,6 +163,143 @@ What the table says:
 - **The files store is cheap on memory and slow on scans.** Its 70 MiB point-lookup peak
   is the manifest index held in Python; its scan is a `read()` per file.
 
+## Insert throughput
+
+Seven store variants, two insert modes, two row mixes and two scenarios, every cell run
+once in a fresh process. The variants are the five stores above plus the two SQLite
+stores in WAL mode (`sqlite-raw-wal`, `sqlite-zstd-wal`: `PRAGMA journal_mode=WAL` when
+the file is created, `PRAGMA synchronous=NORMAL` on every open, both read back and
+recorded); the other SQLite variants keep the default rollback journal and
+`synchronous=FULL`. `single` is one transaction per row, the crawler's pattern: for
+SQLite an implicit transaction committed per row, for DuckDB `BEGIN` and `COMMIT`
+around one `INSERT`, for files the two bodies written to a `.part` name and renamed, then
+the manifest line appended, flushed and fsynced (the body files themselves are not
+fsynced). `batch` is 256 rows per transaction (`executemany` for SQLite and DuckDB; for
+files one manifest flush and fsync per batch). The `mixed` rows are spread evenly over
+the whole corpus, the 50,000-row base and the 10,000 inserted rows disjoint (335 MiB raw
+inserted, 34 KB a row); `commoncrawl` inserts all 9,999 Common Crawl pages (1,690 MiB
+raw, 173 KB a row) into a base of 50,000 rows spread over the other four regimes. The
+base is built once per (variant, mix) by the `batch` inserter, compacted, and cloned
+for each run with `cp -Rc`. The zstd variants compress inside the timed loop, and every
+variant parses its rows from a JSON-lines sample file inside it. Sizes are allocated MiB
+before the inserts, after them with WAL and journal files included, and after `VACUUM`
+or `CHECKPOINT`, whose own wall time is the `compact s` column. Each child checked that
+the row count grew by exactly the rows inserted and that no WAL, shm or journal file
+remained after compaction.
+
+### Mixed rows
+
+| variant | mode | scenario | rows | rows/s | raw MiB/s | insert s | compact s | peak RSS MiB | MiB before > after inserts > after compaction |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| files | single | empty | 10,000 | 2,811 | 94.2 | 3.56 | 0.00 | 184 | 0 > 389 > 389 |
+| files | single | populated | 10,000 | 2,804 | 94.0 | 3.57 | 0.00 | 301 | 1,949 > 2,338 > 2,338 |
+| files | batch | empty | 10,000 | 3,050 | 102.3 | 3.28 | 0.00 | 373 | 0 > 389 > 389 |
+| files | batch | populated | 10,000 | 2,890 | 96.9 | 3.46 | 0.00 | 486 | 1,949 > 2,338 > 2,338 |
+| sqlite-raw | single | empty | 10,000 | 2,716 | 91.0 | 3.68 | 1.10 | 155 | 0 > 352 > 345 |
+| sqlite-raw | single | populated | 10,000 | 2,710 | 90.9 | 3.69 | 7.26 | 156 | 1,735 > 2,087 > 2,080 |
+| sqlite-raw | batch | empty | 10,000 | 8,386 | 281.2 | 1.19 | 1.08 | 425 | 0 > 355 > 345 |
+| sqlite-raw | batch | populated | 10,000 | 8,826 | 295.9 | 1.13 | 7.81 | 425 | 1,735 > 2,087 > 2,080 |
+| sqlite-raw-wal | single | empty | 10,000 | 5,612 | 188.2 | 1.78 | 0.98 | 163 | 0 > 369 > 360 |
+| sqlite-raw-wal | single | populated | 10,000 | 5,851 | 196.2 | 1.71 | 7.77 | 162 | 1,735 > 2,093 > 2,087 |
+| sqlite-raw-wal | batch | empty | 10,000 | 5,938 | 199.1 | 1.68 | 0.97 | 429 | 0 > 400 > 361 |
+| sqlite-raw-wal | batch | populated | 10,000 | 5,913 | 198.3 | 1.69 | 7.02 | 432 | 1,735 > 2,142 > 2,087 |
+| sqlite-zstd | single | empty | 10,000 | 2,367 | 79.4 | 4.23 | 0.31 | 173 | 0 > 81 > 78 |
+| sqlite-zstd | single | populated | 10,000 | 2,256 | 75.6 | 4.43 | 2.14 | 176 | 390 > 470 > 468 |
+| sqlite-zstd | batch | empty | 10,000 | 6,967 | 233.6 | 1.44 | 0.27 | 390 | 0 > 80 > 78 |
+| sqlite-zstd | batch | populated | 10,000 | 6,579 | 220.6 | 1.52 | 1.89 | 397 | 390 > 470 > 468 |
+| sqlite-zstd-wal | single | empty | 10,000 | 6,170 | 206.9 | 1.62 | 0.21 | 173 | 0 > 85 > 80 |
+| sqlite-zstd-wal | single | populated | 10,000 | 6,256 | 209.8 | 1.60 | 1.64 | 172 | 390 > 475 > 468 |
+| sqlite-zstd-wal | batch | empty | 10,000 | 6,614 | 221.8 | 1.51 | 0.23 | 405 | 0 > 91 > 81 |
+| sqlite-zstd-wal | batch | populated | 10,000 | 6,908 | 231.6 | 1.45 | 1.61 | 391 | 390 > 480 > 468 |
+| duckdb-default | single | empty | 10,000 | 1,167 | 39.1 | 8.57 | 0.00 | 827 | 0 > 118 > 98 |
+| duckdb-default | single | populated | 10,000 | 1,232 | 41.3 | 8.12 | 0.30 | 714 | 464 > 469 > 464 |
+| duckdb-default | batch | empty | 10,000 | 2,750 | 92.2 | 3.64 | 0.57 | 1,195 | 0 > 82 > 112 |
+| duckdb-default | batch | populated | 10,000 | 2,516 | 84.4 | 3.97 | 0.24 | 947 | 464 > 466 > 464 |
+| duckdb-zstd | single | empty | 10,000 | 1,150 | 38.6 | 8.70 | 1.01 | 592 | 0 > 140 > 191 |
+| duckdb-zstd | single | populated | 10,000 | 1,033 | 34.6 | 9.68 | 0.05 | 469 | 871 > 884 > 871 |
+| duckdb-zstd | batch | empty | 10,000 | 2,230 | 74.8 | 4.48 | 1.01 | 734 | 0 > 124 > 192 |
+| duckdb-zstd | batch | populated | 10,000 | 1,987 | 66.6 | 5.03 | 0.54 | 636 | 871 > 883 > 871 |
+
+### Common Crawl rows
+
+| variant | mode | scenario | rows | rows/s | raw MiB/s | insert s | compact s | peak RSS MiB | MiB before > after inserts > after compaction |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| files | single | empty | 9,999 | 1,431 | 241.9 | 6.99 | 0.00 | 426 | 0 > 1,731 > 1,731 |
+| files | single | populated | 9,999 | 1,413 | 238.8 | 7.07 | 0.00 | 542 | 1,398 > 3,129 > 3,129 |
+| files | batch | empty | 9,999 | 1,503 | 254.0 | 6.65 | 0.00 | 582 | 0 > 1,731 > 1,731 |
+| files | batch | populated | 9,999 | 1,507 | 254.7 | 6.63 | 0.00 | 663 | 1,398 > 3,129 > 3,129 |
+| sqlite-raw | single | empty | 9,999 | 1,310 | 221.4 | 7.63 | 5.53 | 320 | 0 > 1,711 > 1,703 |
+| sqlite-raw | single | populated | 9,999 | 1,227 | 207.3 | 8.15 | 10.39 | 319 | 1,178 > 2,890 > 2,880 |
+| sqlite-raw | batch | empty | 9,999 | 1,969 | 332.7 | 5.08 | 4.97 | 622 | 0 > 1,707 > 1,703 |
+| sqlite-raw | batch | populated | 9,999 | 1,990 | 336.3 | 5.02 | 10.39 | 628 | 1,178 > 2,890 > 2,880 |
+| sqlite-raw-wal | single | empty | 9,999 | 1,448 | 244.6 | 6.91 | 4.87 | 319 | 0 > 1,723 > 1,711 |
+| sqlite-raw-wal | single | populated | 9,999 | 1,453 | 245.5 | 6.88 | 10.37 | 320 | 1,178 > 2,902 > 2,890 |
+| sqlite-raw-wal | batch | empty | 9,999 | 1,376 | 232.6 | 7.26 | 4.52 | 620 | 0 > 1,775 > 1,703 |
+| sqlite-raw-wal | batch | populated | 9,999 | 1,386 | 234.2 | 7.21 | 9.27 | 621 | 1,178 > 2,953 > 2,880 |
+| sqlite-zstd | single | empty | 9,999 | 1,083 | 182.9 | 9.24 | 1.13 | 420 | 0 > 337 > 332 |
+| sqlite-zstd | single | populated | 9,999 | 1,042 | 176.0 | 9.60 | 2.17 | 421 | 287 > 623 > 619 |
+| sqlite-zstd | batch | empty | 9,999 | 1,588 | 268.3 | 6.30 | 1.03 | 601 | 0 > 337 > 332 |
+| sqlite-zstd | batch | populated | 9,999 | 1,554 | 262.6 | 6.43 | 2.23 | 605 | 287 > 623 > 619 |
+| sqlite-zstd-wal | single | empty | 9,999 | 1,494 | 252.4 | 6.69 | 0.88 | 413 | 0 > 343 > 337 |
+| sqlite-zstd-wal | single | populated | 9,999 | 1,462 | 247.1 | 6.84 | 1.99 | 418 | 287 > 630 > 623 |
+| sqlite-zstd-wal | batch | empty | 9,999 | 1,485 | 250.9 | 6.73 | 0.89 | 605 | 0 > 350 > 337 |
+| sqlite-zstd-wal | batch | populated | 9,999 | 1,518 | 256.6 | 6.59 | 1.80 | 597 | 287 > 636 > 623 |
+| duckdb-default | single | empty | 9,999 | 205 | 34.6 | 48.83 | 0.65 | 2,838 | 0 > 453 > 440 |
+| duckdb-default | single | populated | 9,999 | 211 | 35.7 | 47.32 | 0.14 | 2,283 | 277 > 521 > 507 |
+| duckdb-default | batch | empty | 9,999 | 652 | 110.2 | 15.33 | 0.03 | 2,581 | 0 > 329 > 329 |
+| duckdb-default | batch | populated | 9,999 | 637 | 107.6 | 15.70 | 0.03 | 2,669 | 277 > 450 > 450 |
+| duckdb-zstd | single | empty | 9,999 | 208 | 35.2 | 47.96 | 1.15 | 1,953 | 0 > 675 > 674 |
+| duckdb-zstd | single | populated | 9,999 | 195 | 32.9 | 51.37 | 0.41 | 2,356 | 559 > 1,148 > 1,147 |
+| duckdb-zstd | batch | empty | 9,999 | 447 | 75.5 | 22.37 | 0.00 | 1,756 | 0 > 521 > 521 |
+| duckdb-zstd | batch | populated | 9,999 | 372 | 62.8 | 26.89 | 0.03 | 2,376 | 559 > 1,161 > 1,161 |
+
+What the tables say:
+
+- **Batching is worth three times for SQLite under a rollback journal, and nothing for
+  files.** On mixed rows `sqlite-raw` goes from 2,716 single-row inserts a second to
+  8,386 in batches of 256, `sqlite-zstd` from 2,367 to 6,967. On the 173 KB Common Crawl
+  rows the gain shrinks to 1.5 times because the bytes dominate the transaction cost.
+  The files store is the same in both modes (2,811 against 3,050) because only the
+  manifest is fsynced and the two body writes per page are the cost.
+- **WAL doubles single-row inserts and makes batching unnecessary.** `sqlite-raw-wal`
+  takes 5,612 single-row inserts a second and 5,938 batched, `sqlite-zstd-wal` 6,170 and
+  6,614: about 200 MiB/s either way on mixed rows, the same as the batched
+  rollback-journal store. Under `synchronous=NORMAL` a commit does not sync the WAL; the
+  sync happens at checkpoint. On Common Crawl rows every SQLite variant lands between
+  1,300 and 2,000 rows a second (210 to 340 MiB/s), which is write bandwidth, not
+  transaction count.
+- **A populated store inserts as fast as an empty one.** In every (variant, mode, mix)
+  pair the empty and populated rates agree within a few percent. What grows with the
+  store is `VACUUM`: 7 to 10 s on a 2 to 2.9 GB raw store, 2 s on a zstd store. Inserts
+  into a fresh file append, so before and after compaction differ by under 1% and the
+  `VACUUM` was part of the protocol, not something inserts need; the WAL variants show
+  the WAL's size (up to 75 MiB) before the checkpoint, and the rollback-journal variants
+  show nothing, because the journal is gone at each commit.
+- **DuckDB is the slowest store to insert into, by the most on big rows.** On mixed rows
+  it takes 1,030 to 1,230 single-row inserts a second (0.8 ms a row, not the 31 ms of
+  the upsert measurement above, which replaced rows through the primary key in a store
+  thirteen times larger; which of those two differences matters was not separated) and
+  2,000 to 2,750 batched, a third of batched SQLite. On Common Crawl rows single-row
+  inserts fall to 195 to 211 a second (35 MiB/s, 5 ms a page), seven times slower than
+  any SQLite variant, and batching reaches 370 to 650. Peak RSS is 0.5 to 1.2 GB on mixed
+  rows and 1.8 to 2.8 GB on Common Crawl rows, against 155 to 630 MiB for SQLite (the
+  256 rows of a batch held in Python are most of SQLite's batch RSS).
+- **Written a row at a time, DuckDB's compression advantage disappears.** 10,000 mixed
+  rows inserted into an empty store take 98 to 112 MiB in `duckdb-default` (0.29 to 0.33
+  of raw) and 191 MiB in `duckdb-zstd` (0.57), against 78 MiB (0.23) for `sqlite-zstd`;
+  the batch-built 50,000-row bases are 464 MiB (default) and 871 MiB (forced ZSTD) against
+  390 MiB for `sqlite-zstd`, where the bulk-loaded full corpus gave DuckDB half of
+  SQLite's bytes. A probe (one more 10,000-row batch build of each, inspected with
+  `pragma_storage_info` and `pragma_database_size`) showed one ZSTD segment per body
+  column in both, so the compression did run; but after `CHECKPOINT` more than half of
+  each file is free blocks (`duckdb-default`: 437 blocks of 256 KiB, 188 in use;
+  `duckdb-zstd`: 724, 373 in use), and the forced-ZSTD store's blocks in use are twice
+  the default's (93 MiB against 47 MiB) for the same segment layout. The file grows at
+  `CHECKPOINT` (82 to 112 MiB and 124 to 192 MiB on the empty-store batch runs) the way
+  the upsert rows grew: blocks are rewritten and the old ones kept free for reuse, and
+  DuckDB has no `VACUUM`, so the file never shrinks. Why forced ZSTD holds twice the live
+  blocks of the default was not inspected.
+
 ## Verdict
 
 **On disk, yes. In memory while querying, no.**
@@ -201,8 +340,19 @@ of them in under 92 MiB (raw SQLite in under 139 MiB).
   peak RSS (`ru_maxrss`, bytes on macOS), which includes the Python interpreter and the
   imported libraries: the `baseline` row is a child that imports them and does nothing.
 - **DuckDB threads.** DuckDB ran with its default 18 threads; SQLite is single-threaded.
-  The memory limit column is what DuckDB reports; SQLite ran at its default 2 MB page
-  cache and its default rollback journal, not WAL mode.
+  The memory limit column is what DuckDB reports; in the query runs SQLite ran at its
+  default 2 MB page cache and its default rollback journal, not WAL mode. The insert
+  runs add the two WAL variants.
+- **Insert cells ran once, and the fsync is APFS's.** The spread between the empty and
+  populated cells of one (variant, mode, mix), which should agree, is the best guide to
+  the noise: under 10% for every SQLite and files cell, up to 20% for DuckDB. On macOS
+  `fsync()` does not flush the drive's write cache (`F_FULLFSYNC` does, and SQLite does
+  not use it by default), so `synchronous=FULL` and `NORMAL` both measure the cost of
+  the journal and the call, not of durable writes; the files store syncs only the
+  manifest. The rows came from a warm sample file and their JSON parsing sat inside the
+  timed loop for every variant alike. DuckDB's `executemany` is the only batch path
+  measured; its Appender and Arrow ingestion, the bulk paths it documents, were not, so
+  the DuckDB batch cells are a floor on what it can do when fed in bulk.
 - **The corpus is not a crawl.** The Rust and Wikipedia pages have no site chrome and
   the Sphinx archives are one generator's output; only the Common Crawl regime looks
   like fetched pages. The Wikipedia run is from March 2025, twenty months old, chosen as
@@ -211,7 +361,8 @@ of them in under 92 MiB (raw SQLite in under 139 MiB).
 - **Loading was not measured fairly.** The loader is a prototype: DuckDB ingested the
   corpus from the JSON file in one statement and the loader process peaked at 13.8 GB
   RSS doing so, while SQLite was fed in batches of 256 rows from Python. Bulk ingestion
-  memory is a separate question from the one asked here.
+  memory is a separate question from the one asked here; row-at-a-time ingestion is the
+  insert section.
 - **No concurrency.** One writer and no readers at a time; the mirror's real access
   pattern (a crawler writing while a converter reads) was not exercised.
 
@@ -221,7 +372,12 @@ For the temporary page store, use **SQLite with per-row zstd on the two body col
 (level 3 measured; the level is a tuning knob). It costs about twice the disk of DuckDB
 (1.0 GB against 0.56 GB for 4.4 GB of raw bodies) and in return keeps every query shape
 under 92 MiB and serves single-row writes and point lookups at SQLite speed, which is
-the access pattern a crawl has. A later decision record can cite these numbers directly.
+the access pattern a crawl has. The insert measurements leave that in place and add WAL
+mode: SQLite with per-row zstd under `journal_mode=WAL` and `synchronous=NORMAL` takes
+6,000 single-row inserts a second on typical pages (200 MiB/s) at under 180 MiB of RSS,
+as fast as batching, while DuckDB written a row at a time is five times slower and loses
+the disk advantage that was its case (0.57 of raw against 0.23). A later decision record
+can cite these numbers directly.
 
 Two follow-ups are worth measuring if disk becomes the constraint:
 
