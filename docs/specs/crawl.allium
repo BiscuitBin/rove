@@ -1742,8 +1742,17 @@ rule AttemptTier {
         -- now: a render's subrequest goes only to an origin of an allowed
         -- host, after that origin's robots.txt is read (RobotsRequested, as
         -- for a hop) and allows it, under that host's limiter; it is never
-        -- retried, and its Retry-After pauses the host (later_of, at most
-        -- retry_after_cap), never retiring it. Any other subrequest is
+        -- retried, and its Retry-After pauses the host that answered it
+        -- (later_of, at most retry_after_cap), never retiring it. Decided:
+        -- as for a page's answer (FetchAttempt.answering_host_name), the
+        -- host that answered is the host of the subrequest's last request,
+        -- so a subrequest sent to one allowed host and redirected to
+        -- another pauses the second, under that host's request policy
+        -- (Host.policy: whether it honours Retry-After, and its cap), never
+        -- the first; when that host is not open, the host the subrequest
+        -- was sent to stands in, as for a discovery fetch (FetchRobots). A
+        -- subrequest only ever pauses a host; it never retires one and
+        -- never feeds a breaker. Any other subrequest is
         -- refused unrequested (an open question below). Decided: a
         -- render's navigation answer is an http answer's equal for
         -- Retry-After: it pauses the host (PauseHostOnRenderRetryAfter), is
