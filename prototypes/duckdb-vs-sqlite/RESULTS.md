@@ -1,9 +1,9 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06 and 2026-11-07 with the five commands below, on an Apple M5 Pro (18 cores, 64 GB)
+Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the seven commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
-3.53.1 as bundled with that Python. Every number on this page comes from one run of the
-five commands below, except the tracer-bullet figures named in the first caveat and the
+3.53.1 as bundled with that Python, plus fastavro 1.13.1 and avro 1.12.2 for the Avro
+section. Every number on this page comes from one run of the seven commands below, except the tracer-bullet figures named in the first caveat and the
 block counts of the DuckDB probe named in the insert section:
 
 ```sh
@@ -12,11 +12,14 @@ uv run prototypes/duckdb-vs-sqlite/load_stores.py --per-regime
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only avro
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd,sqlite-zstd-wal,duckdb-zstd --suffix avro
 ```
 
-The raw output of the last four commands is kept beside the data, under
+The raw output of the last six commands is kept beside the data, under
 `ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`,
-`formats.json` and the `formats-explain/` files), which is gitignored.
+`formats.json`, `formats-avro.json`, `inserts-avro.json` and the `formats-explain/`
+files), which is gitignored.
 
 ## The question
 
@@ -444,6 +447,204 @@ What the tables say:
   numbers, and a streaming writer would need less; the bulk-ingestion caveat below
   still applies.
 
+## Apache Avro
+
+Six Avro container files, measured on every axis above, with `parquet-zstd`,
+`sqlite-zstd-dict` and `duckdb-zstd` re-measured in the same run. An Avro file is a
+header and a run of blocks; each block carries its record count, its byte size and a
+16-byte sync marker, so a reader can skip a block without decoding it, but there are no
+statistics or index to find a row. Each store therefore has a sidecar SQLite file,
+`pages.index.sqlite`, mapping identity to (block offset, position in block), built in
+one pass over the blocks after the write; it is the stand-in for an index, as sorting
+and splitting were for Vortex, it is a file the format does not define, and its 22 MiB
+and 2 to 4 s are in each row's size and write cost.
+
+- `avro-duckdb` is written by DuckDB's `avro` core extension, `COPY ... TO 'pages.avro'
+  (FORMAT avro, CODEC 'deflate')`, from `stores/duckdb-zstd`. The writer has no block
+  size option and writes one block per DuckDB chunk, about 2,048 rows.
+- `avro-deflate`, `avro-deflate-1m`, `avro-zstd` and `avro-zstd-1m` are written by
+  fastavro from `stores/sqlite-raw` in rowid order: deflate at its default level or
+  zstandard at level 3, with fastavro's default `sync_interval` of 16,000 bytes (a block
+  is flushed once that many bytes are buffered, so about two pages a block here) or
+  1 MiB (about 35 pages).
+- `avro-deflate-pyavro` is written by the official `avro` package, deflate, at its
+  default sync interval of 64,000 bytes.
+
+The schema is one record per page, the eleven columns of every store, `raw_digest` and
+`html` as `["null", "string"]` unions (the only columns the corpus leaves null), the two
+sizes as `long`. Each store is read three ways. Through DuckDB's `read_avro` at the
+default memory limit and under 512 MB: the extension decodes the whole file for every
+query (no projection or filter pushdown, one thread), so a DuckDB point lookup looks up
+only 5 of the 200 identities, every 40th, and is compared per item. Through fastavro: a
+point lookup reads the sidecar index, seeks to the block, decodes it and takes the record
+at its position (one `block_reader` serves every lookup; seeking under it works); the
+scan and the metadata select decode a projection of the file's own writer schema, since
+DuckDB names its record `root` and makes every field nullable and fastavro refuses a
+reader schema with a different record name.
+
+The research before the run said DuckDB's Avro reader, built on Avro C, would not read
+zstandard blocks. It does: this build of the extension (`345c3f4e82`) read every
+fastavro zstd file, and a by-hand probe on 20 rows showed its writer accepts
+`CODEC 'zstandard'` too. Snappy needs the `cramjam` package in fastavro and was not
+measured.
+
+| variant | files | allocated MiB | allocated / raw | write s | write peak RSS MiB | layout |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| avro-duckdb | 2 | 729 | 0.165 | 67.5 | 3,998 | DuckDB COPY deflate, writer's own blocks; 64 blocks, 2,045 rows and 11,237 KiB per block; index 130,880 rows, 22.6 MiB, 3.4 s |
+| avro-deflate | 2 | 823 | 0.186 | 48.3 | 343 | fastavro deflate level default, sync 16,000 B; 60,314 blocks, 2.2 rows and 13 KiB per block; index 130,880 rows, 22.4 MiB, 3.5 s |
+| avro-deflate-1m | 2 | 743 | 0.168 | 47.1 | 377 | fastavro deflate level default, sync 1,048,576 B; 3,724 blocks, 35.1 rows and 196 KiB per block; index 130,880 rows, 22.5 MiB, 3.2 s |
+| avro-zstd | 2 | 792 | 0.179 | 12.4 | 377 | fastavro zstandard level 3, sync 16,000 B; 60,314 blocks, 2.2 rows and 13 KiB per block; index 130,880 rows, 22.4 MiB, 2.9 s |
+| avro-zstd-1m | 2 | 567 | 0.128 | 11.0 | 383 | fastavro zstandard level 3, sync 1,048,576 B; 3,724 blocks, 35.1 rows and 148 KiB per block; index 130,880 rows, 22.5 MiB, 2.3 s |
+| avro-deflate-pyavro | 2 | 776 | 0.175 | 48.0 | 353 | official avro deflate, sync 64,000 B; 30,693 blocks, 4.3 rows and 25 KiB per block; index 130,880 rows, 22.4 MiB, 3.4 s |
+
+| variant | query | reader | peak RSS MiB | wall s | ms per item | items |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| avro-duckdb | point | DuckDB, 51.1 GiB | 5,931 | 4.849 | 969.79 | 5 |
+| avro-duckdb | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 702.2 MiB | | | |
+| avro-duckdb | point | fastavro | 3,088 | 8.423 | 42.12 | 200 |
+| avro-duckdb | scan | DuckDB, 51.1 GiB | 8,561 | 4.172 | 0.03 | 130,880 |
+| avro-duckdb | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 702.2 MiB | | | |
+| avro-duckdb | scan | fastavro | 2,257 | 3.362 | 0.03 | 130,880 |
+| avro-duckdb | meta | DuckDB, 51.1 GiB | 7,850 | 2.415 | 0.02 | 130,880 |
+| avro-duckdb | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 702.2 MiB | | | |
+| avro-duckdb | meta | fastavro | 2,161 | 3.000 | 0.02 | 130,880 |
+| avro-deflate | point | DuckDB, 51.1 GiB | 2,048 | 2.548 | 509.62 | 5 |
+| avro-deflate | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 789.1 MiB | | | |
+| avro-deflate | point | fastavro | 49 | 0.018 | 0.09 | 200 |
+| avro-deflate | scan | DuckDB, 51.1 GiB | 1,870 | 1.547 | 0.01 | 130,880 |
+| avro-deflate | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 789.1 MiB | | | |
+| avro-deflate | scan | fastavro | 169 | 3.563 | 0.03 | 130,880 |
+| avro-deflate | meta | DuckDB, 51.1 GiB | 1,972 | 0.944 | 0.01 | 130,880 |
+| avro-deflate | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 789.1 MiB | | | |
+| avro-deflate | meta | fastavro | 103 | 2.984 | 0.02 | 130,880 |
+| avro-deflate-1m | point | DuckDB, 51.1 GiB | 1,860 | 2.211 | 442.26 | 5 |
+| avro-deflate-1m | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 711.1 MiB | | | |
+| avro-deflate-1m | point | fastavro | 66 | 0.167 | 0.84 | 200 |
+| avro-deflate-1m | scan | DuckDB, 51.1 GiB | 2,074 | 1.390 | 0.01 | 130,880 |
+| avro-deflate-1m | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 711.1 MiB | | | |
+| avro-deflate-1m | scan | fastavro | 176 | 3.170 | 0.02 | 130,880 |
+| avro-deflate-1m | meta | DuckDB, 51.1 GiB | 1,878 | 0.526 | 0.00 | 130,880 |
+| avro-deflate-1m | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 711.1 MiB | | | |
+| avro-deflate-1m | meta | fastavro | 109 | 2.609 | 0.02 | 130,880 |
+| avro-zstd | point | DuckDB, 51.1 GiB | 2,039 | 1.681 | 336.26 | 5 |
+| avro-zstd | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 760.5 MiB | | | |
+| avro-zstd | point | fastavro | 50 | 0.017 | 0.08 | 200 |
+| avro-zstd | scan | DuckDB, 51.1 GiB | 1,816 | 1.416 | 0.01 | 130,880 |
+| avro-zstd | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 760.5 MiB | | | |
+| avro-zstd | scan | fastavro | 170 | 2.861 | 0.02 | 130,880 |
+| avro-zstd | meta | DuckDB, 51.1 GiB | 1,828 | 0.750 | 0.01 | 130,880 |
+| avro-zstd | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 760.5 MiB | | | |
+| avro-zstd | meta | fastavro | 110 | 2.289 | 0.02 | 130,880 |
+| avro-zstd-1m | point | DuckDB, 51.1 GiB | 1,607 | 1.294 | 258.80 | 5 |
+| avro-zstd-1m | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 538.5 MiB | | | |
+| avro-zstd-1m | point | fastavro | 70 | 0.148 | 0.74 | 200 |
+| avro-zstd-1m | scan | DuckDB, 51.1 GiB | 1,763 | 1.160 | 0.01 | 130,880 |
+| avro-zstd-1m | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 538.5 MiB | | | |
+| avro-zstd-1m | scan | fastavro | 180 | 2.433 | 0.02 | 130,880 |
+| avro-zstd-1m | meta | DuckDB, 51.1 GiB | 1,576 | 0.320 | 0.00 | 130,880 |
+| avro-zstd-1m | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 538.5 MiB | | | |
+| avro-zstd-1m | meta | fastavro | 117 | 1.877 | 0.01 | 130,880 |
+| avro-deflate-pyavro | point | DuckDB, 51.1 GiB | 1,893 | 2.378 | 475.65 | 5 |
+| avro-deflate-pyavro | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 738.6 MiB | | | |
+| avro-deflate-pyavro | point | fastavro | 49 | 0.025 | 0.12 | 200 |
+| avro-deflate-pyavro | scan | DuckDB, 51.1 GiB | 1,980 | 1.420 | 0.01 | 130,880 |
+| avro-deflate-pyavro | scan | DuckDB, 488.2 MiB | failed: could not allocate block of size 738.6 MiB | | | |
+| avro-deflate-pyavro | scan | fastavro | 174 | 3.391 | 0.03 | 130,880 |
+| avro-deflate-pyavro | meta | DuckDB, 51.1 GiB | 1,890 | 0.703 | 0.01 | 130,880 |
+| avro-deflate-pyavro | meta | DuckDB, 488.2 MiB | failed: could not allocate block of size 738.6 MiB | | | |
+| avro-deflate-pyavro | meta | fastavro | 103 | 2.835 | 0.02 | 130,880 |
+| parquet-zstd | point | DuckDB, 51.1 GiB | 1,392 | 22.197 | 110.98 | 200 |
+| parquet-zstd | point | DuckDB, 488.2 MiB | failed: could not allocate block of size 521.8 MiB | | | |
+| parquet-zstd | scan | DuckDB, 51.1 GiB | 791 | 1.056 | 0.01 | 130,880 |
+| parquet-zstd | scan | DuckDB, 488.2 MiB | 791 | 1.061 | 0.01 | 130,880 |
+| parquet-zstd | meta | DuckDB, 51.1 GiB | 135 | 0.101 | 0.00 | 130,880 |
+| parquet-zstd | meta | DuckDB, 488.2 MiB | 135 | 0.100 | 0.00 | 130,880 |
+| sqlite-zstd-dict | point | SQLite default | 47 | 0.009 | 0.05 | 200 |
+| sqlite-zstd-dict | scan | SQLite default | 66 | 1.111 | 0.01 | 130,880 |
+| sqlite-zstd-dict | meta | SQLite default | 46 | 0.175 | 0.00 | 130,880 |
+| duckdb-zstd | point | DuckDB, 51.1 GiB | 539 | 2.457 | 12.29 | 200 |
+| duckdb-zstd | point | DuckDB, 488.2 MiB | 540 | 2.447 | 12.23 | 200 |
+| duckdb-zstd | scan | DuckDB, 51.1 GiB | 627 | 0.993 | 0.01 | 130,880 |
+| duckdb-zstd | scan | DuckDB, 488.2 MiB | 628 | 0.982 | 0.01 | 130,880 |
+| duckdb-zstd | meta | DuckDB, 51.1 GiB | 98 | 0.083 | 0.00 | 130,880 |
+| duckdb-zstd | meta | DuckDB, 488.2 MiB | 98 | 0.081 | 0.00 | 130,880 |
+
+Insert throughput: `avro-zstd` appends to one file through fastavro (zstandard level 3,
+16,000-byte blocks), opening it `a+b` and writing, flushing and fsyncing once per row in
+`single` and once per 256 rows in `batch`, as the files store fsyncs its manifest; there
+is no compaction. Same samples and protocol as the insert section, with
+`sqlite-zstd-wal` and `duckdb-zstd` run beside it.
+
+| variant | mode | mix | scenario | rows | rows/s | raw MiB/s | insert s | compact s | peak RSS MiB | MiB before > after inserts > after compaction |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| avro-zstd | single | mixed | empty | 10,000 | 4,751 | 159.3 | 2.10 | 0.00 | 172 | 0 > 63 > 63 |
+| avro-zstd | single | mixed | populated | 10,000 | 5,142 | 172.4 | 1.94 | 0.00 | 201 | 289 > 353 > 353 |
+| avro-zstd | batch | mixed | empty | 10,000 | 7,481 | 250.8 | 1.34 | 0.00 | 378 | 0 > 59 > 59 |
+| avro-zstd | batch | mixed | populated | 10,000 | 7,446 | 249.6 | 1.34 | 0.00 | 397 | 289 > 353 > 353 |
+| avro-zstd | single | commoncrawl | empty | 9,999 | 1,462 | 247.0 | 6.84 | 0.00 | 419 | 0 > 305 > 305 |
+| avro-zstd | single | commoncrawl | populated | 9,999 | 1,478 | 249.7 | 6.77 | 0.00 | 392 | 192 > 496 > 496 |
+| avro-zstd | batch | commoncrawl | empty | 9,999 | 1,582 | 267.3 | 6.32 | 0.00 | 591 | 0 > 304 > 304 |
+| avro-zstd | batch | commoncrawl | populated | 9,999 | 1,642 | 277.4 | 6.09 | 0.00 | 587 | 192 > 496 > 496 |
+| sqlite-zstd-wal | single | mixed | empty | 10,000 | 6,256 | 209.7 | 1.60 | 0.25 | 180 | 0 > 86 > 81 |
+| sqlite-zstd-wal | single | mixed | populated | 10,000 | 6,400 | 214.6 | 1.56 | 1.73 | 174 | 390 > 475 > 468 |
+| sqlite-zstd-wal | batch | mixed | empty | 10,000 | 6,716 | 225.2 | 1.49 | 0.20 | 393 | 0 > 90 > 80 |
+| sqlite-zstd-wal | batch | mixed | populated | 10,000 | 6,845 | 229.5 | 1.46 | 1.60 | 393 | 390 > 480 > 468 |
+| sqlite-zstd-wal | single | commoncrawl | empty | 9,999 | 1,490 | 251.8 | 6.71 | 0.88 | 413 | 0 > 343 > 337 |
+| sqlite-zstd-wal | single | commoncrawl | populated | 9,999 | 1,458 | 246.4 | 6.86 | 1.98 | 417 | 287 > 630 > 623 |
+| sqlite-zstd-wal | batch | commoncrawl | empty | 9,999 | 1,486 | 251.1 | 6.73 | 0.89 | 600 | 0 > 350 > 337 |
+| sqlite-zstd-wal | batch | commoncrawl | populated | 9,999 | 1,495 | 252.7 | 6.69 | 1.86 | 603 | 287 > 636 > 623 |
+| duckdb-zstd | single | mixed | empty | 10,000 | 1,090 | 36.5 | 9.18 | 1.01 | 595 | 0 > 140 > 191 |
+| duckdb-zstd | single | mixed | populated | 10,000 | 1,068 | 35.8 | 9.36 | 0.05 | 467 | 871 > 884 > 871 |
+| duckdb-zstd | batch | mixed | empty | 10,000 | 2,141 | 71.8 | 4.67 | 1.03 | 742 | 0 > 124 > 192 |
+| duckdb-zstd | batch | mixed | populated | 10,000 | 2,012 | 67.5 | 4.97 | 0.54 | 642 | 871 > 883 > 871 |
+| duckdb-zstd | single | commoncrawl | empty | 9,999 | 208 | 35.2 | 48.02 | 1.20 | 1,925 | 0 > 675 > 674 |
+| duckdb-zstd | single | commoncrawl | populated | 9,999 | 205 | 34.7 | 48.68 | 0.41 | 2,225 | 559 > 1,148 > 1,147 |
+| duckdb-zstd | batch | commoncrawl | empty | 9,999 | 459 | 77.6 | 21.77 | 0.00 | 1,751 | 0 > 521 > 521 |
+| duckdb-zstd | batch | commoncrawl | populated | 9,999 | 380 | 64.2 | 26.30 | 0.03 | 2,376 | 559 > 1,161 > 1,161 |
+
+What the tables say:
+
+- **Zstd with 1 MiB blocks is the only Avro store on DuckDB's disk figure.**
+  `avro-zstd-1m` is 0.128 of raw, index included (567 MiB against 549 for `parquet-zstd`,
+  560 for `duckdb-zstd` and 764 for `sqlite-zstd-dict`). The block size matters more than
+  the codec: at about two pages a block zstd is 0.179 and deflate 0.186, worse than the
+  dictionary SQLite store; at 1 MiB zstd drops to 0.128 and deflate only to 0.168, since
+  deflate's 32 KB window cannot reach across pages as zstd's can. DuckDB's writer, with
+  11 MB blocks, is 0.165, held back by deflate. Zstd also writes four times faster than
+  deflate (11 to 12 s against 47 to 48 s from the same Python loop at under 400 MiB); the
+  official package is no slower than fastavro with deflate (48.0 s against 48.3 s), so
+  the codec, not the writer, is the cost. DuckDB's write took 68 s at 4.0 GB of RSS.
+- **DuckDB reads Avro whole, and never under 512 MB.** Every one of the 18 cells under
+  the limit failed at the first allocation, a block the size of the file ("could not
+  allocate block of size 539 to 789 MiB"). At the default limit a point lookup costs
+  259 to 970 ms per identity, two to nine times a `parquet-zstd` lookup, at 1.6 to
+  5.9 GB of RSS; scans and the metadata select take 0.3 to 4.2 s at 1.6 to 8.6 GB, where
+  `duckdb-zstd` scans in 1.0 s at 627 MiB. The plans show one `READ_AVRO` scan of every
+  row with the filter above it. `avro-duckdb` is the worst of the six through DuckDB
+  (970 ms, 5.9 GB per lookup; 8.6 GB on the scan), because its blocks are 11 MB.
+- **Through fastavro and the sidecar index, a lookup costs one block.** At about two
+  pages a block a lookup takes 0.08 to 0.12 ms at 49 to 50 MiB, about twice SQLite's
+  0.05 ms at 47 MiB; at 35 pages a block it takes 0.74 to 0.84 ms at 66 to
+  70 MiB, and on DuckDB's 2,045-row blocks 42 ms at 3.1 GB. The fastavro scan takes
+  2.4 to 3.6 s at 169 to 180 MiB, two to three times SQLite's 1.1 s, and the metadata
+  select 1.9 to 3.0 s at 103 to 117 MiB, eleven to seventeen times SQLite's 0.18 s: a
+  projection only skips the dropped fields after each block is decompressed, so the
+  metadata select still inflates every HTML body.
+- **Appending to Avro is as fast as SQLite in WAL mode, but the blocks are what the
+  writes make them.** Single-row appends with an fsync each ran at 4,751 to 5,142 rows/s
+  on mixed rows (6,256 to 6,400 for `sqlite-zstd-wal`, 1,068 to 1,090 for `duckdb-zstd`)
+  and 1,462 to 1,478 on Common Crawl rows (1,458 to 1,490 and 205 to 208); in batches
+  of 256 Avro is the fastest of the three (7,446 to 7,481 rows/s on mixed rows). But a
+  row appended on its own is a block on its own: 10,000 mixed rows took 63 MiB, 0.19 of
+  the 335 MiB inserted, against 81 MiB (0.24) for `sqlite-zstd-wal`, nowhere near the
+  0.128 of the 1 MiB file, which needs about 35 pages buffered before each write.
+
+Avro adds no update or delete. A page fetched again is appended and the index repointed,
+so the old version stays in the file until the whole file is rewritten, and the index is
+a second file whose consistency with the first after a crash is the application's
+problem. The sidecar index was built after the writes, never kept up to date by the
+insert runs.
+
 ## Verdict
 
 **On disk, yes. In memory while querying, no.**
@@ -507,6 +708,12 @@ of them in under 92 MiB (raw SQLite in under 139 MiB).
   RSS doing so, while SQLite was fed in batches of 256 rows from Python. Bulk ingestion
   memory is a separate question from the one asked here; row-at-a-time ingestion is the
   insert section.
+- **The Avro index is a sidecar and DuckDB's Avro lookups are a sample.** The format
+  defines no index; the sidecar SQLite file is this prototype's, and a different design
+  (an index block appended to the file, a footer) would change the numbers. DuckDB point
+  lookups on Avro ran 5 identities, not 200, because each reads the whole file; compare
+  them per item. The DuckDB extension's zstd support was established on this build only
+  (`345c3f4e82`), from the files written here and a by-hand 20-row probe of its writer.
 - **No concurrency.** One writer and no readers at a time; the mirror's real access
   pattern (a crawler writing while a converter reads) was not exercised.
 - **The columnar files were written from the DuckDB store and read with literals.**
@@ -535,7 +742,10 @@ not change the choice: Parquet matches DuckDB's disk but a point lookup reads a 
 column chunk (116 ms and 1.4 GB, failing under 512 MB), Vortex is three and a half
 times Parquet on disk, and Lance with a BTREE index is the best lookup DuckDB can offer
 (1.1 ms at 123 MiB) at 0.21 of raw, still twenty times SQLite's time and three times its
-memory. What does move is the SQLite store itself: a zstd dictionary trained per regime
+memory. Avro read through DuckDB is worse than all of them (a whole-file read per lookup,
+failing under 512 MB); read through fastavro with a sidecar index it looks up in under a
+millisecond and, in 1 MiB zstd blocks, matches DuckDB's disk, but only as an append-only
+log whose blocks must be batched to stay small. What does move is the SQLite store itself: a zstd dictionary trained per regime
 and column takes it from 0.232 to 0.173 of raw at no measurable query cost, so the
 recommended store is **SQLite with per-row zstd against a per-host (here per-regime)
 dictionary, in WAL mode**. A later decision record can cite these numbers directly.
@@ -545,6 +755,11 @@ Two follow-ups are worth measuring if disk becomes the constraint:
 - The dictionary's scope and size: one per regime and column at 128 KiB was measured;
   per host, per crawl, larger, or retrained as a host's chrome changes were not, and the
   gain on Sphinx-like chrome should be larger than the corpus average.
+- Avro with zstd in 1 MiB blocks and a sidecar index (0.128 of raw, 0.74 ms lookups at
+  70 MiB through fastavro, never through DuckDB) as an append-only log, if pages were
+  buffered into blocks of about 35 before each append and old versions reclaimed by a
+  rewrite. That is a log-structured store built by hand, with its crash consistency to
+  prove, and the dictionary SQLite store gets within 0.05 of its disk without one.
 - Parquet with zstd as an append-once archive of raw HTML written in bulk after a run
   and read by scans, where its compression (0.124 of raw, the same as DuckDB's) is the
   whole point and its lookup cost does not apply. That is a different store from the

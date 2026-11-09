@@ -1,11 +1,13 @@
 # /// script
 # requires-python = ">=3.14,<3.15"
 # dependencies = [
+#   "avro==1.12.2",
 #   "duckdb==2.0.0",
+#   "fastavro==1.13.1",
 #   "zstandard==0.25.0",
 # ]
 # ///
-"""PROTOTYPE, throwaway: columnar file formats through DuckDB, and a dictionary-zstd SQLite.
+"""PROTOTYPE, throwaway: file formats through DuckDB, Apache Avro, a dictionary-zstd SQLite.
 
 Builds, from the stores `load_stores.py` made, nine more: Parquet (zstd level 3; default
 row groups; 2,048-row groups with bloom filters on `identity`; the same sorted by
@@ -17,8 +19,17 @@ three read shapes of `bench_queries.py` (point lookup, Markdown scan, metadata s
 then run on every new store and on the `sqlite-zstd` and `duckdb-zstd` references, each
 in a fresh child, twice, keeping the second (warm cache); DuckDB-read stores run at the
 default memory limit and under 512 MB. One `EXPLAIN ANALYZE` of a point lookup per
-DuckDB-read store is saved beside the results. The vortex and lance extensions are
+DuckDB-read store is saved beside the results. The vortex, lance and avro extensions are
 installed into `ai_tmp/duckdb-vs-sqlite/extensions/` (network, once).
+
+Six Apache Avro container files join them: one written by DuckDB's `COPY ... (FORMAT
+avro)`, four by fastavro (deflate and zstd level 3, each with 16,000-byte and 1 MiB
+blocks) and one by the official `avro` package. Each gets a sidecar SQLite index from
+identity to (block offset, position in block), built in one pass over the block headers
+after the write. Avro stores are read three ways: through DuckDB's `read_avro` at both
+limits (a point lookup there reads the whole file, so only every 40th identity is looked
+up) and through fastavro, seeking to the indexed block for a lookup. `--only avro`
+builds and measures one family against three references and saves `formats-avro.json`.
 """
 
 from __future__ import annotations
@@ -31,16 +42,19 @@ import sqlite3
 import subprocess
 import sys
 import time
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import duckdb
+import fastavro
 import zstandard
 from bench_queries import DUCKDB_LIMIT, FETCH_MANY, META_SQL, POINT_LOOKUPS, digest, store_bytes
 from load_stores import COLUMNS, META_COLUMNS, RESULTS, SCRATCH, STORES, ZSTD_LEVEL, sqlite_schema
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from typing import BinaryIO
 
 DUCKDB_SOURCE = STORES / "duckdb-zstd" / "pages.duckdb"
 SQLITE_SOURCE = STORES / "sqlite-raw" / "pages.sqlite"
@@ -58,8 +72,15 @@ NEW_VARIANTS = [
     "lance",
     "lance-btree",
     "sqlite-zstd-dict",
+    "avro-duckdb",
+    "avro-deflate",
+    "avro-deflate-1m",
+    "avro-zstd",
+    "avro-zstd-1m",
+    "avro-deflate-pyavro",
 ]
 REFERENCES = ["sqlite-zstd", "duckdb-zstd"]
+ONLY_REFERENCES = ["parquet-zstd", "sqlite-zstd-dict", "duckdb-zstd"]
 QUERIES = ["point", "scan", "meta"]
 BUCKETS = 64
 ROW_GROUP = 2048
@@ -70,10 +91,30 @@ PARQUET = "FORMAT parquet, COMPRESSION zstd, COMPRESSION_LEVEL 3"
 PARQUET_SMALL = f"{PARQUET}, ROW_GROUP_SIZE {ROW_GROUP}, DICTIONARY_SIZE_LIMIT {ROW_GROUP}"
 COLUMN_LIST = ", ".join(COLUMNS)
 BODY_COLUMNS = {"html", "markdown"}
+FASTAVRO = "fastavro"
+AVRO_LOOKUPS = 5
+AVRO_SYNC = 16000
+AVRO_BLOCK_1M = 1 << 20
+NULLABLE_COLUMNS = {"raw_digest", "html"}
+
+
+def avro_type(column: str) -> str | list[str]:
+    """The Avro type of a column: long for the sizes, a null union where the corpus has nulls."""
+    if column.endswith("_bytes"):
+        return "long"
+    return ["null", "string"] if column in NULLABLE_COLUMNS else "string"
+
+
+AVRO_SCHEMA = {
+    "type": "record",
+    "name": "page",
+    "fields": [{"name": c, "type": avro_type(c)} for c in COLUMNS],
+}
+AVRO_PARSED = fastavro.parse_schema(AVRO_SCHEMA)
 
 
 def family(variant: str) -> str:
-    """The format family of a variant: parquet, vortex, lance, sqlite or duckdb."""
+    """The format family of a variant: parquet, vortex, lance, avro, sqlite or duckdb."""
     return variant.split("-", maxsplit=1)[0]
 
 
@@ -92,6 +133,8 @@ def source_sql(variant: str, target: Path) -> str:
         return f"read_vortex('{target / 'pages.vortex'}')"
     if family(variant) == "lance":
         return f"'{target / 'pages.lance'}'"
+    if family(variant) == "avro":
+        return f"read_avro('{target / 'pages.avro'}')"
     return "pages"
 
 
@@ -100,7 +143,7 @@ def connect(variant: str, target: Path, setting: str = "default") -> duckdb.Duck
     database = str(target / "pages.duckdb") if variant == "duckdb-zstd" else ":memory:"
     connection = duckdb.connect(database)
     connection.execute(f"SET extension_directory = '{EXTENSIONS}'")
-    if family(variant) in {"vortex", "lance"}:
+    if family(variant) in {"vortex", "lance", "avro"}:
         connection.execute(f"LOAD {family(variant)}")
     if setting != "default":
         connection.execute(f"SET memory_limit = '{setting}'")
@@ -254,10 +297,106 @@ def build_sqlite_dict(variant: str, target: Path, rows: int | None) -> str:
     )
 
 
+def avro_rows(rows: int | None) -> Iterator[dict[str, Any]]:
+    """Stream sqlite-raw in rowid order, or its first `rows` rows, one page dict at a time."""
+    source = sqlite3.connect(f"file:{SQLITE_SOURCE}?mode=ro", uri=True)
+    limit = f" LIMIT {rows}" if rows else ""
+    try:
+        for row in source.execute(f"SELECT {COLUMN_LIST} FROM pages ORDER BY rowid{limit}"):  # noqa: S608  fixed column names
+            yield dict(zip(COLUMNS, row, strict=True))
+    finally:
+        source.close()
+
+
+def write_fastavro(variant: str, path: Path, rows: int | None) -> str:
+    """fastavro, deflate at its default level or zstd level 3, 16,000-byte or 1 MiB blocks."""
+    codec = "zstandard" if "zstd" in variant else "deflate"
+    level = ZSTD_LEVEL if codec == "zstandard" else None
+    sync = AVRO_BLOCK_1M if variant.endswith("-1m") else AVRO_SYNC
+    with path.open("wb") as out:
+        fastavro.writer(
+            out,
+            AVRO_PARSED,
+            avro_rows(rows),
+            codec=codec,
+            codec_compression_level=level,
+            sync_interval=sync,
+        )
+    return f"fastavro {codec} level {level or 'default'}, sync {sync} B"
+
+
+def write_pyavro(path: Path, rows: int | None) -> str:
+    """The official avro package, deflate, its default sync interval."""
+    import avro.datafile  # noqa: PLC0415  only this builder needs the package
+    import avro.io  # noqa: PLC0415  only this builder needs the package
+    import avro.schema  # noqa: PLC0415  only this builder needs the package
+
+    schema = avro.schema.parse(json.dumps(AVRO_SCHEMA))
+    writer = avro.datafile.DataFileWriter(
+        path.open("wb"), avro.io.DatumWriter(), schema, codec="deflate"
+    )
+    for record in avro_rows(rows):
+        writer.append(record)
+    writer.close()
+    return f"official avro deflate, sync {avro.datafile.SYNC_INTERVAL} B"
+
+
+def write_duckdb_avro(variant: str, path: Path, rows: int | None) -> str:
+    """DuckDB's COPY to Avro, deflate; the writer sets its own block size."""
+    connection = connect(variant, path.parent)
+    attach_source(connection, rows)
+    connection.execute(
+        f"COPY (SELECT * FROM pages) TO '{path}' (FORMAT avro, CODEC 'deflate')"  # noqa: S608  fixed path
+    )
+    connection.close()
+    return "DuckDB COPY deflate, writer's own blocks"
+
+
+def build_avro_index(target: Path) -> str:
+    """The sidecar index: identity to (block offset, position in block), one pass."""
+    started = time.perf_counter()
+    index = sqlite3.connect(target / "pages.index.sqlite")
+    index.execute(
+        "CREATE TABLE lookup (identity TEXT PRIMARY KEY, block_offset INTEGER, position INTEGER)"
+    )
+    blocks = records = block_bytes = 0
+    with (target / "pages.avro").open("rb") as source:
+        for block in fastavro.block_reader(source):
+            blocks += 1
+            records += block.num_records
+            block_bytes += block.size
+            index.executemany(
+                "INSERT INTO lookup VALUES (?, ?, ?)",
+                [(r["identity"], block.offset, n) for n, r in enumerate(block)],
+            )
+    index.commit()
+    index.close()
+    took = time.perf_counter() - started
+    mib = (target / "pages.index.sqlite").stat().st_size / 2**20
+    return (
+        f"{blocks} blocks, {records / max(blocks, 1):.1f} rows and"
+        f" {block_bytes / max(blocks, 1) / 1024:.0f} KiB per block;"
+        f" index {records} rows, {mib:.1f} MiB, {took:.1f} s"
+    )
+
+
+def build_avro(variant: str, target: Path, rows: int | None) -> str:
+    """One Avro container file, written by DuckDB, fastavro or the official package; its index."""
+    path = target / "pages.avro"
+    if variant == "avro-duckdb":
+        written = write_duckdb_avro(variant, path, rows)
+    elif variant.endswith("-pyavro"):
+        written = write_pyavro(path, rows)
+    else:
+        written = write_fastavro(variant, path, rows)
+    return f"{written}; {build_avro_index(target)}"
+
+
 BUILDERS: dict[str, Callable[[str, Path, int | None], str]] = {
     "parquet": build_parquet,
     "vortex": build_vortex,
     "lance": build_lance,
+    "avro": build_avro,
     "sqlite": build_sqlite_dict,
 }
 
@@ -283,7 +422,10 @@ def duckdb_query(variant: str, query: str, setting: str, target: Path) -> dict[s
     threads = connection.execute("SELECT current_setting('threads')").fetchone()
     items = 0
     if query == "point":
-        for identity in json.loads(IDS_FILE.read_text()):
+        identities = json.loads(IDS_FILE.read_text())
+        if family(variant) == "avro":
+            identities = identities[:: len(identities) // AVRO_LOOKUPS][:AVRO_LOOKUPS]
+        for identity in identities:
             row = connection.execute(
                 f"SELECT html, markdown FROM {source} WHERE identity = {literal(identity)}"  # noqa: S608  fixed column names
             ).fetchone()
@@ -345,10 +487,68 @@ def sqlite_query(variant: str, query: str, target: Path) -> dict[str, Any]:
     return {"items": items, "memory_limit": None, "threads": None}
 
 
+def projection(source: BinaryIO, columns: list[str]) -> dict[str, Any]:
+    """A reader schema of `columns` derived from the file's own writer schema.
+
+    DuckDB writes a record named `root` with every field a null union, and fastavro
+    refuses a reader schema whose record name differs, so the projection keeps the
+    writer's name and field types and drops the other fields.
+    """
+    writer: dict[str, Any] = fastavro.reader(source).writer_schema
+    source.seek(0)
+    return {**writer, "fields": [f for f in writer["fields"] if f["name"] in columns]}
+
+
+def avro_point(source: BinaryIO, target: Path) -> int:
+    """Look each identity up in the sidecar index, seek to its block, decode that block."""
+    index = sqlite3.connect(f"file:{target / 'pages.index.sqlite'}?mode=ro", uri=True)
+    blocks = fastavro.block_reader(source)
+    items = 0
+    for identity in json.loads(IDS_FILE.read_text()):
+        found = index.execute(
+            "SELECT block_offset, position FROM lookup WHERE identity = ?", (identity,)
+        ).fetchone()
+        if found is None:
+            continue
+        source.seek(found[0])
+        record = next(islice(next(blocks), found[1], None))
+        digest(record["html"] or "")
+        digest(record["markdown"])
+        items += 1
+    index.close()
+    return items
+
+
+def avro_query(query: str, target: Path) -> dict[str, Any]:
+    """The three read shapes through fastavro; scan and meta decode a projection."""
+    items = 0
+    with (target / "pages.avro").open("rb") as source:
+        if query == "point":
+            items = avro_point(source, target)
+        else:
+            columns = ["markdown"] if query == "scan" else META_COLUMNS
+            for record in fastavro.reader(source, reader_schema=projection(source, columns)):
+                if query == "scan":
+                    digest(record["markdown"])
+                items += 1
+    return {"items": items, "memory_limit": FASTAVRO, "threads": None}
+
+
+def settings_of(variant: str) -> list[str]:
+    """The settings a variant is measured under: SQLite's own, DuckDB's two, fastavro."""
+    if family(variant) == "sqlite":
+        return ["default"]
+    if family(variant) == "avro":
+        return ["default", DUCKDB_LIMIT, FASTAVRO]
+    return ["default", DUCKDB_LIMIT]
+
+
 def query_child(variant: str, query: str, setting: str, target: Path) -> None:
     """Run one measurement and print its JSON line."""
     started = time.perf_counter()
-    if family(variant) == "sqlite":
+    if setting == FASTAVRO:
+        found = avro_query(query, target)
+    elif family(variant) == "sqlite":
         found = sqlite_query(variant, query, target)
     else:
         found = duckdb_query(variant, query, setting, target)
@@ -383,11 +583,11 @@ def explain_child(variant: str, target: Path) -> None:
 
 
 def install_extensions() -> None:
-    """Install vortex and lance into the scratch extension directory (network, once)."""
+    """Install vortex, lance and avro into the scratch extension directory (network, once)."""
     EXTENSIONS.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect()
     connection.execute(f"SET extension_directory = '{EXTENSIONS}'")
-    for name in ("vortex", "lance"):
+    for name in ("vortex", "lance", "avro"):
         (installed,) = connection.execute(
             "SELECT installed FROM duckdb_extensions() WHERE extension_name = ?", [name]
         ).fetchone() or (False,)
@@ -470,7 +670,7 @@ def measure(variant: str, query: str, setting: str) -> dict[str, Any]:
 
 def print_tables(sizes: list[dict[str, Any]], queries: list[dict[str, Any]]) -> None:
     """The size table and the query table, Markdown."""
-    print("\nColumnar formats and the dictionary store: size and write cost\n")
+    print("\nFile formats and the dictionary store: size and write cost\n")
     print(
         "| variant | files | allocated MiB | allocated/raw | write s | write peak RSS MiB | note |"
     )
@@ -496,36 +696,56 @@ def print_tables(sizes: list[dict[str, Any]], queries: list[dict[str, Any]]) -> 
         )
 
 
+def child(argv: list[str]) -> None:
+    """Child: one build, one measurement or one explain."""
+    kind, variant, *rest = argv
+    if kind == "build":
+        build_child(variant, Path(rest[0]), int(rest[1]) or None)
+    elif kind == "query":
+        query_child(variant, rest[0], rest[1], Path(rest[2]))
+    else:
+        explain_child(variant, Path(rest[0]))
+
+
 def main() -> None:
     """Parent: install, prepare, build, measure, explain, print the tables, save the JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--child", nargs="+", metavar="ARG")
     parser.add_argument("--rows", type=int, help="build from the first N rows only (smoke)")
+    parser.add_argument(
+        "--only",
+        choices=sorted({family(v) for v in NEW_VARIANTS}),
+        help="build and measure one family against parquet-zstd, sqlite-zstd-dict, duckdb-zstd",
+    )
     args = parser.parse_args()
     if args.child:
-        kind, variant, *rest = args.child
-        if kind == "build":
-            build_child(variant, Path(rest[0]), int(rest[1]) or None)
-        elif kind == "query":
-            query_child(variant, rest[0], rest[1], Path(rest[2]))
-        else:
-            explain_child(variant, Path(rest[0]))
+        child(args.child)
         return
     for needed in (DUCKDB_SOURCE, SQLITE_SOURCE, STORES / "sqlite-zstd" / "pages.sqlite"):
         if not needed.exists():
             sys.exit(f"no store at {needed}; run load_stores.py first")
+    built = [v for v in NEW_VARIANTS if args.only in {None, family(v)}]
+    references = REFERENCES
+    if args.only:
+        references = [v for v in ONLY_REFERENCES if v not in built]
+        for variant in references:
+            if not target_of(variant).exists():
+                sys.exit(f"no {variant} store; run bench_formats.py without --only first")
     install_extensions()
     raw = prepare(args.rows)
     FORMATS.mkdir(parents=True, exist_ok=True)
-    sizes = [build(variant, args.rows, raw) for variant in NEW_VARIANTS]
+    sizes = [build(variant, args.rows, raw) for variant in built]
     queries = []
-    for variant in NEW_VARIANTS + REFERENCES:
-        settings = ["default"] if family(variant) == "sqlite" else ["default", DUCKDB_LIMIT]
-        queries += [measure(variant, query, setting) for query in QUERIES for setting in settings]
+    for variant in built + references:
+        queries += [
+            measure(variant, query, setting)
+            for query in QUERIES
+            for setting in settings_of(variant)
+        ]
         if family(variant) != "sqlite":
             run_child(["explain", variant, str(target_of(variant))])
     print_tables(sizes, queries)
-    suffix = f"-{args.rows}" if args.rows else ""
+    suffix = (f"-{args.only}" if args.only else "") + (f"-{args.rows}" if args.rows else "")
     out = RESULTS / f"formats{suffix}.json"
     out.write_text(
         json.dumps({"raw_bytes": raw, "sizes": sizes, "queries": queries}, indent=2) + "\n"

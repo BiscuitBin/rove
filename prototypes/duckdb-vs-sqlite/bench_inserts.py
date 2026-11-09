@@ -2,10 +2,11 @@
 # requires-python = ">=3.14,<3.15"
 # dependencies = [
 #   "duckdb==2.0.0",
+#   "fastavro==1.13.1",
 #   "zstandard==0.25.0",
 # ]
 # ///
-"""PROTOTYPE, throwaway: insert throughput of seven store variants, from empty and populated.
+"""PROTOTYPE, throwaway: insert throughput of eight store variants, from empty and populated.
 
 Two insert modes (`single`: one transaction per row, the crawler's pattern; `batch`: 256
 rows per transaction), two row mixes (`mixed`: a stride sample over the whole corpus;
@@ -18,6 +19,11 @@ after `VACUUM` or `CHECKPOINT`. The populated base is built once per (variant, m
 `batch` inserter and cloned per run with `cp -Rc` (APFS clonefile, macOS only), so each
 run starts from the same bytes. The row samples are streamed from JSON-lines files the
 parent writes once under `ai_tmp/duckdb-vs-sqlite/results/`.
+
+The eighth variant, `avro-zstd`, appends to one Avro container file through fastavro
+(zstd level 3): `single` opens the file, appends one record and fsyncs, per row, as the
+files store fsyncs its manifest; `batch` does the same per BATCH rows. `--variants`
+restricts the run and `--suffix` names the results file.
 """
 
 from __future__ import annotations
@@ -35,7 +41,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import duckdb
+import fastavro
 import zstandard
+from bench_formats import AVRO_PARSED
 from load_stores import (
     COLUMNS,
     CORPUS,
@@ -59,6 +67,7 @@ VARIANTS = [
     "sqlite-zstd-wal",
     "duckdb-default",
     "duckdb-zstd",
+    "avro-zstd",
 ]
 MODES = ["single", "batch"]
 MIXES = ["mixed", "commoncrawl"]
@@ -302,10 +311,63 @@ class DuckdbInserter(Inserter):
         self.connection.close()
 
 
+class AvroInserter(Inserter):
+    """One Avro container file appended to through fastavro, zstd level 3, fsync per write.
+
+    Records are the page dicts themselves: the bodies stay strings and the codec
+    compresses each block, so the per-row compressor of the base class is not used.
+    There is no compaction.
+    """
+
+    def __init__(self, variant: str, target: Path) -> None:
+        """Remember the variant and the file; no per-row compressor."""
+        super().__init__(variant, target)
+        self.compressor = None
+        self.path = target / "pages.avro"
+
+    def open(self) -> None:
+        """Create the directory; the first write creates the file."""
+        self.target.mkdir(parents=True, exist_ok=True)
+        self.info = {"codec": "zstandard", "level": ZSTD_LEVEL}
+
+    def count(self) -> int:
+        """Records summed over the block headers; 0 before the first write."""
+        if not self.path.exists():
+            return 0
+        with self.path.open("rb") as source:
+            return sum(block.num_records for block in fastavro.block_reader(source))
+
+    def write(self, pages: list[dict[str, Any]]) -> None:
+        """Open, append the pages as one or more blocks, flush and fsync, close."""
+        mode = "a+b" if self.path.exists() else "wb"
+        with self.path.open(mode) as out:
+            fastavro.writer(
+                out, AVRO_PARSED, pages, codec="zstandard", codec_compression_level=ZSTD_LEVEL
+            )
+            out.flush()
+            os.fsync(out.fileno())
+
+    def insert_single(self, source: Path) -> None:
+        """One append and fsync per row."""
+        for page in stream(source):
+            self.write([page])
+
+    def insert_batch(self, source: Path) -> None:
+        """One append and fsync per BATCH rows."""
+        for batch in batches(source):
+            self.write(batch)
+
+    def compact(self) -> None:
+        """Nothing to compact."""
+        self.info["compaction"] = "none"
+
+
 def inserter(variant: str, target: Path) -> Inserter:
     """The inserter class for a variant name."""
     if variant == "files":
         return FilesInserter(variant, target)
+    if variant.startswith("avro"):
+        return AvroInserter(variant, target)
     if variant.startswith("sqlite"):
         return SqliteInserter(variant, target)
     return DuckdbInserter(variant, target)
@@ -537,6 +599,8 @@ def main() -> None:
     parser.add_argument("--child", nargs=4, metavar=("VARIANT", "MODE", "SOURCE", "TARGET"))
     parser.add_argument("--populate", type=int, default=POPULATE, help="rows in the base")
     parser.add_argument("--insert", type=int, default=INSERT, help="rows inserted per run")
+    parser.add_argument("--variants", help="comma-separated subset of the variants to run")
+    parser.add_argument("--suffix", help="name the results file inserts-SUFFIX.json")
     args = parser.parse_args()
     if args.child:
         variant, mode, source, target = args.child
@@ -544,12 +608,16 @@ def main() -> None:
         return
     if not CORPUS.exists():
         sys.exit(f"no corpus at {CORPUS}; run build_corpus.py first")
+    variants = args.variants.split(",") if args.variants else VARIANTS
+    if unknown := set(variants) - set(VARIANTS):
+        sys.exit(f"unknown variants {sorted(unknown)}; choose from {VARIANTS}")
     files = prepare(args.populate, args.insert)
     INSERTS_DIR.mkdir(parents=True, exist_ok=True)
-    results = [r for variant in VARIANTS for mix in MIXES for r in measure(variant, mix, files)]
+    results = [r for variant in variants for mix in MIXES for r in measure(variant, mix, files)]
     print_table(results)
     sizes = (args.populate, args.insert)
     suffix = "" if sizes == (POPULATE, INSERT) else f"-{args.populate}-{args.insert}"
+    suffix = f"-{args.suffix}" if args.suffix else suffix
     out = RESULTS / f"inserts{suffix}.json"
     out.write_text(json.dumps(results, indent=2) + "\n")
     print(f"\nsaved {out}")

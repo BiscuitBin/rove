@@ -31,6 +31,13 @@ zstd against a dictionary trained per regime and column. Parquet, Vortex and Lan
 written and read through DuckDB; the `vortex` and `lance` extensions are installed into
 `ai_tmp/duckdb-vs-sqlite/extensions/` on the first run.
 
+Six Apache Avro container files join them: one written by DuckDB's `avro` extension
+(deflate), four by fastavro (deflate and zstd level 3, each with 16,000-byte and 1 MiB
+blocks) and one by the official `avro` package (deflate). Each carries a sidecar SQLite
+index from identity to block offset, since Avro has none. They are read through DuckDB's
+`read_avro` and through fastavro, and the zstd fastavro store also joins the insert
+benchmark, appending to the file with an fsync per write.
+
 Four query shapes: point lookup by identity, a full scan of every Markdown body, a
 metadata-only select, and an upsert of one row at a time. Each measurement runs in a
 fresh subprocess and reports the child's own peak RSS and wall time. DuckDB queries run
@@ -71,16 +78,21 @@ uv run prototypes/duckdb-vs-sqlite/load_stores.py
 uv run prototypes/duckdb-vs-sqlite/bench_queries.py
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only avro
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd,sqlite-zstd-wal,duckdb-zstd --suffix avro
 ```
 
 The fourth command needs only the corpus, not the stores, and accepts `--populate` and
 `--insert` to run at smaller sizes (the results file is then named after them). The
-fifth needs the stores, reaches the network once for the two DuckDB extensions, and
-accepts `--rows N` to build from the first N rows. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
+fifth needs the stores, reaches the network once for the three DuckDB extensions, and
+accepts `--rows N` to build from the first N rows. The sixth builds and measures only
+the Avro family, beside `parquet-zstd`, `sqlite-zstd-dict` and `duckdb-zstd`, which the
+fifth must have built first, and saves `formats-avro.json`. The seventh runs the insert
+benchmark on three variants only and names its results file `inserts-avro.json`. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
-build needs roughly 32 GB there: the corpus file, the five stores, the nine format
-stores and the two extensions, the download cache and the insert benchmark's four
+build needs roughly 36 GB there: the corpus file, the five stores, the nine format
+stores, the six Avro stores (4.3 GB) and the three extensions, the download cache and the insert benchmark's four
 row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the base
 store and its clone. Rerunning a script wipes and rebuilds
 its outputs, except the row samples, which the insert benchmark keeps and reuses.
