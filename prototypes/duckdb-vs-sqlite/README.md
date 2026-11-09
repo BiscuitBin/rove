@@ -69,7 +69,7 @@ HTML-only regimes get their Markdown from a throwaway converter.
 ## How to run
 
 Each script carries a PEP 723 header and runs with `uv run`, which resolves its own
-environment on the first run (Python 3.14, duckdb, zstandard, warcio and the converter).
+environment on the first run (Python 3.14, duckdb, zstandard, warcio, the converter, fastavro and avro).
 Nothing is added to the project's dependencies.
 
 ```sh

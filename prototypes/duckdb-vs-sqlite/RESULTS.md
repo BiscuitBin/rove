@@ -3,8 +3,10 @@
 Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the seven commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python, plus fastavro 1.13.1 and avro 1.12.2 for the Avro
-section. Every number on this page comes from one run of the seven commands below, except the tracer-bullet figures named in the first caveat and the
-block counts of the DuckDB probe named in the insert section:
+section. Every number on this page comes from one run of the seven commands below,
+except the tracer-bullet figures named in the first caveat, the block counts of the
+DuckDB probe named in the insert section and the 20-row codec probe named in the Avro
+section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
