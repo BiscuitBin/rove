@@ -6,7 +6,7 @@
 #   "zstandard==0.25.0",
 # ]
 # ///
-"""PROTOTYPE, throwaway: insert throughput of eight store variants, from empty and populated.
+"""PROTOTYPE, throwaway: insert throughput of ten store variants, from empty and populated.
 
 Two insert modes (`single`: one transaction per row, the crawler's pattern; `batch`: 256
 rows per transaction), two row mixes (`mixed`: a stride sample over the whole corpus;
@@ -22,8 +22,13 @@ parent writes once under `ai_tmp/duckdb-vs-sqlite/results/`.
 
 The eighth variant, `avro-zstd`, appends to one Avro container file through fastavro
 (zstd level 3): `single` opens the file, appends one record and fsyncs, per row, as the
-files store fsyncs its manifest; `batch` does the same per BATCH rows. `--variants`
-restricts the run and `--suffix` names the results file.
+files store fsyncs its manifest; `batch` does the same per BATCH rows. `avro-zstd-1m`
+writes 1 MiB blocks: `batch` as before, while `single` buffers rows until about 1 MiB of
+raw body bytes are held and writes them as one block with one fsync, so its rows are not
+durable one at a time (`durability: "buffered"`). `sqlite-zstd-dict-wal` is
+`sqlite-zstd-wal` with every body compressed against the per-(regime, column) dictionary
+`bench_formats.py` trained, copied into each fresh store. `--variants` restricts the run
+and `--suffix` names the results file.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import fastavro
 import zstandard
-from bench_formats import AVRO_PARSED
+from bench_formats import AVRO_BLOCK_1M, AVRO_PARSED, AVRO_SYNC, FORMATS
 from load_stores import (
     COLUMNS,
     CORPUS,
@@ -68,6 +73,8 @@ VARIANTS = [
     "duckdb-default",
     "duckdb-zstd",
     "avro-zstd",
+    "avro-zstd-1m",
+    "sqlite-zstd-dict-wal",
 ]
 MODES = ["single", "batch"]
 MIXES = ["mixed", "commoncrawl"]
@@ -81,6 +88,7 @@ PLACEHOLDERS = ", ".join("?" * len(COLUMNS))
 INSERT_SQL = f"INSERT INTO pages ({COLUMN_LIST}) VALUES ({PLACEHOLDERS})"  # noqa: S608  fixed column names
 BODY_COLUMNS = {"html", "markdown"}
 CC_MARKER = b'"regime": "commoncrawl"'
+DICT_STORE = FORMATS / "sqlite-zstd-dict" / "pages.sqlite"
 
 
 def stream(source: Path) -> Iterator[dict[str, Any]]:
@@ -267,6 +275,52 @@ class SqliteInserter(Inserter):
         self.connection.close()
 
 
+class SqliteDictInserter(SqliteInserter):
+    """sqlite-zstd-wal with bodies compressed against a per-(regime, column) dictionary.
+
+    A fresh store gets the `dictionaries` table copied from the store `bench_formats.py`
+    built; a cloned store already has it. Either way the compressors are loaded from the
+    store's own table, and a (regime, column) without a dictionary falls back to plain
+    zstd, as `bench_formats.sqlite_query` does on the read side.
+    """
+
+    def open(self) -> None:
+        """Open as sqlite-zstd-wal, copy the dictionaries into a fresh file, load them."""
+        fresh = not (self.target / "pages.sqlite").exists()
+        super().open()
+        if fresh:
+            self.connection.execute(
+                "CREATE TABLE dictionaries (regime TEXT, column TEXT, data BLOB,"
+                " PRIMARY KEY (regime, column))"
+            )
+            source = sqlite3.connect(f"file:{DICT_STORE}?mode=ro", uri=True)
+            rows = source.execute("SELECT regime, column, data FROM dictionaries").fetchall()
+            source.close()
+            with self.connection:
+                self.connection.executemany("INSERT INTO dictionaries VALUES (?, ?, ?)", rows)
+        self.compressors = {
+            (regime, column): zstandard.ZstdCompressor(
+                level=ZSTD_LEVEL, dict_data=zstandard.ZstdCompressionDict(data)
+            )
+            for regime, column, data in self.connection.execute(
+                "SELECT regime, column, data FROM dictionaries"
+            )
+        }
+        self.info["dictionaries"] = len(self.compressors)
+
+    def values(self, page: dict[str, Any]) -> list[Any]:
+        """The row in column order, bodies compressed with their (regime, column) dictionary."""
+        out = []
+        for column in COLUMNS:
+            value = page[column]
+            if column in BODY_COLUMNS and value is not None:
+                compressor = self.compressors.get((page["regime"], column), self.compressor)
+                if compressor is not None:
+                    value = compressor.compress(value.encode())
+            out.append(value)
+        return out
+
+
 class DuckdbInserter(Inserter):
     """DuckDB VARCHAR bodies, default compression or ZSTD forced on the two bodies."""
 
@@ -319,6 +373,8 @@ class AvroInserter(Inserter):
     There is no compaction.
     """
 
+    sync_interval = AVRO_SYNC
+
     def __init__(self, variant: str, target: Path) -> None:
         """Remember the variant and the file; no per-row compressor."""
         super().__init__(variant, target)
@@ -328,7 +384,7 @@ class AvroInserter(Inserter):
     def open(self) -> None:
         """Create the directory; the first write creates the file."""
         self.target.mkdir(parents=True, exist_ok=True)
-        self.info = {"codec": "zstandard", "level": ZSTD_LEVEL}
+        self.info = {"codec": "zstandard", "level": ZSTD_LEVEL, "sync": self.sync_interval}
 
     def count(self) -> int:
         """Records summed over the block headers; 0 before the first write."""
@@ -342,18 +398,25 @@ class AvroInserter(Inserter):
         mode = "a+b" if self.path.exists() else "wb"
         with self.path.open(mode) as out:
             fastavro.writer(
-                out, AVRO_PARSED, pages, codec="zstandard", codec_compression_level=ZSTD_LEVEL
+                out,
+                AVRO_PARSED,
+                pages,
+                codec="zstandard",
+                codec_compression_level=ZSTD_LEVEL,
+                sync_interval=self.sync_interval,
             )
             out.flush()
             os.fsync(out.fileno())
 
     def insert_single(self, source: Path) -> None:
         """One append and fsync per row."""
+        self.info["durability"] = "per write"
         for page in stream(source):
             self.write([page])
 
     def insert_batch(self, source: Path) -> None:
         """One append and fsync per BATCH rows."""
+        self.info["durability"] = "per write"
         for batch in batches(source):
             self.write(batch)
 
@@ -362,12 +425,41 @@ class AvroInserter(Inserter):
         self.info["compaction"] = "none"
 
 
+class BufferedAvroInserter(AvroInserter):
+    """avro-zstd with 1 MiB blocks; `single` holds rows until a block's worth is buffered.
+
+    `single` appends once about AVRO_BLOCK_1M raw body bytes are held, as one block with
+    one fsync, and flushes the remainder at the end: a crash loses the buffered rows, so
+    the result says `durability: "buffered"`. `batch` is avro-zstd's, in 1 MiB blocks.
+    """
+
+    sync_interval = AVRO_BLOCK_1M
+
+    def insert_single(self, source: Path) -> None:
+        """Buffer rows to about one block of raw body bytes, then append and fsync them."""
+        self.info["durability"] = "buffered"
+        held: list[dict[str, Any]] = []
+        held_bytes = 0
+        for page in stream(source):
+            held.append(page)
+            held_bytes += page["html_bytes"] + page["markdown_bytes"]
+            if held_bytes >= self.sync_interval:
+                self.write(held)
+                held, held_bytes = [], 0
+        if held:
+            self.write(held)
+
+
 def inserter(variant: str, target: Path) -> Inserter:
     """The inserter class for a variant name."""
     if variant == "files":
         return FilesInserter(variant, target)
+    if variant == "avro-zstd-1m":
+        return BufferedAvroInserter(variant, target)
     if variant.startswith("avro"):
         return AvroInserter(variant, target)
+    if variant == "sqlite-zstd-dict-wal":
+        return SqliteDictInserter(variant, target)
     if variant.startswith("sqlite"):
         return SqliteInserter(variant, target)
     return DuckdbInserter(variant, target)
@@ -586,8 +678,9 @@ def print_table(results: list[dict[str, Any]]) -> None:
     for r in results:
         keys = ("size_before", "size_after_inserts", "size_after_compaction")
         sizes = " > ".join(f"{r[k] / 2**20:.1f}" for k in keys)
+        label = r["variant"] + (" (buffered)" if r.get("durability") == "buffered" else "")
         print(
-            f"| {r['variant']} | {r['mode']} | {r['mix']} | {r['scenario']} | {r['rows']}"
+            f"| {label} | {r['mode']} | {r['mix']} | {r['scenario']} | {r['rows']}"
             f" | {r['rows_per_s']:.0f} | {r['raw_mib_per_s']:.1f} | {r['wall_insert']:.2f}"
             f" | {r['wall_compact']:.2f} | {r['rss_bytes'] / 2**20:.0f} | {sizes} |"
         )
@@ -611,6 +704,8 @@ def main() -> None:
     variants = args.variants.split(",") if args.variants else VARIANTS
     if unknown := set(variants) - set(VARIANTS):
         sys.exit(f"unknown variants {sorted(unknown)}; choose from {VARIANTS}")
+    if "sqlite-zstd-dict-wal" in variants and not DICT_STORE.exists():
+        sys.exit(f"no dictionary store at {DICT_STORE}; run bench_formats.py first")
     files = prepare(args.populate, args.insert)
     INSERTS_DIR.mkdir(parents=True, exist_ok=True)
     results = [r for variant in variants for mix in MIXES for r in measure(variant, mix, files)]

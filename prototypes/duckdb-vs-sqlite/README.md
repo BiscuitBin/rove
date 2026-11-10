@@ -36,7 +36,9 @@ Six Apache Avro container files join them: one written by DuckDB's `avro` extens
 blocks) and one by the official `avro` package (deflate). Each carries a sidecar SQLite
 index from identity to block offset, since Avro has none. They are read through DuckDB's
 `read_avro` and through fastavro, and the zstd fastavro store also joins the insert
-benchmark, appending to the file with an fsync per write.
+benchmark, appending to the file with an fsync per write. Ticket 08 adds the zstd 1 MiB
+store and the dictionary SQLite store to the insert benchmark and measures upserts on
+both.
 
 Four query shapes: point lookup by identity, a full scan of every Markdown body, a
 metadata-only select, and an upsert of one row at a time. Each measurement runs in a
@@ -80,6 +82,8 @@ uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only avro
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd,sqlite-zstd-wal,duckdb-zstd --suffix avro
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd-1m,sqlite-zstd-dict-wal,sqlite-zstd-wal --suffix gaps
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts
 ```
 
 The fourth command needs only the corpus, not the stores, and accepts `--populate` and
@@ -88,7 +92,12 @@ fifth needs the stores, reaches the network once for the three DuckDB extensions
 accepts `--rows N` to build from the first N rows. The sixth builds and measures only
 the Avro family, beside `parquet-zstd`, `sqlite-zstd-dict` and `duckdb-zstd`, which the
 fifth must have built first, and saves `formats-avro.json`. The seventh runs the insert
-benchmark on three variants only and names its results file `inserts-avro.json`. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
+benchmark on three variants only and names its results file `inserts-avro.json`. The
+eighth runs it on Avro zstd in 1 MiB blocks (single-row inserts buffered into blocks)
+and on the dictionary SQLite store in WAL mode, which needs the dictionary store the
+fifth built, and saves `inserts-gaps.json`. The ninth runs 500 upserts on `sqlite-zstd`,
+`sqlite-zstd-dict`, `avro-zstd` and `avro-zstd-1m`, compacts each, checks the result,
+and saves `formats-upserts.json`; it reaches no network. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
 a per-source cap. Data, downloads, databases and raw results all land under
 `ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
 build needs roughly 36 GB there: the corpus file, the five stores, the nine format

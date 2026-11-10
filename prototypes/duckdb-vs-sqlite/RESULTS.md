@@ -1,12 +1,12 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the seven commands below, on an Apple M5 Pro (18 cores, 64 GB)
+Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the nine commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python, plus fastavro 1.13.1 and avro 1.12.2 for the Avro
-section. Every number on this page comes from one run of the seven commands below,
+section. Every number on this page comes from one run of the nine commands below,
 except the tracer-bullet figures named in the first caveat, the block counts of the
-DuckDB probe named in the insert section and the 20-row codec probe named in the Avro
-section:
+DuckDB probe named in the insert section, the 20-row codec probe named in the Avro
+section and the allocation probe named in the gaps section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
@@ -16,12 +16,14 @@ uv run prototypes/duckdb-vs-sqlite/bench_inserts.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only avro
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd,sqlite-zstd-wal,duckdb-zstd --suffix avro
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd-1m,sqlite-zstd-dict-wal,sqlite-zstd-wal --suffix gaps
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts
 ```
 
-The raw output of the last six commands is kept beside the data, under
+The raw output of the last eight commands is kept beside the data, under
 `ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`,
-`formats.json`, `formats-avro.json`, `inserts-avro.json` and the `formats-explain/`
-files), which is gitignored.
+`formats.json`, `formats-avro.json`, `inserts-avro.json`, `inserts-gaps.json`,
+`formats-upserts.json` and the `formats-explain/` files), which is gitignored.
 
 ## The question
 
@@ -645,7 +647,108 @@ Avro adds no update or delete. A page fetched again is appended and the index re
 so the old version stays in the file until the whole file is rewritten, and the index is
 a second file whose consistency with the first after a crash is the application's
 problem. The sidecar index was built after the writes, never kept up to date by the
-insert runs.
+insert runs; the gaps section keeps it up to date through upserts.
+
+## Closing the gaps
+
+Three measurements the Avro section left open, so the two candidates for the store,
+Avro zstd in 1 MiB blocks with its sidecar index and the dictionary SQLite store, are
+compared on every axis.
+
+- **Avro appends in 1 MiB blocks.** `avro-zstd-1m` joins the insert benchmark: fastavro,
+  zstd level 3, `sync_interval` of 1 MiB. `batch` appends 256 rows with one fsync, as
+  `avro-zstd` does. `single` buffers rows until about 1 MiB of raw body bytes are held
+  (about 30 mixed pages or 6 Common Crawl pages), appends them as one block with one
+  fsync, and flushes the remainder at the end; a row is durable only once its block is,
+  so the table marks it `(buffered)`.
+- **The dictionary store through the insert benchmark.** `sqlite-zstd-dict-wal` is
+  `sqlite-zstd-wal` (WAL, `synchronous=NORMAL`) with every body compressed against the
+  nine per-(regime, column) dictionaries `bench_formats.py` trained, copied into each
+  fresh store, plain zstd where a (regime, column) has none. The dictionaries were
+  trained on the whole corpus, the inserted rows included, which flatters its ratio a
+  little.
+- **Upserts on both, and on the dictionary store.** `bench_formats.py --upserts` runs
+  the 500 upserts `bench_queries.py` prepared (existing identities, changed Markdown),
+  one transaction each, on an APFS clone in a fresh child, twice. SQLite runs the same
+  `INSERT ... ON CONFLICT DO UPDATE` as the query section, then `VACUUM`. Avro appends
+  each record as its own block with an fsync and repoints the identity in the sidecar
+  index; compaction rewrites the file with only the records the index points to, in the
+  store's block size, and rebuilds the index, so its time includes the index. The row
+  time here excludes opening and compaction, unlike the query section's upsert row.
+
+Insert throughput, `sqlite-zstd-wal` run beside the two as the in-run reference:
+
+| variant | mode | mix | scenario | rows | rows/s | raw MiB/s | insert s | compact s | peak RSS MiB | MiB before > after inserts > after compaction |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| avro-zstd-1m (buffered) | single | mixed | empty | 10,000 | 8,066 | 270.4 | 1.24 | 0.00 | 185 | 0 > 43.5 > 43.5 |
+| avro-zstd-1m (buffered) | single | mixed | populated | 10,000 | 8,348 | 279.9 | 1.20 | 0.00 | 207 | 211.4 > 259.4 > 259.4 |
+| avro-zstd-1m | batch | mixed | empty | 10,000 | 8,185 | 274.4 | 1.22 | 0.00 | 379 | 0 > 43.8 > 43.8 |
+| avro-zstd-1m | batch | mixed | populated | 10,000 | 7,862 | 263.6 | 1.27 | 0.00 | 391 | 211.4 > 259.4 > 259.4 |
+| avro-zstd-1m (buffered) | single | commoncrawl | empty | 9,999 | 1,631 | 275.6 | 6.13 | 0.00 | 403 | 0 > 272.2 > 272.2 |
+| avro-zstd-1m (buffered) | single | commoncrawl | populated | 9,999 | 1,613 | 272.5 | 6.20 | 0.00 | 426 | 116.1 > 388.1 > 388.1 |
+| avro-zstd-1m | batch | commoncrawl | empty | 9,999 | 1,609 | 271.9 | 6.21 | 0.00 | 603 | 0 > 272.2 > 272.2 |
+| avro-zstd-1m | batch | commoncrawl | populated | 9,999 | 1,628 | 275.1 | 6.14 | 0.00 | 605 | 116.1 > 388.1 > 388.1 |
+| sqlite-zstd-dict-wal | single | mixed | empty | 10,000 | 6,049 | 202.8 | 1.65 | 0.15 | 187 | 0 > 64.0 > 59.0 |
+| sqlite-zstd-dict-wal | single | mixed | populated | 10,000 | 5,812 | 194.9 | 1.72 | 1.30 | 188 | 290.4 > 359.4 > 348.2 |
+| sqlite-zstd-dict-wal | batch | mixed | empty | 10,000 | 6,419 | 215.2 | 1.56 | 0.18 | 411 | 0 > 68.8 > 59.1 |
+| sqlite-zstd-dict-wal | batch | mixed | populated | 10,000 | 6,558 | 219.9 | 1.52 | 1.22 | 412 | 290.4 > 363.6 > 354.4 |
+| sqlite-zstd-dict-wal | single | commoncrawl | empty | 9,999 | 1,253 | 211.7 | 7.98 | 1.19 | 416 | 0 > 327.3 > 320.3 |
+| sqlite-zstd-dict-wal | single | commoncrawl | populated | 9,999 | 1,296 | 219.1 | 7.71 | 1.53 | 417 | 188.3 > 513.4 > 508.3 |
+| sqlite-zstd-dict-wal | batch | commoncrawl | empty | 9,999 | 1,337 | 225.9 | 7.48 | 0.92 | 596 | 0 > 333.0 > 320.5 |
+| sqlite-zstd-dict-wal | batch | commoncrawl | populated | 9,999 | 1,322 | 223.4 | 7.56 | 1.52 | 595 | 188.3 > 520.9 > 508.3 |
+| sqlite-zstd-wal | single | mixed | empty | 10,000 | 5,982 | 200.6 | 1.67 | 0.20 | 175 | 0 > 85.5 > 80.4 |
+| sqlite-zstd-wal | single | mixed | populated | 10,000 | 6,200 | 207.9 | 1.61 | 1.74 | 175 | 390.0 > 474.9 > 467.9 |
+| sqlite-zstd-wal | batch | mixed | empty | 10,000 | 6,548 | 219.5 | 1.53 | 0.21 | 391 | 0 > 90.3 > 80.5 |
+| sqlite-zstd-wal | batch | mixed | populated | 10,000 | 6,698 | 224.6 | 1.49 | 1.70 | 395 | 390.0 > 480.3 > 467.9 |
+| sqlite-zstd-wal | single | commoncrawl | empty | 9,999 | 1,489 | 251.7 | 6.71 | 1.00 | 411 | 0 > 342.7 > 336.6 |
+| sqlite-zstd-wal | single | commoncrawl | populated | 9,999 | 1,487 | 251.3 | 6.72 | 1.89 | 413 | 287.1 > 630.3 > 623.1 |
+| sqlite-zstd-wal | batch | commoncrawl | empty | 9,999 | 1,509 | 255.1 | 6.62 | 0.94 | 599 | 0 > 349.6 > 336.6 |
+| sqlite-zstd-wal | batch | commoncrawl | populated | 9,999 | 1,489 | 251.5 | 6.72 | 1.92 | 601 | 287.1 > 636.2 > 623.1 |
+
+Upserts, 500 rows one transaction each, second of two runs (the first in brackets):
+
+| variant | ms per row | compaction s | peak RSS MiB | MiB before > after upserts > after compaction | compaction |
+| --- | ---: | ---: | ---: | --- | --- |
+| sqlite-zstd | 0.77 (0.80) | 4.1 (4.3) | 96 | 1,026.3 > 1,042.3 > 1,026.3 | VACUUM |
+| sqlite-zstd-dict | 1.88 (0.79) | 3.4 (3.2) | 111 | 763.9 > 779.9 > 763.9 | VACUUM |
+| avro-zstd | 0.48 (0.84) | 13.1 (13.2) | 423 | 783.0 > 799.0 > 791.7 | rewrite in 16,000-byte blocks, then rebuild the index |
+| avro-zstd-1m | 0.45 (0.44) | 11.0 (10.9) | 429 | 561.1 > 577.1 > 567.5 | rewrite in 1 MiB blocks, then rebuild the index |
+
+Every insert child found the row count grown by exactly the rows inserted, and every
+upsert child found 130,880 rows and all 500 changed Markdown bodies after compaction;
+the Avro children also found them through the live index before compacting, with
+131,380 records in the file.
+
+What the tables say:
+
+- **Buffered into 1 MiB blocks, Avro is the fastest single-row writer and lands at
+  its bulk ratio.** 8,066 to 8,348 rows/s on mixed rows against 5,982 to 6,200 for
+  `sqlite-zstd-wal` in the same run, and 1,613 to 1,631 on Common Crawl rows against
+  1,487 to 1,489; 10,000 mixed rows land at 0.130 of raw (43.5 MiB), the 0.128 of the
+  bulk-written file, where `avro-zstd` appending a row at a time landed at 0.188. The
+  price is durability: a crash loses the rows still buffered, up to a block, and the
+  crawler must fetch them again. `batch` in 1 MiB blocks is the same speed and ratio.
+- **The dictionary costs nothing on typical pages and 13 to 16% on large ones.** Single-row
+  inserts on mixed rows run at 5,812 to 6,049 rows/s against 5,982 to 6,200 without a
+  dictionary, and land at 0.176 of raw against 0.240; on Common Crawl rows they run at
+  1,253 to 1,296 against 1,487 to 1,489 and land at 0.190 against 0.199, so the
+  regime's dictionary helps little on 173 KB pages from many hosts. Peak RSS is the
+  same. Against buffered Avro the dictionary store writes 25 to 30% fewer rows a second
+  and takes 36% more disk for the same 10,000 rows (59.0 MiB against 43.5).
+- **Upserts cost under 2 ms a row on all four; compaction is what differs.** The rows
+  took 0.44 to 1.88 ms (the dictionary store's two runs, 0.79 and 1.88 ms, show the
+  noise of one run of 500 fsyncs). Each store grew 16 MiB. `VACUUM` returned both SQLite
+  files to the exact size in 3.4 to 4.1 s at 96 to 111 MiB of peak RSS. Avro has no
+  in-place reclaim: compaction rewrote the whole 539 to 761 MiB file and rebuilt the
+  index in 11.0 to 13.1 s at 423 to 429 MiB, a cost that grows with the store, not with
+  the garbage. The Avro rows end 6.4 to 8.7 MiB above where they started in allocated
+  bytes; a by-hand probe of one `avro-zstd-1m` run found the file's own bytes 0.14 MB
+  larger and its allocated blocks 5.6 MiB beyond its length right after the rewrite, so
+  the difference is APFS's allocation of a freshly written file, not data.
+
+Updated against the Avro section: the 1 MiB file's ratio is reachable a row at a time,
+if the rows may wait in memory for their block; the buffered-write cost is durability,
+not speed.
 
 ## Verdict
 
@@ -752,16 +855,30 @@ and column takes it from 0.232 to 0.173 of raw at no measurable query cost, so t
 recommended store is **SQLite with per-row zstd against a per-host (here per-regime)
 dictionary, in WAL mode**. A later decision record can cite these numbers directly.
 
-Two follow-ups are worth measuring if disk becomes the constraint:
+The gaps section measured the one alternative left standing, Avro with zstd in 1 MiB
+blocks and a sidecar index, as a store a crawler writes: buffered into blocks it takes
+8,000 single-row writes a second and lands at 0.130 of raw, against about 6,000 and
+0.176 for the dictionary store; it upserts as fast; and it gives up per-row durability,
+in-place reclaim (a compaction rewrites the whole file, 11 s for this one, against a
+3.4 s `VACUUM`), lookups (0.74 ms against 0.05), the metadata select (1.9 s against
+0.2) and a single file with transactions. Avro wins only where disk is the binding
+constraint, losing up to a block of pages on a crash is acceptable because they can be
+fetched again, one process owns the files, and old versions can wait for a periodic
+rewrite. None of that holds for the temporary store as specified, so the recommendation
+stands.
+
+Three follow-ups are worth measuring if disk becomes the constraint:
 
 - The dictionary's scope and size: one per regime and column at 128 KiB was measured;
   per host, per crawl, larger, or retrained as a host's chrome changes were not, and the
   gain on Sphinx-like chrome should be larger than the corpus average.
-- Avro with zstd in 1 MiB blocks and a sidecar index (0.128 of raw, 0.74 ms lookups at
-  70 MiB through fastavro, never through DuckDB) as an append-only log, if pages were
-  buffered into blocks of about 35 before each append and old versions reclaimed by a
-  rewrite. That is a log-structured store built by hand, with its crash consistency to
-  prove, and the dictionary SQLite store gets within 0.05 of its disk without one.
+- Avro with zstd in 1 MiB blocks and a sidecar index (0.128 of raw bulk-written, 0.130
+  buffered a row at a time, 0.74 ms lookups at 70 MiB through fastavro, never through
+  DuckDB) as an append-only log, with pages buffered into blocks before each append and
+  old versions reclaimed by a whole-file rewrite. The gaps section measured both; what
+  is left is the crash consistency of the file and its index, a log-structured store
+  built by hand, and the dictionary SQLite store gets within 0.05 of its disk without
+  one.
 - Parquet with zstd as an append-once archive of raw HTML written in bulk after a run
   and read by scans, where its compression (0.124 of raw, the same as DuckDB's) is the
   whole point and its lookup cost does not apply. That is a different store from the

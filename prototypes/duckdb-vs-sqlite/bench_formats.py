@@ -30,12 +30,21 @@ after the write. Avro stores are read three ways: through DuckDB's `read_avro` a
 limits (a point lookup there reads the whole file, so only every 40th identity is looked
 up) and through fastavro, seeking to the indexed block for a lookup. `--only avro`
 builds and measures one family against three references and saves `formats-avro.json`.
+
+`--upserts` measures the 500 upserts `bench_queries.py` prepared on four stores
+(`sqlite-zstd`, `sqlite-zstd-dict`, `avro-zstd`, `avro-zstd-1m`), each on an APFS clone
+in a fresh child, twice, both runs saved: SQLite runs `bench_queries`'s
+`INSERT ... ON CONFLICT DO UPDATE` and then `VACUUM`; Avro appends each record as one
+block with an fsync, repoints the sidecar index, and compacts by rewriting the file with
+only the records the index points to, then rebuilding the index. Each child checks the
+row count and the 500 changed Markdown bodies afterwards. It saves `formats-upserts.json`.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import resource
 import shutil
 import sqlite3
@@ -49,11 +58,19 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import fastavro
 import zstandard
-from bench_queries import DUCKDB_LIMIT, FETCH_MANY, META_SQL, POINT_LOOKUPS, digest, store_bytes
+from bench_queries import (
+    DUCKDB_LIMIT,
+    FETCH_MANY,
+    META_SQL,
+    POINT_LOOKUPS,
+    digest,
+    store_bytes,
+    upsert_rows,
+)
 from load_stores import COLUMNS, META_COLUMNS, RESULTS, SCRATCH, STORES, ZSTD_LEVEL, sqlite_schema
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
     from typing import BinaryIO
 
 DUCKDB_SOURCE = STORES / "duckdb-zstd" / "pages.duckdb"
@@ -96,6 +113,8 @@ AVRO_LOOKUPS = 5
 AVRO_SYNC = 16000
 AVRO_BLOCK_1M = 1 << 20
 NULLABLE_COLUMNS = {"raw_digest", "html"}
+UPSERT_VARIANTS = ["sqlite-zstd", "sqlite-zstd-dict", "avro-zstd", "avro-zstd-1m"]
+UPSERT_RUNS = 2
 
 
 def avro_type(column: str) -> str | list[str]:
@@ -579,6 +598,223 @@ def explain_child(variant: str, target: Path) -> None:
     print(json.dumps({"variant": variant, "saved": str(out)}))
 
 
+# --------------------------------------------------------------- upserts ---
+
+
+def sqlite_compressors(
+    connection: sqlite3.Connection, variant: str
+) -> dict[tuple[str, str], zstandard.ZstdCompressor]:
+    """The per-(regime, column) dictionary compressors of sqlite-zstd-dict; none otherwise."""
+    if variant != "sqlite-zstd-dict":
+        return {}
+    return {
+        (regime, column): zstandard.ZstdCompressor(
+            level=ZSTD_LEVEL, dict_data=zstandard.ZstdCompressionDict(data)
+        )
+        for regime, column, data in connection.execute(
+            "SELECT regime, column, data FROM dictionaries"
+        )
+    }
+
+
+def sqlite_decompressors(
+    connection: sqlite3.Connection, variant: str
+) -> dict[tuple[str, str], zstandard.ZstdDecompressor]:
+    """The per-(regime, column) dictionary decompressors of sqlite-zstd-dict; none otherwise."""
+    if variant != "sqlite-zstd-dict":
+        return {}
+    return {
+        (regime, column): zstandard.ZstdDecompressor(dict_data=zstandard.ZstdCompressionDict(data))
+        for regime, column, data in connection.execute(
+            "SELECT regime, column, data FROM dictionaries"
+        )
+    }
+
+
+def sqlite_upserts(variant: str, connection: sqlite3.Connection) -> int:
+    """bench_queries's upsert, one transaction per row, bodies compressed as the store does."""
+    compressors = sqlite_compressors(connection, variant)
+    plain = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
+    assignments = ", ".join(f"{c} = excluded.{c}" for c in COLUMNS if c != "identity")
+    placeholders = ",".join("?" * len(COLUMNS))
+    sql = (
+        f"INSERT INTO pages ({COLUMN_LIST}) VALUES ({placeholders})"  # noqa: S608  fixed column names
+        f" ON CONFLICT(identity) DO UPDATE SET {assignments}"
+    )
+    items = 0
+    for page in upsert_rows():
+        values = []
+        for column in COLUMNS:
+            value = page[column]
+            if column in BODY_COLUMNS and value is not None:
+                value = compressors.get((page["regime"], column), plain).compress(value.encode())
+            values.append(value)
+        with connection:
+            connection.execute(sql, values)
+        items += 1
+    return items
+
+
+def sqlite_check(variant: str, target: Path) -> tuple[int, int]:
+    """Rows in the store, and how many upserted rows hold their new Markdown body."""
+    connection = sqlite3.connect(target / "pages.sqlite")
+    decompressors = sqlite_decompressors(connection, variant)
+    plain = zstandard.ZstdDecompressor()
+    (rows,) = connection.execute("SELECT count(*) FROM pages").fetchone()
+    changed = 0
+    for page in upsert_rows():
+        found = connection.execute(
+            "SELECT markdown FROM pages WHERE identity = ?", (page["identity"],)
+        ).fetchone()
+        decompressor = decompressors.get((page["regime"], "markdown"), plain)
+        if found and decompressor.decompress(found[0]).decode() == page["markdown"]:
+            changed += 1
+    connection.close()
+    return int(rows), changed
+
+
+def sqlite_upsert_child(variant: str, target: Path) -> dict[str, Any]:
+    """Upsert into a SQLite store, VACUUM, check; walls and sizes of each step."""
+    connection = sqlite3.connect(target / "pages.sqlite")
+    (expected,) = connection.execute("SELECT count(*) FROM pages").fetchone()
+    report: dict[str, Any] = {"size_before": store_bytes(target), "expected_rows": expected}
+    started = time.perf_counter()
+    report["items"] = sqlite_upserts(variant, connection)
+    report["wall_upserts"] = time.perf_counter() - started
+    report["size_after_upserts"] = store_bytes(target)
+    started = time.perf_counter()
+    connection.execute("VACUUM")
+    connection.close()
+    report["wall_compact"] = time.perf_counter() - started
+    report["size_after_compaction"] = store_bytes(target)
+    report["rows_after"], report["changed_found"] = sqlite_check(variant, target)
+    report["compaction"] = "VACUUM"
+    return report
+
+
+def avro_sync(variant: str) -> int:
+    """The block size an Avro store was written with."""
+    return AVRO_BLOCK_1M if variant.endswith("-1m") else AVRO_SYNC
+
+
+def avro_write(out: BinaryIO, records: Iterable[dict[str, Any]], sync: int) -> None:
+    """Write records in the stores' codec, zstd level 3, at the given block size."""
+    fastavro.writer(
+        out,
+        AVRO_PARSED,
+        records,
+        codec="zstandard",
+        codec_compression_level=ZSTD_LEVEL,
+        sync_interval=sync,
+    )
+
+
+def avro_upserts(target: Path, sync: int) -> int:
+    """Per row: append one block, fsync, repoint the identity in the index, commit."""
+    path = target / "pages.avro"
+    index = sqlite3.connect(target / "pages.index.sqlite")
+    items = 0
+    for page in upsert_rows():
+        offset = path.stat().st_size
+        with path.open("a+b") as out:
+            avro_write(out, [page], sync)
+            out.flush()
+            os.fsync(out.fileno())
+        with index:
+            updated = index.execute(
+                "UPDATE lookup SET block_offset = ?, position = 0 WHERE identity = ?",
+                (offset, page["identity"]),
+            ).rowcount
+        if updated != 1:
+            msg = f"{page['identity']} is not in the index"
+            raise RuntimeError(msg)
+        items += 1
+    index.close()
+    return items
+
+
+def avro_check(target: Path) -> tuple[int, int]:
+    """Records in the file, and how many upserted rows the index resolves to the new body."""
+    path = target / "pages.avro"
+    index = sqlite3.connect(f"file:{target / 'pages.index.sqlite'}?mode=ro", uri=True)
+    changed = 0
+    with path.open("rb") as source:
+        records = sum(block.num_records for block in fastavro.block_reader(source))
+        source.seek(0)
+        blocks = fastavro.block_reader(source)
+        for page in upsert_rows():
+            offset, position = index.execute(
+                "SELECT block_offset, position FROM lookup WHERE identity = ?",
+                (page["identity"],),
+            ).fetchone()
+            source.seek(offset)
+            record = next(islice(next(blocks), position, None))
+            changed += record["markdown"] == page["markdown"]
+    index.close()
+    return records, changed
+
+
+def avro_compact(target: Path, sync: int) -> None:
+    """Rewrite the file with only the records the index points to; rebuild the index."""
+    path = target / "pages.avro"
+    index_path = target / "pages.index.sqlite"
+    index = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True)
+    keep = set(index.execute("SELECT block_offset, position FROM lookup"))
+    index.close()
+
+    def live(source: BinaryIO) -> Iterator[dict[str, Any]]:
+        for block in fastavro.block_reader(source):
+            for position, record in enumerate(block):
+                if (block.offset, position) in keep:
+                    yield record
+
+    part = target / "pages.avro.part"
+    with path.open("rb") as source, part.open("wb") as out:
+        avro_write(out, live(source), sync)
+        out.flush()
+        os.fsync(out.fileno())
+    part.replace(path)
+    index_path.unlink()
+    build_avro_index(target)
+
+
+def avro_upsert_child(variant: str, target: Path) -> dict[str, Any]:
+    """Upsert into an Avro store, check through the live index, compact, check again."""
+    sync = avro_sync(variant)
+    index = sqlite3.connect(f"file:{target / 'pages.index.sqlite'}?mode=ro", uri=True)
+    (expected,) = index.execute("SELECT count(*) FROM lookup").fetchone()
+    index.close()
+    report: dict[str, Any] = {"size_before": store_bytes(target), "expected_rows": expected}
+    started = time.perf_counter()
+    report["items"] = avro_upserts(target, sync)
+    report["wall_upserts"] = time.perf_counter() - started
+    report["size_after_upserts"] = store_bytes(target)
+    report["records_before_compaction"], report["changed_before_compaction"] = avro_check(target)
+    started = time.perf_counter()
+    avro_compact(target, sync)
+    report["wall_compact"] = time.perf_counter() - started
+    report["size_after_compaction"] = store_bytes(target)
+    report["rows_after"], report["changed_found"] = avro_check(target)
+    report["compaction"] = f"rewrite in {sync}-byte blocks, then rebuild the index"
+    return report
+
+
+def upsert_child(variant: str, target: Path) -> None:
+    """One upsert measurement; print its JSON line, or fail if a check does not hold."""
+    if family(variant) == "avro":
+        report = avro_upsert_child(variant, target)
+    else:
+        report = sqlite_upsert_child(variant, target)
+    if report["rows_after"] != report["expected_rows"] or report["changed_found"] != len(
+        upsert_rows()
+    ):
+        msg = f"{variant}: check failed: {report}"
+        raise RuntimeError(msg)
+    report["rss_bytes"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes on macOS
+    report["ms_per_row"] = report["wall_upserts"] * 1000 / report["items"]
+    print(json.dumps({"variant": variant, **report}))
+
+
 # ---------------------------------------------------------------- parent ---
 
 
@@ -696,6 +932,49 @@ def print_tables(sizes: list[dict[str, Any]], queries: list[dict[str, Any]]) -> 
         )
 
 
+def measure_upserts() -> list[dict[str, Any]]:
+    """Every upsert store, twice, each run on a fresh APFS clone; both runs kept."""
+    results = []
+    for variant in UPSERT_VARIANTS:
+        source = target_of(variant)
+        if not source.exists():
+            sys.exit(f"no {variant} store at {source}; run bench_formats.py first")
+        clone = FORMATS / f"{variant}-upsert-PROTOTYPE-wipe-me"
+        for run in range(1, UPSERT_RUNS + 1):
+            shutil.rmtree(clone, ignore_errors=True)
+            subprocess.run(["cp", "-Rc", str(source), str(clone)], check=True)
+            found = run_child(["upsert", variant, str(clone)])
+            shutil.rmtree(clone, ignore_errors=True)
+            if "error" in found:
+                sys.exit(f"upserts on {variant} failed: {found['error']}")
+            results.append({**found, "run": run})
+            print(
+                f"{variant} run {run}: {found['ms_per_row']:.2f} ms per row,"
+                f" {found['wall_compact']:.1f} s compaction, {found['rss_bytes'] / 2**20:.0f} MiB",
+                file=sys.stderr,
+            )
+    return results
+
+
+def print_upserts(results: list[dict[str, Any]]) -> None:
+    """The upsert table, Markdown, the second run of each store."""
+    print("\nUpserts, 500 rows one transaction each (second of two runs, a fresh process each)\n")
+    print(
+        "| variant | ms per row | compaction s | peak RSS MiB"
+        " | MiB before > after upserts > after compaction | compaction |"
+    )
+    print("| --- | ---: | ---: | ---: | --- | --- |")
+    for r in results:
+        if r["run"] != UPSERT_RUNS:
+            continue
+        keys = ("size_before", "size_after_upserts", "size_after_compaction")
+        sizes = " > ".join(f"{r[k] / 2**20:.1f}" for k in keys)
+        print(
+            f"| {r['variant']} | {r['ms_per_row']:.2f} | {r['wall_compact']:.1f}"
+            f" | {r['rss_bytes'] / 2**20:.0f} | {sizes} | {r['compaction']} |"
+        )
+
+
 def child(argv: list[str]) -> None:
     """Child: one build, one measurement or one explain."""
     kind, variant, *rest = argv
@@ -703,6 +982,8 @@ def child(argv: list[str]) -> None:
         build_child(variant, Path(rest[0]), int(rest[1]) or None)
     elif kind == "query":
         query_child(variant, rest[0], rest[1], Path(rest[2]))
+    elif kind == "upsert":
+        upsert_child(variant, Path(rest[0]))
     else:
         explain_child(variant, Path(rest[0]))
 
@@ -717,9 +998,21 @@ def main() -> None:
         choices=sorted({family(v) for v in NEW_VARIANTS}),
         help="build and measure one family against parquet-zstd, sqlite-zstd-dict, duckdb-zstd",
     )
+    parser.add_argument(
+        "--upserts",
+        action="store_true",
+        help="measure upserts on sqlite-zstd, sqlite-zstd-dict and two Avro stores (offline)",
+    )
     args = parser.parse_args()
     if args.child:
         child(args.child)
+        return
+    if args.upserts:
+        results = measure_upserts()
+        print_upserts(results)
+        out = RESULTS / "formats-upserts.json"
+        out.write_text(json.dumps(results, indent=2) + "\n")
+        print(f"\nsaved {out}")
         return
     for needed in (DUCKDB_SOURCE, SQLITE_SOURCE, STORES / "sqlite-zstd" / "pages.sqlite"):
         if not needed.exists():
