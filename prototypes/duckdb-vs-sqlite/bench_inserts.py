@@ -3,10 +3,11 @@
 # dependencies = [
 #   "duckdb==2.0.0",
 #   "fastavro==1.13.1",
+#   "rocksdict==0.3.29",
 #   "zstandard==0.25.0",
 # ]
 # ///
-"""PROTOTYPE, throwaway: insert throughput of ten store variants, from empty and populated.
+"""PROTOTYPE, throwaway: insert throughput of sixteen store variants, from empty and populated.
 
 Two insert modes (`single`: one transaction per row, the crawler's pattern; `batch`: 256
 rows per transaction), two row mixes (`mixed`: a stride sample over the whole corpus;
@@ -27,8 +28,12 @@ writes 1 MiB blocks: `batch` as before, while `single` buffers rows until about 
 raw body bytes are held and writes them as one block with one fsync, so its rows are not
 durable one at a time (`durability: "buffered"`). `sqlite-zstd-dict-wal` is
 `sqlite-zstd-wal` with every body compressed against the per-(regime, column) dictionary
-`bench_formats.py` trained, copied into each fresh store. `--variants` restricts the run
-and `--suffix` names the results file.
+`bench_formats.py` trained, copied into each fresh store. The six `rocksdb-*` variants
+are `bench_formats.py`'s three RocksDB layouts, each written with `sync` on (the WAL is
+synced per write batch, durable per write) and off (`durability: "process crash only"`,
+the peer of SQLite WAL with `synchronous=NORMAL`); their compaction flushes and fully
+compacts every column family. `--variants` restricts the run and `--suffix` names the
+results file.
 """
 
 from __future__ import annotations
@@ -48,7 +53,18 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import fastavro
 import zstandard
-from bench_formats import AVRO_BLOCK_1M, AVRO_PARSED, AVRO_SYNC, FORMATS
+from bench_formats import (
+    AVRO_BLOCK_1M,
+    AVRO_PARSED,
+    AVRO_SYNC,
+    DURABILITY,
+    FORMATS,
+    ROCKS_CAPS,
+    RocksStore,
+    live_bytes,
+    rocks_layout,
+    store_of,
+)
 from load_stores import (
     COLUMNS,
     CORPUS,
@@ -58,7 +74,6 @@ from load_stores import (
     SCRATCH,
     ZSTD_LEVEL,
     sqlite_schema,
-    tree_bytes,
 )
 
 if TYPE_CHECKING:
@@ -75,6 +90,7 @@ VARIANTS = [
     "avro-zstd",
     "avro-zstd-1m",
     "sqlite-zstd-dict-wal",
+    *(f"rocksdb-{layout}-{d}" for layout in ("zstd", "blob", "packed") for d in DURABILITY),
 ]
 MODES = ["single", "batch"]
 MIXES = ["mixed", "commoncrawl"]
@@ -111,8 +127,12 @@ def batches(source: Path) -> Iterator[list[dict[str, Any]]]:
 
 
 def store_bytes(target: Path) -> int:
-    """Allocated bytes of a store directory, WAL, shm and journal files included."""
-    return tree_bytes(target)[1]
+    """Allocated bytes of a store directory, WAL, shm and journal files included.
+
+    `live_bytes` skips a file deleted while the directory is listed, which an open
+    RocksDB store's background threads do; for a closed store it is `tree_bytes`.
+    """
+    return live_bytes(target)
 
 
 def leftovers(target: Path) -> list[str]:
@@ -450,19 +470,66 @@ class BufferedAvroInserter(AvroInserter):
             self.write(held)
 
 
+class RocksdbInserter(Inserter):
+    """A RocksDB store in one of bench_formats's layouts, the WAL synced per write or not.
+
+    Every row or batch is one atomic WriteBatch across the column families. The bodies
+    stay as they are and RocksDB's block zstd compresses them, so the per-row compressor
+    of the base class is not used.
+    """
+
+    def __init__(self, variant: str, target: Path) -> None:
+        """Remember the layout and the durability; no per-row compressor."""
+        super().__init__(variant, target)
+        self.compressor = None
+        self.layout = store_of(variant)
+        self.sync = variant.endswith("-sync")
+
+    def open(self) -> None:
+        """Create or open the store: an empty directory, or a clone of the base."""
+        self.target.mkdir(parents=True, exist_ok=True)
+        self.store = RocksStore(self.layout, self.target)
+        self.info = {
+            "layout": rocks_layout(self.layout),
+            "durability": "per write" if self.sync else "process crash only",
+            "sync": self.sync,
+            "caps": ROCKS_CAPS,
+        }
+
+    def count(self) -> int:
+        """Rows, by iterating the keys without filling the block cache."""
+        return self.store.count()
+
+    def insert_single(self, source: Path) -> None:
+        """One WriteBatch per row."""
+        for page in stream(source):
+            self.store.write([page], sync=self.sync)
+
+    def insert_batch(self, source: Path) -> None:
+        """One WriteBatch per BATCH rows."""
+        for batch in batches(source):
+            self.store.write(batch, sync=self.sync)
+
+    def compact(self) -> None:
+        """Flush and fully compact every column family, then close; no WAL may remain."""
+        self.store.compact()
+        self.info["compaction"] = "flush, then compact_range with bottommost force"
+
+
 def inserter(variant: str, target: Path) -> Inserter:
-    """The inserter class for a variant name."""
-    if variant == "files":
-        return FilesInserter(variant, target)
-    if variant == "avro-zstd-1m":
-        return BufferedAvroInserter(variant, target)
-    if variant.startswith("avro"):
-        return AvroInserter(variant, target)
-    if variant == "sqlite-zstd-dict-wal":
-        return SqliteDictInserter(variant, target)
-    if variant.startswith("sqlite"):
-        return SqliteInserter(variant, target)
-    return DuckdbInserter(variant, target)
+    """The inserter class for a variant name: an exact name first, then a family prefix."""
+    exact: dict[str, type[Inserter]] = {
+        "files": FilesInserter,
+        "avro-zstd-1m": BufferedAvroInserter,
+        "sqlite-zstd-dict-wal": SqliteDictInserter,
+    }
+    prefixes: dict[str, type[Inserter]] = {
+        "avro": AvroInserter,
+        "sqlite": SqliteInserter,
+        "rocksdb": RocksdbInserter,
+    }
+    kind = exact.get(variant) or prefixes.get(variant.split("-", maxsplit=1)[0], DuckdbInserter)
+    return kind(variant, target)
 
 
 def sample_totals(source: Path) -> tuple[int, int]:
@@ -679,6 +746,7 @@ def print_table(results: list[dict[str, Any]]) -> None:
         keys = ("size_before", "size_after_inserts", "size_after_compaction")
         sizes = " > ".join(f"{r[k] / 2**20:.1f}" for k in keys)
         label = r["variant"] + (" (buffered)" if r.get("durability") == "buffered" else "")
+        label += " (nosync)" if r.get("sync") is False else ""
         print(
             f"| {label} | {r['mode']} | {r['mix']} | {r['scenario']} | {r['rows']}"
             f" | {r['rows_per_s']:.0f} | {r['raw_mib_per_s']:.1f} | {r['wall_insert']:.2f}"

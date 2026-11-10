@@ -4,6 +4,7 @@
 #   "avro==1.12.2",
 #   "duckdb==2.0.0",
 #   "fastavro==1.13.1",
+#   "rocksdict==0.3.29",
 #   "zstandard==0.25.0",
 # ]
 # ///
@@ -38,16 +39,31 @@ in a fresh child, twice, both runs saved: SQLite runs `bench_queries`'s
 block with an fsync, repoints the sidecar index, and compacts by rewriting the file with
 only the records the index points to, then rebuilding the index. Each child checks the
 row count and the 500 changed Markdown bodies afterwards. It saves `formats-upserts.json`.
+
+Three RocksDB stores (RocksDB 9.8.4 through rocksdict 0.3.29) join them under `--only
+rocksdb`: `rocksdb-zstd` keeps three column families keyed by identity (`meta` as compact
+JSON, `html`, `markdown`), `rocksdb-blob` adds blob files for the two bodies, and
+`rocksdb-packed` packs each row into one value of the default column family. Every
+store uses block zstd level 3, 16 KiB blocks in one 128 MiB LRU cache and 32 MiB
+memtables capped at 128 MiB in all, and is fully compacted and closed before it is
+measured. `--per-regime` then builds each regime of each store on its own, measures it
+and deletes it. `--upserts --only rocksdb` runs the upserts on the three stores, synced
+and unsynced, with `sqlite-zstd` and `sqlite-zstd-dict` as in-run references, and saves
+`formats-upserts-rocksdb.json`.
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
+import re
 import resource
 import shutil
 import sqlite3
+import stat
+import struct
 import subprocess
 import sys
 import time
@@ -57,6 +73,7 @@ from typing import TYPE_CHECKING, Any
 
 import duckdb
 import fastavro
+import rocksdict
 import zstandard
 from bench_queries import (
     DUCKDB_LIMIT,
@@ -95,6 +112,9 @@ NEW_VARIANTS = [
     "avro-zstd",
     "avro-zstd-1m",
     "avro-deflate-pyavro",
+    "rocksdb-zstd",
+    "rocksdb-blob",
+    "rocksdb-packed",
 ]
 REFERENCES = ["sqlite-zstd", "duckdb-zstd"]
 ONLY_REFERENCES = ["parquet-zstd", "sqlite-zstd-dict", "duckdb-zstd"]
@@ -115,6 +135,27 @@ AVRO_BLOCK_1M = 1 << 20
 NULLABLE_COLUMNS = {"raw_digest", "html"}
 UPSERT_VARIANTS = ["sqlite-zstd", "sqlite-zstd-dict", "avro-zstd", "avro-zstd-1m"]
 UPSERT_RUNS = 2
+ROCKSDB_VERSION = "9.8.4"
+ROCKS_FAMILIES = ["meta", "html", "markdown"]
+ROCKS_CACHE = 128 << 20
+ROCKS_BLOCK = 16 << 10
+ROCKS_WRITE_BUFFER = 32 << 20
+ROCKS_DB_WRITE_BUFFER = 128 << 20
+ROCKS_JOBS = 2
+ROCKS_BLOOM_BITS = 10
+ROCKS_ZSTD_WINDOW = -14
+ROCKS_MIN_BLOB = 4096
+ROCKS_BLOB_FILE = 64 << 20
+ROCKS_LIMIT = "128 MiB block cache"
+ROCKS_CAPS = "128 MiB block cache; 32 MiB memtables, two per column family, 128 MiB in all"
+PACKED_HEADER = struct.Struct(">II")
+NO_HTML = 0xFFFFFFFF
+DURABILITY = ("sync", "nosync")
+ROCKSDB_UPSERTS = [
+    "sqlite-zstd",
+    "sqlite-zstd-dict",
+    *(f"rocksdb-{layout}-{d}" for layout in ("zstd", "blob", "packed") for d in DURABILITY),
+]
 
 
 def avro_type(column: str) -> str | list[str]:
@@ -137,9 +178,15 @@ def family(variant: str) -> str:
     return variant.split("-", maxsplit=1)[0]
 
 
+def store_of(variant: str) -> str:
+    """The store a variant runs on: a RocksDB upsert variant without its durability suffix."""
+    return variant.removesuffix("-sync").removesuffix("-nosync")
+
+
 def target_of(variant: str) -> Path:
     """Where a variant lives: the existing store for a reference, `formats/` otherwise."""
-    return STORES / variant if variant in REFERENCES else FORMATS / variant
+    store = store_of(variant)
+    return STORES / store if store in REFERENCES else FORMATS / store
 
 
 def source_sql(variant: str, target: Path) -> str:
@@ -316,12 +363,17 @@ def build_sqlite_dict(variant: str, target: Path, rows: int | None) -> str:
     )
 
 
-def avro_rows(rows: int | None) -> Iterator[dict[str, Any]]:
-    """Stream sqlite-raw in rowid order, or its first `rows` rows, one page dict at a time."""
+def avro_rows(rows: int | None, regime: str | None = None) -> Iterator[dict[str, Any]]:
+    """Stream sqlite-raw in rowid order, or its first `rows` rows, one page dict at a time.
+
+    With `regime`, only that regime's rows, still in rowid order.
+    """
     source = sqlite3.connect(f"file:{SQLITE_SOURCE}?mode=ro", uri=True)
+    where = " WHERE regime = ?" if regime else ""
     limit = f" LIMIT {rows}" if rows else ""
+    sql = f"SELECT {COLUMN_LIST} FROM pages{where} ORDER BY rowid{limit}"  # noqa: S608  fixed column names
     try:
-        for row in source.execute(f"SELECT {COLUMN_LIST} FROM pages ORDER BY rowid{limit}"):  # noqa: S608  fixed column names
+        for row in source.execute(sql, (regime,) if regime else ()):
             yield dict(zip(COLUMNS, row, strict=True))
     finally:
         source.close()
@@ -411,6 +463,247 @@ def build_avro(variant: str, target: Path, rows: int | None) -> str:
     return f"{written}; {build_avro_index(target)}"
 
 
+# --------------------------------------------------------------- rocksdb ---
+
+
+def rocks_options(variant: str, column: str, cache: rocksdict.Cache) -> rocksdict.Options:
+    """One column family's options, each set explicitly so no saved options file is reloaded.
+
+    Block zstd level 3 at every level, bottommost included; 16 KiB blocks in the one
+    shared LRU cache, index and filter blocks in it too; a bloom filter on the families
+    that hold no body (`meta`, `default`); 32 MiB memtables under a 128 MiB cap; two
+    background jobs; one old info LOG kept. The blob variant moves the two bodies into
+    zstd blob files, with GC at age cutoff 1.0 so a full compaction reclaims every stale
+    blob.
+    """
+    options = rocksdict.Options(raw_mode=True)
+    options.create_if_missing(True)  # noqa: FBT003  the binding's setter takes a positional flag
+    options.create_missing_column_families(True)  # noqa: FBT003  the binding's setter takes a positional flag
+    zstd = rocksdict.DBCompressionType.zstd()
+    options.set_compression_type(zstd)
+    options.set_bottommost_compression_type(zstd)
+    options.set_compression_options(ROCKS_ZSTD_WINDOW, ZSTD_LEVEL, 0, 0)
+    options.set_bottommost_compression_options(ROCKS_ZSTD_WINDOW, ZSTD_LEVEL, 0, 0, True)  # noqa: FBT003  the binding's setter takes a positional flag
+    table = rocksdict.BlockBasedOptions()
+    table.set_block_size(ROCKS_BLOCK)
+    table.set_block_cache(cache)
+    table.set_cache_index_and_filter_blocks(True)
+    if column not in BODY_COLUMNS:
+        table.set_bloom_filter(ROCKS_BLOOM_BITS, False)  # noqa: FBT003  the binding's setter takes a positional flag
+    options.set_block_based_table_factory(table)
+    options.set_write_buffer_size(ROCKS_WRITE_BUFFER)
+    options.set_db_write_buffer_size(ROCKS_DB_WRITE_BUFFER)
+    options.set_max_background_jobs(ROCKS_JOBS)
+    options.set_keep_log_file_num(1)
+    if variant == "rocksdb-blob" and column in BODY_COLUMNS:
+        options.set_enable_blob_files(True)
+        options.set_min_blob_size(ROCKS_MIN_BLOB)
+        options.set_blob_file_size(ROCKS_BLOB_FILE)
+        options.set_blob_compression_type(zstd)
+        options.set_enable_blob_gc(True)
+        options.set_blob_gc_age_cutoff(1.0)
+    return options
+
+
+def unpack(value: bytes) -> tuple[bytes, bytes | None, bytes]:
+    """Split a packed row into its meta JSON, its HTML (None when absent) and its Markdown."""
+    meta_length, html_length = PACKED_HEADER.unpack_from(value)
+    start = PACKED_HEADER.size + meta_length
+    meta = value[PACKED_HEADER.size : start]
+    if html_length == NO_HTML:
+        return meta, None, value[start:]
+    return meta, value[start : start + html_length], value[start + html_length :]
+
+
+class RocksStore:
+    """One open RocksDB store in its layout, with a sub-Rdict and a handle per column family.
+
+    rocksdict keeps the database open while any sub-Rdict or handle is alive, so `close`
+    drops every one of them before closing the database; only then is the lock released
+    and the WAL left empty.
+    """
+
+    def __init__(self, variant: str, target: Path, *, read_only: bool = False) -> None:
+        """Open or create the store, naming every column family and passing every option."""
+        self.target = target
+        self.packed = variant == "rocksdb-packed"
+        self.cache = rocksdict.Cache(ROCKS_CACHE)
+        families = (
+            {}
+            if self.packed
+            else {c: rocks_options(variant, c, self.cache) for c in ROCKS_FAMILIES}
+        )
+        access = (
+            rocksdict.AccessType.read_only() if read_only else rocksdict.AccessType.read_write()
+        )
+        self.db = rocksdict.Rdict(
+            str(target),
+            options=rocks_options(variant, "default", self.cache),
+            column_families=families,
+            access_type=access,
+        )
+        self.parts = {c: self.db.get_column_family(c) for c in families}
+        self.handles = {c: self.db.get_column_family_handle(c) for c in families}
+        self.write_options = {}
+        for sync in (True, False):
+            self.write_options[sync] = rocksdict.WriteOptions()
+            self.write_options[sync].sync = sync
+
+    def put(self, batch: rocksdict.WriteBatch, page: dict[str, Any]) -> None:
+        """Add one page to a batch: three column families, or one packed value."""
+        key = page["identity"].encode()
+        meta = {c: page[c] for c in META_COLUMNS}
+        meta_bytes = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode()
+        html = None if page["html"] is None else page["html"].encode()
+        markdown = page["markdown"].encode()
+        if self.packed:
+            header = PACKED_HEADER.pack(len(meta_bytes), NO_HTML if html is None else len(html))
+            batch.put(key, b"".join((header, meta_bytes, html or b"", markdown)))
+            return
+        batch.put(key, meta_bytes, self.handles["meta"])
+        if html is None:
+            batch.delete(key, self.handles["html"])
+        else:
+            batch.put(key, html, self.handles["html"])
+        batch.put(key, markdown, self.handles["markdown"])
+
+    def write(self, pages: Iterable[dict[str, Any]], *, sync: bool) -> None:
+        """Write the pages as one atomic WriteBatch, with or without a sync of the WAL."""
+        batch = rocksdict.WriteBatch(raw_mode=True)
+        for page in pages:
+            self.put(batch, page)
+        self.db.write(batch, self.write_options[sync])
+
+    def get(self, identity: str) -> tuple[bytes | None, bytes | None]:
+        """The HTML and Markdown of one page; None for an absent body or page."""
+        key = identity.encode()
+        if self.packed:
+            value = self.db.get(key)
+            if value is None:
+                return None, None
+            _, html, markdown = unpack(value)
+            return html, markdown
+        return self.parts["html"].get(key), self.parts["markdown"].get(key)
+
+    def markdown_bodies(self) -> Iterator[bytes]:
+        """Every Markdown body in key order; the packed layout reads every value to get it."""
+        if self.packed:
+            for value in self.db.values():
+                yield unpack(value)[2]
+        else:
+            yield from self.parts["markdown"].values()
+
+    def metas(self) -> Iterator[bytes]:
+        """Every row's meta JSON in key order; the packed layout reads every value to get it."""
+        if self.packed:
+            for value in self.db.values():
+                yield unpack(value)[0]
+        else:
+            yield from self.parts["meta"].values()
+
+    def count(self) -> int:
+        """Rows, by iterating the keys without filling the block cache."""
+        options = rocksdict.ReadOptions()
+        options.fill_cache(False)  # noqa: FBT003  the binding's setter takes a positional flag
+        keys = self.db if self.packed else self.parts["meta"]
+        return sum(1 for _ in keys.keys(read_opt=options))
+
+    def compact(self) -> None:
+        """Flush and fully compact every column family, close, and fail if the WAL is not empty."""
+        parts = [self.db, *self.parts.values()]
+        for part in parts:
+            part.flush()
+        options = rocksdict.CompactOptions()
+        options.set_bottommost_level_compaction(rocksdict.BottommostLevelCompaction.force())
+        for part in parts:
+            part.compact_range(None, None, options)
+        self.close()
+        if left := [
+            p.name for p in self.target.iterdir() if p.suffix == ".log" and p.stat().st_size
+        ]:
+            msg = f"{self.target}: WAL left after compaction: {left}"
+            raise RuntimeError(msg)
+
+    def close(self) -> None:
+        """Close the sub-Rdicts, drop the handles, close the database."""
+        for part in self.parts.values():
+            part.close()
+        self.parts.clear()
+        self.handles.clear()
+        self.db.close()
+        gc.collect()
+
+
+def live_bytes(target: Path) -> int:
+    """Allocated bytes of a store directory that may be open, every file counted.
+
+    An open RocksDB deletes obsolete WAL, SST and blob files from background threads, so
+    a file listed may be gone by the time it is measured; it then counts for nothing.
+    """
+    total = 0
+    for path in target.rglob("*"):
+        try:
+            found = path.stat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(found.st_mode):
+            total += found.st_blocks * 512
+    return total
+
+
+def allocated_bytes(target: Path, pattern: str) -> int:
+    """Allocated bytes of the files in `target` matching `pattern`."""
+    return sum(p.stat().st_blocks * 512 for p in target.glob(pattern))
+
+
+def rocks_info(target: Path) -> dict[str, Any]:
+    """The RocksDB version from the LOG header, and the bytes of LOG, SST and blob files."""
+    found = re.search(r"RocksDB version: (\S+)", (target / "LOG").read_text(errors="replace"))
+    version = found.group(1) if found else None
+    if version != ROCKSDB_VERSION:
+        msg = f"{target}: RocksDB {version}, expected {ROCKSDB_VERSION}"
+        raise RuntimeError(msg)
+    return {
+        "rocksdb_version": version,
+        "log_bytes": allocated_bytes(target, "LOG*"),
+        "sst_bytes": allocated_bytes(target, "*.sst"),
+        "blob_bytes": allocated_bytes(target, "*.blob"),
+    }
+
+
+def rocks_layout(variant: str) -> str:
+    """One phrase naming a RocksDB variant's layout."""
+    if variant == "rocksdb-packed":
+        return "one packed value per row in the default column family"
+    blobs = ", bodies in zstd blob files" if variant == "rocksdb-blob" else ""
+    return f"column families meta, html, markdown{blobs}"
+
+
+def build_rocksdb(
+    variant: str, target: Path, rows: int | None, regime: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    """Write the rows in unsynced WriteBatches of SQLITE_BATCH, compact fully, close."""
+    store = RocksStore(variant, target)
+    written = raw = 0
+    batch: list[dict[str, Any]] = []
+    for page in avro_rows(rows, regime):
+        batch.append(page)
+        written += 1
+        raw += page["html_bytes"] + page["markdown_bytes"]
+        if len(batch) >= SQLITE_BATCH:
+            store.write(batch, sync=False)
+            batch.clear()
+    if batch:
+        store.write(batch, sync=False)
+    store.compact()
+    info = rocks_info(target)
+    note = (
+        f"{rocks_layout(variant)}; RocksDB {info['rocksdb_version']},"
+        f" LOG {info['log_bytes'] / 1024:.0f} KiB"
+    )
+    return note, {"rows_written": written, "raw_bytes": raw, **info}
+
+
 BUILDERS: dict[str, Callable[[str, Path, int | None], str]] = {
     "parquet": build_parquet,
     "vortex": build_vortex,
@@ -420,14 +713,27 @@ BUILDERS: dict[str, Callable[[str, Path, int | None], str]] = {
 }
 
 
-def build_child(variant: str, target: Path, rows: int | None) -> None:
-    """Build one variant into `target` and print wall, RSS and the layout note."""
+def build_child(variant: str, target: Path, rows: int | None, regime: str | None) -> None:
+    """Build one variant into `target` and print wall, RSS and the layout note.
+
+    A RocksDB build also reports the rows it wrote, their raw bytes, the rows a read-only
+    reopen counts (outside the timed region, after the RSS is read) and its file sizes.
+    """
     target.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
-    note = BUILDERS[family(variant)](variant, target, rows)
+    extra: dict[str, Any] = {}
+    if family(variant) == "rocksdb":
+        note, extra = build_rocksdb(variant, target, rows, regime)
+    else:
+        note = BUILDERS[family(variant)](variant, target, rows)
     wall = time.perf_counter() - started
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes on macOS
-    print(json.dumps({"variant": variant, "wall_s": wall, "rss_bytes": rss, "note": note}))
+    if extra:
+        store = RocksStore(variant, target, read_only=True)
+        extra["rows"] = store.count()
+        store.close()
+    report = {"variant": variant, "wall_s": wall, "rss_bytes": rss, "note": note}
+    print(json.dumps({**report, **extra}))
 
 
 # --------------------------------------------------------------- queries ---
@@ -553,9 +859,36 @@ def avro_query(query: str, target: Path) -> dict[str, Any]:
     return {"items": items, "memory_limit": FASTAVRO, "threads": None}
 
 
+def rocksdb_query(variant: str, query: str, target: Path) -> dict[str, Any]:
+    """The three read shapes on a RocksDB store, opened read-only with its 128 MiB cache.
+
+    `point` gets both bodies; `scan` digests every Markdown body; `meta` parses every
+    row's meta JSON. The packed layout reads, and slices, the whole row for each.
+    """
+    store = RocksStore(variant, target, read_only=True)
+    items = 0
+    if query == "point":
+        for identity in json.loads(IDS_FILE.read_text()):
+            html, markdown = store.get(identity)
+            if markdown is not None:
+                digest(html or b"")
+                digest(markdown)
+                items += 1
+    elif query == "scan":
+        for markdown in store.markdown_bodies():
+            digest(markdown)
+            items += 1
+    else:
+        for meta in store.metas():
+            json.loads(meta)
+            items += 1
+    store.close()
+    return {"items": items, "memory_limit": ROCKS_LIMIT, "threads": None, "caps": ROCKS_CAPS}
+
+
 def settings_of(variant: str) -> list[str]:
-    """The settings a variant is measured under: SQLite's own, DuckDB's two, fastavro."""
-    if family(variant) == "sqlite":
+    """The settings a variant is measured under: its own, DuckDB's two, fastavro too."""
+    if family(variant) in {"sqlite", "rocksdb"}:
         return ["default"]
     if family(variant) == "avro":
         return ["default", DUCKDB_LIMIT, FASTAVRO]
@@ -569,6 +902,8 @@ def query_child(variant: str, query: str, setting: str, target: Path) -> None:
         found = avro_query(query, target)
     elif family(variant) == "sqlite":
         found = sqlite_query(variant, query, target)
+    elif family(variant) == "rocksdb":
+        found = rocksdb_query(variant, query, target)
     else:
         found = duckdb_query(variant, query, setting, target)
     wall = time.perf_counter() - started
@@ -799,10 +1134,45 @@ def avro_upsert_child(variant: str, target: Path) -> dict[str, Any]:
     return report
 
 
+def rocksdb_upsert_child(variant: str, target: Path) -> dict[str, Any]:
+    """Upsert into a RocksDB store, one WriteBatch per row, compact fully, check read-only."""
+    layout = store_of(variant)
+    sync = variant.endswith("-sync")
+    report: dict[str, Any] = {"size_before": store_bytes(target), "sync": sync}
+    store = RocksStore(layout, target)
+    report["expected_rows"] = store.count()
+    started = time.perf_counter()
+    items = 0
+    for page in upsert_rows():
+        store.write([page], sync=sync)
+        items += 1
+    report["items"] = items
+    report["wall_upserts"] = time.perf_counter() - started
+    report["size_after_upserts"] = live_bytes(target)
+    started = time.perf_counter()
+    store.compact()
+    report["wall_compact"] = time.perf_counter() - started
+    report["size_after_compaction"] = store_bytes(target)
+    check = RocksStore(layout, target, read_only=True)
+    report["rows_after"] = check.count()
+    report["changed_found"] = sum(
+        check.get(page["identity"])[1] == page["markdown"].encode() for page in upsert_rows()
+    )
+    check.close()
+    gc_note = (
+        "; blob GC at cutoff 1.0 rewrites every blob file" if layout == "rocksdb-blob" else ""
+    )
+    report["compaction"] = f"flush, then compact_range with bottommost force{gc_note}"
+    report.update(rocks_info(target))
+    return report
+
+
 def upsert_child(variant: str, target: Path) -> None:
     """One upsert measurement; print its JSON line, or fail if a check does not hold."""
     if family(variant) == "avro":
         report = avro_upsert_child(variant, target)
+    elif family(variant) == "rocksdb":
+        report = rocksdb_upsert_child(variant, target)
     else:
         report = sqlite_upsert_child(variant, target)
     if report["rows_after"] != report["expected_rows"] or report["changed_found"] != len(
@@ -832,8 +1202,8 @@ def install_extensions() -> None:
     connection.close()
 
 
-def prepare(rows: int | None) -> int:
-    """Pick the lookup identities as bench_queries does; return the raw bytes of the rows."""
+def prepare(rows: int | None) -> tuple[int, int]:
+    """Pick the lookup identities as bench_queries does; return the rows and their raw bytes."""
     RESULTS.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(f"file:{SQLITE_SOURCE}?mode=ro", uri=True)
     (count,) = connection.execute("SELECT count(*) FROM pages").fetchone()
@@ -853,7 +1223,7 @@ def prepare(rows: int | None) -> int:
         f"prepared {len(picked)} lookups over {count} rows, {raw / 2**20:.0f} MiB raw",
         file=sys.stderr,
     )
-    return int(raw)
+    return count, int(raw)
 
 
 def run_child(args: list[str]) -> dict[str, Any]:
@@ -868,13 +1238,20 @@ def run_child(args: list[str]) -> dict[str, Any]:
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 
-def build(variant: str, rows: int | None, raw: int) -> dict[str, Any]:
+def check_rows(variant: str, found: dict[str, Any], expected: int) -> None:
+    """Exit unless a RocksDB build wrote, and a reopen counted, the expected rows."""
+    if "error" in found:
+        sys.exit(f"build of {variant} failed: {found['error']}")
+    if found.get("rows", expected) != expected or found.get("rows_written", expected) != expected:
+        sys.exit(f"build of {variant}: {expected} rows expected, got {found}")
+
+
+def build(variant: str, rows: int | None, raw: int, count: int) -> dict[str, Any]:
     """Wipe and build one variant in a child; measure it afterwards."""
     target = target_of(variant)
     shutil.rmtree(target, ignore_errors=True)
     found = run_child(["build", variant, str(target), str(rows or 0)])
-    if "error" in found:
-        sys.exit(f"build of {variant} failed: {found['error']}")
+    check_rows(variant, found, count)
     allocated = store_bytes(target)
     files = sum(1 for p in target.rglob("*") if p.is_file())
     record = {**found, "files": files, "allocated_bytes": allocated, "ratio": allocated / raw}
@@ -884,6 +1261,42 @@ def build(variant: str, rows: int | None, raw: int) -> dict[str, Any]:
         file=sys.stderr,
     )
     return record
+
+
+def build_regimes(variants: list[str], rows: int | None) -> list[dict[str, Any]]:
+    """Build each regime of each variant on its own, measure it, delete it.
+
+    The regimes, their rows and their raw bytes come from `sizes.json`; a full regime
+    build must write and count exactly those rows and bytes. With `rows`, each regime
+    takes its first `rows` rows (a smoke) and the build's own totals stand.
+    """
+    totals = [
+        r
+        for r in json.loads((RESULTS / "sizes.json").read_text())
+        if r["store"] == "sqlite-raw" and r["regime"] != "all"
+    ]
+    records = []
+    for variant in variants:
+        for total in totals:
+            regime = total["regime"]
+            target = FORMATS / f"{variant}-{regime}-PROTOTYPE-wipe-me"
+            shutil.rmtree(target, ignore_errors=True)
+            found = run_child(["build", variant, str(target), str(rows or 0), regime])
+            expected = min(rows, total["rows"]) if rows else total["rows"]
+            check_rows(f"{variant} {regime}", found, expected)
+            if not rows and found["raw_bytes"] != total["raw_bytes"]:
+                sys.exit(f"{variant} {regime}: raw bytes {found['raw_bytes']} != {total}")
+            allocated = store_bytes(target)
+            shutil.rmtree(target)
+            record = {**found, "regime": regime, "allocated_bytes": allocated}
+            record["ratio"] = allocated / found["raw_bytes"]
+            records.append(record)
+            print(
+                f"built {variant} {regime}: {allocated / 2**20:.1f} MiB ({record['ratio']:.3f}),"
+                f" {found['wall_s']:.1f} s",
+                file=sys.stderr,
+            )
+    return records
 
 
 def measure(variant: str, query: str, setting: str) -> dict[str, Any]:
@@ -932,10 +1345,10 @@ def print_tables(sizes: list[dict[str, Any]], queries: list[dict[str, Any]]) -> 
         )
 
 
-def measure_upserts() -> list[dict[str, Any]]:
+def measure_upserts(variants: list[str]) -> list[dict[str, Any]]:
     """Every upsert store, twice, each run on a fresh APFS clone; both runs kept."""
     results = []
-    for variant in UPSERT_VARIANTS:
+    for variant in variants:
         source = target_of(variant)
         if not source.exists():
             sys.exit(f"no {variant} store at {source}; run bench_formats.py first")
@@ -975,17 +1388,55 @@ def print_upserts(results: list[dict[str, Any]]) -> None:
         )
 
 
+def print_regimes(records: list[dict[str, Any]]) -> None:
+    """The per-regime size table, Markdown."""
+    print("\nPer regime: each regime built on its own, compacted and closed\n")
+    print("| variant | regime | rows | raw MiB | allocated MiB | allocated/raw | write s |")
+    print("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+    for r in records:
+        print(
+            f"| {r['variant']} | {r['regime']} | {r['rows']} | {r['raw_bytes'] / 2**20:.1f}"
+            f" | {r['allocated_bytes'] / 2**20:.1f} | {r['ratio']:.3f} | {r['wall_s']:.1f} |"
+        )
+
+
 def child(argv: list[str]) -> None:
     """Child: one build, one measurement or one explain."""
     kind, variant, *rest = argv
     if kind == "build":
-        build_child(variant, Path(rest[0]), int(rest[1]) or None)
+        target, rows, *regime = rest
+        build_child(variant, Path(target), int(rows) or None, regime[0] if regime else None)
     elif kind == "query":
         query_child(variant, rest[0], rest[1], Path(rest[2]))
     elif kind == "upsert":
         upsert_child(variant, Path(rest[0]))
     else:
         explain_child(variant, Path(rest[0]))
+
+
+def measure_all(variants: list[str]) -> list[dict[str, Any]]:
+    """Every read shape of every variant at each setting; one EXPLAIN per DuckDB-read store."""
+    queries = []
+    for variant in variants:
+        queries += [
+            measure(variant, query, setting)
+            for query in QUERIES
+            for setting in settings_of(variant)
+        ]
+        if family(variant) not in {"sqlite", "rocksdb"}:
+            run_child(["explain", variant, str(target_of(variant))])
+    return queries
+
+
+def run_upserts(only: str | None) -> None:
+    """Measure the upserts of the first four stores, or with `only` rocksdb, of RocksDB's."""
+    if only not in {None, "rocksdb"}:
+        sys.exit("--upserts takes no --only but rocksdb")
+    results = measure_upserts(ROCKSDB_UPSERTS if only else UPSERT_VARIANTS)
+    print_upserts(results)
+    out = RESULTS / ("formats-upserts-rocksdb.json" if only else "formats-upserts.json")
+    out.write_text(json.dumps(results, indent=2) + "\n")
+    print(f"\nsaved {out}")
 
 
 def main() -> None:
@@ -1001,19 +1452,23 @@ def main() -> None:
     parser.add_argument(
         "--upserts",
         action="store_true",
-        help="measure upserts on sqlite-zstd, sqlite-zstd-dict and two Avro stores (offline)",
+        help="measure upserts on sqlite-zstd, sqlite-zstd-dict and two Avro stores (offline);"
+        " with --only rocksdb, on the RocksDB stores synced and not",
+    )
+    parser.add_argument(
+        "--per-regime",
+        action="store_true",
+        help="with --only rocksdb, also build, measure and delete each regime on its own",
     )
     args = parser.parse_args()
     if args.child:
         child(args.child)
         return
     if args.upserts:
-        results = measure_upserts()
-        print_upserts(results)
-        out = RESULTS / "formats-upserts.json"
-        out.write_text(json.dumps(results, indent=2) + "\n")
-        print(f"\nsaved {out}")
+        run_upserts(args.only)
         return
+    if args.per_regime and args.only != "rocksdb":
+        sys.exit("--per-regime needs --only rocksdb")
     for needed in (DUCKDB_SOURCE, SQLITE_SOURCE, STORES / "sqlite-zstd" / "pages.sqlite"):
         if not needed.exists():
             sys.exit(f"no store at {needed}; run load_stores.py first")
@@ -1025,23 +1480,21 @@ def main() -> None:
             if not target_of(variant).exists():
                 sys.exit(f"no {variant} store; run bench_formats.py without --only first")
     install_extensions()
-    raw = prepare(args.rows)
+    count, raw = prepare(args.rows)
     FORMATS.mkdir(parents=True, exist_ok=True)
-    sizes = [build(variant, args.rows, raw) for variant in built]
-    queries = []
-    for variant in built + references:
-        queries += [
-            measure(variant, query, setting)
-            for query in QUERIES
-            for setting in settings_of(variant)
-        ]
-        if family(variant) != "sqlite":
-            run_child(["explain", variant, str(target_of(variant))])
+    sizes = [build(variant, args.rows, raw, count) for variant in built]
+    regimes = build_regimes(built, args.rows) if args.per_regime else []
+    queries = measure_all(built + references)
     print_tables(sizes, queries)
+    if regimes:
+        print_regimes(regimes)
     suffix = (f"-{args.only}" if args.only else "") + (f"-{args.rows}" if args.rows else "")
     out = RESULTS / f"formats{suffix}.json"
     out.write_text(
-        json.dumps({"raw_bytes": raw, "sizes": sizes, "queries": queries}, indent=2) + "\n"
+        json.dumps(
+            {"raw_bytes": raw, "sizes": sizes, "regimes": regimes, "queries": queries}, indent=2
+        )
+        + "\n"
     )
     print(f"\nsaved {out}")
 

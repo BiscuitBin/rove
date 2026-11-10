@@ -1,12 +1,14 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the nine commands below, on an Apple M5 Pro (18 cores, 64 GB)
+Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the twelve commands below, on an Apple M5 Pro (18 cores, 64 GB)
 running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
 3.53.1 as bundled with that Python, plus fastavro 1.13.1 and avro 1.12.2 for the Avro
-section. Every number on this page comes from one run of the nine commands below,
-except the tracer-bullet figures named in the first caveat, the block counts of the
-DuckDB probe named in the insert section, the 20-row codec probe named in the Avro
-section and the allocation probe named in the gaps section:
+section and rocksdict 0.3.29 (bundling RocksDB 9.8.4) for the RocksDB section. Every
+number on this page comes from one run of the twelve commands below, except the
+tracer-bullet figures named in the first caveat, the block counts of the DuckDB probe
+named in the insert section, the 20-row codec probe named in the Avro section, the
+allocation probe named in the gaps section and the sync and cache probes named in the
+RocksDB section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
@@ -18,12 +20,16 @@ uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only avro
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd,sqlite-zstd-wal,duckdb-zstd --suffix avro
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants avro-zstd-1m,sqlite-zstd-dict-wal,sqlite-zstd-wal --suffix gaps
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only rocksdb --per-regime
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts --only rocksdb
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants rocksdb-zstd-sync,rocksdb-zstd-nosync,rocksdb-blob-sync,rocksdb-blob-nosync,rocksdb-packed-sync,rocksdb-packed-nosync,sqlite-zstd,sqlite-zstd-wal,sqlite-zstd-dict-wal --suffix rocksdb
 ```
 
-The raw output of the last eight commands is kept beside the data, under
+The raw output of the last eleven commands is kept beside the data, under
 `ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`,
 `formats.json`, `formats-avro.json`, `inserts-avro.json`, `inserts-gaps.json`,
-`formats-upserts.json` and the `formats-explain/` files), which is gitignored.
+`formats-upserts.json`, `formats-rocksdb.json`, `formats-upserts-rocksdb.json`,
+`inserts-rocksdb.json` and the `formats-explain/` files), which is gitignored.
 
 ## The question
 
@@ -750,6 +756,263 @@ Updated against the Avro section: the 1 MiB file's ratio is reachable a row at a
 if the rows may wait in memory for their block; the buffered-write cost is durability,
 not speed.
 
+## RocksDB
+
+RocksDB is an embedded log-structured key-value store: writes go to a write-ahead log
+and an in-memory table, which is flushed to sorted files that background compactions
+merge level by level, each file a sequence of compressed blocks. It is measured here as
+one more option on every axis above.
+
+**The binding.** `rocksdict` 0.3.29, pinned in the two scripts' PEP 723 headers only,
+ships a Python 3.14 wheel for macOS arm64 that bundles RocksDB 9.8.4 and zstd 1.5.7; every
+store's `LOG` header names RocksDB 9.8.4. python-rocksdb, the binding RocksDB's site
+links to, was archived in June 2025, has had no release since 2019 and ships no wheels.
+Speedb, the RocksDB fork, was dropped: its only binding stops at Python 3.12 and Speedb
+has not released since January 2024.
+
+**The setup.** Three stores, every option passed explicitly on every open: block zstd
+level 3 at every level, 16 KiB blocks in one 128 MiB LRU cache shared by every column
+family (index and filter blocks in it too), 32 MiB memtables capped at 128 MiB in all,
+two background jobs, one old info `LOG` kept. The application compresses nothing; the
+codec is RocksDB's, block by block.
+
+- `rocksdb-zstd`: three column families keyed by identity: `meta` (compact JSON of the
+  metadata columns, 10-bit bloom filter), `html` (no key when the page has no HTML) and
+  `markdown`. One `WriteBatch` writes a row across the three atomically.
+- `rocksdb-blob`: the same, with both bodies in zstd blob files (values of 4 KiB and up,
+  64 MiB files) and blob garbage collection at age cutoff 1.0, so a full compaction
+  rewrites every blob file and reclaims every stale blob.
+- `rocksdb-packed`: one value per row in the default column family, a header of two
+  lengths, then the metadata JSON, the HTML and the Markdown. A scan or a metadata select
+  reads and slices every whole row; that is the layout's cost, by design.
+
+Each build writes `WriteBatch`es of 256 rows without syncing, then flushes every column
+family, compacts it fully (`compact_range` with bottommost compaction forced) and
+closes; the child fails if a write-ahead log of nonzero size is left, and a read-only
+reopen counts the rows outside the timed region. That full compaction is the peer of
+`VACUUM`: RocksDB normally compacts incrementally in the background, and the full
+compaction is what returns a store to its smallest size at a moment of the caller's
+choosing. Inserts and upserts run with the log synced on every write (`sync`) and not
+(`nosync`). The synced variant is the durability peer of the rollback-journal
+`sqlite-zstd` and the unsynced one, durable to a process crash but not to an OS crash,
+the peer of SQLite WAL with `synchronous=NORMAL`. They are durability peers, not cost
+peers: SQLite under a rollback journal syncs the journal and the database file on every
+commit, RocksDB syncs its log once. Neither issues `F_FULLFSYNC`. A by-hand probe on
+this disk timed a synced RocksDB write of 30 KB at 0.046 ms, `os.fsync` after the same
+write at 0.042 ms and `F_FULLFSYNC` at 3.7 ms; RocksDB's own statistics counted 1,000
+log syncs for 1,000 synced writes. The timed write is not the same work either: a RocksDB
+write appends to the log and inserts into a memtable, and the compression happens when a
+memtable is flushed, on RocksDB's two background threads during the loop or in the
+compaction afterwards, which is timed and reported apart; SQLite compresses every body
+on the timed thread. The insert and upsert rates below are the rate a caller sees, not
+the whole cost of the write. The SQLite upsert stores ran under a rollback journal with
+`synchronous=FULL`, so the synced RocksDB upserts are their peers; the unsynced ones have
+no measured SQLite peer, since SQLite in WAL mode was not upserted.
+
+Size, bulk built from `sqlite-raw` in rowid order, compacted and closed (the references
+below the line are from the formats run and the per-regime section; the dictionary
+store's write cost is its build in the formats run, 256-row batches then `VACUUM`):
+
+| variant | files | allocated MiB | allocated/raw | SST MiB | blob MiB | LOG KiB | write s | write peak RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rocksdb-zstd | 23 | 815.7 | 0.184 | 814.8 | 0 | 840 | 25.8 | 922 |
+| rocksdb-blob | 25 | 885.1 | 0.200 | 47.5 | 836.7 | 916 | 35.1 | 904 |
+| rocksdb-packed | 20 | 768.9 | 0.174 | 768.1 | 0 | 672 | 22.7 | 883 |
+| sqlite-zstd-dict | | 763.9 | 0.173 | | | | 26.0 | 713 |
+| sqlite-zstd | | 1,026.3 | 0.232 | | | | | |
+| duckdb-zstd | | 560.0 | 0.127 | | | | | |
+
+Per regime, allocated over raw bytes, each (regime, store) pair built on its own; the
+SQLite and DuckDB columns are the per-regime section's, and the dictionary store was
+not built per regime:
+
+| regime | rows | raw MiB | sqlite-zstd | duckdb-zstd | rocksdb-zstd | rocksdb-blob | rocksdb-packed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rust | 62,067 | 835.7 | 0.313 | 0.072 | 0.154 | 0.211 | 0.159 |
+| sphinx | 9,703 | 593.1 | 0.195 | 0.094 | 0.172 | 0.177 | 0.157 |
+| wikipedia | 30,000 | 1,273.5 | 0.230 | 0.126 | 0.196 | 0.208 | 0.182 |
+| commoncrawl | 9,999 | 1,689.6 | 0.196 | 0.170 | 0.191 | 0.192 | 0.176 |
+| github | 19,111 | 29.8 | 0.818 | 0.479 | 0.466 | 0.481 | 0.465 |
+
+Reads, warm cache, second of two runs, a fresh process each, with the in-run references:
+
+| variant | query | memory limit | peak RSS MiB | wall s | ms per item | items |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| rocksdb-zstd | point | 128 MiB block cache | 71 | 0.016 | 0.080 | 200 |
+| rocksdb-zstd | scan | 128 MiB block cache | 312 | 0.845 | 0.006 | 130,880 |
+| rocksdb-zstd | meta | 128 MiB block cache | 118 | 0.225 | 0.002 | 130,880 |
+| rocksdb-blob | point | 128 MiB block cache | 61 | 0.018 | 0.092 | 200 |
+| rocksdb-blob | scan | 128 MiB block cache | 196 | 0.873 | 0.007 | 130,880 |
+| rocksdb-blob | meta | 128 MiB block cache | 118 | 0.219 | 0.002 | 130,880 |
+| rocksdb-packed | point | 128 MiB block cache | 67 | 0.014 | 0.068 | 200 |
+| rocksdb-packed | scan | 128 MiB block cache | 548 | 2.321 | 0.018 | 130,880 |
+| rocksdb-packed | meta | 128 MiB block cache | 546 | 2.262 | 0.017 | 130,880 |
+| sqlite-zstd-dict | point | SQLite default | 54 | 0.009 | 0.047 | 200 |
+| sqlite-zstd-dict | scan | SQLite default | 72 | 1.104 | 0.008 | 130,880 |
+| sqlite-zstd-dict | meta | SQLite default | 52 | 0.180 | 0.001 | 130,880 |
+| parquet-zstd | point | 51.1 GiB | 1,395 | 22.839 | 114.19 | 200 |
+| parquet-zstd | point | 512MB | failed: out of memory | | | |
+| parquet-zstd | scan | 51.1 GiB | 796 | 1.144 | 0.009 | 130,880 |
+| parquet-zstd | scan | 488.2 MiB | 797 | 1.096 | 0.008 | 130,880 |
+| parquet-zstd | meta | 51.1 GiB | 141 | 0.105 | 0.001 | 130,880 |
+| parquet-zstd | meta | 488.2 MiB | 141 | 0.104 | 0.001 | 130,880 |
+| duckdb-zstd | point | 51.1 GiB | 545 | 2.462 | 12.31 | 200 |
+| duckdb-zstd | point | 488.2 MiB | 545 | 2.441 | 12.20 | 200 |
+| duckdb-zstd | scan | 51.1 GiB | 631 | 1.008 | 0.008 | 130,880 |
+| duckdb-zstd | scan | 488.2 MiB | 629 | 0.979 | 0.007 | 130,880 |
+| duckdb-zstd | meta | 51.1 GiB | 104 | 0.079 | 0.001 | 130,880 |
+| duckdb-zstd | meta | 488.2 MiB | 104 | 0.078 | 0.001 | 130,880 |
+
+Insert throughput, one run per cell, a fresh process each; the three SQLite variants run
+beside them as in-run references (`sqlite-zstd` is the durability peer of `sync`, the
+two WAL variants of `nosync`, and `sqlite-zstd-dict-wal` is the recommendation):
+
+| variant | mode | mix | scenario | rows | rows/s | raw MiB/s | insert s | compact s | peak RSS MiB | MiB before > after inserts > after compaction |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| rocksdb-zstd-sync | single | mixed | empty | 10,000 | 6,911 | 231.7 | 1.45 | 1.20 | 280 | 0.0 > 429.5 > 62.6 |
+| rocksdb-zstd-sync | single | mixed | populated | 10,000 | 7,436 | 249.3 | 1.34 | 7.55 | 303 | 310.9 > 767.7 > 372.5 |
+| rocksdb-zstd-sync | batch | mixed | empty | 10,000 | 9,986 | 334.8 | 1.00 | 1.30 | 690 | 0.0 > 263.7 > 62.5 |
+| rocksdb-zstd-sync | batch | mixed | populated | 10,000 | 10,258 | 343.9 | 0.97 | 8.46 | 702 | 310.9 > 579.1 > 372.5 |
+| rocksdb-zstd-sync | single | commoncrawl | empty | 9,999 | 2,001 | 338.1 | 5.00 | 2.99 | 512 | 0.0 > 731.6 > 322.5 |
+| rocksdb-zstd-sync | single | commoncrawl | populated | 9,999 | 2,073 | 350.2 | 4.82 | 7.30 | 516 | 205.1 > 2,231.9 > 527.3 |
+| rocksdb-zstd-sync | batch | commoncrawl | empty | 9,999 | 2,316 | 391.4 | 4.32 | 3.00 | 996 | 0.0 > 555.8 > 322.4 |
+| rocksdb-zstd-sync | batch | commoncrawl | populated | 9,999 | 2,301 | 388.8 | 4.35 | 7.34 | 1,011 | 205.1 > 1,086.9 > 527.2 |
+| rocksdb-zstd-nosync (nosync) | single | mixed | empty | 10,000 | 10,045 | 336.8 | 1.00 | 1.24 | 298 | 0.0 > 419.7 > 62.6 |
+| rocksdb-zstd-nosync (nosync) | single | mixed | populated | 10,000 | 10,230 | 343.0 | 0.98 | 7.62 | 307 | 310.9 > 756.7 > 372.5 |
+| rocksdb-zstd-nosync (nosync) | batch | mixed | empty | 10,000 | 10,529 | 353.0 | 0.95 | 1.29 | 663 | 0.0 > 263.7 > 62.6 |
+| rocksdb-zstd-nosync (nosync) | batch | mixed | populated | 10,000 | 10,699 | 358.7 | 0.93 | 8.42 | 679 | 310.9 > 579.1 > 372.5 |
+| rocksdb-zstd-nosync (nosync) | single | commoncrawl | empty | 9,999 | 2,271 | 383.7 | 4.40 | 2.94 | 508 | 0.0 > 731.6 > 322.5 |
+| rocksdb-zstd-nosync (nosync) | single | commoncrawl | populated | 9,999 | 2,255 | 381.1 | 4.43 | 7.40 | 528 | 205.1 > 2,230.9 > 527.3 |
+| rocksdb-zstd-nosync (nosync) | batch | commoncrawl | empty | 9,999 | 2,320 | 392.1 | 4.31 | 3.00 | 1,004 | 0.0 > 555.8 > 322.4 |
+| rocksdb-zstd-nosync (nosync) | batch | commoncrawl | populated | 9,999 | 2,331 | 393.8 | 4.29 | 7.29 | 1,010 | 205.1 > 989.7 > 527.2 |
+| rocksdb-blob-sync | single | mixed | empty | 10,000 | 6,958 | 233.3 | 1.44 | 1.35 | 267 | 0.0 > 433.6 > 67.6 |
+| rocksdb-blob-sync | single | mixed | populated | 10,000 | 7,410 | 248.4 | 1.35 | 9.41 | 270 | 336.4 > 798.4 > 403.6 |
+| rocksdb-blob-sync | batch | mixed | empty | 10,000 | 10,235 | 343.2 | 0.98 | 1.45 | 670 | 0.0 > 267.5 > 67.6 |
+| rocksdb-blob-sync | batch | mixed | populated | 10,000 | 10,414 | 349.2 | 0.96 | 9.82 | 674 | 336.4 > 608.4 > 403.6 |
+| rocksdb-blob-sync | single | commoncrawl | empty | 9,999 | 2,050 | 346.4 | 4.88 | 2.97 | 513 | 0.0 > 734.1 > 324.9 |
+| rocksdb-blob-sync | single | commoncrawl | populated | 9,999 | 1,865 | 315.1 | 5.36 | 12.42 | 518 | 232.2 > 2,441.8 > 557.7 |
+| rocksdb-blob-sync | batch | commoncrawl | empty | 9,999 | 2,293 | 387.4 | 4.36 | 3.07 | 1,009 | 0.0 > 558.0 > 324.7 |
+| rocksdb-blob-sync | batch | commoncrawl | populated | 9,999 | 2,308 | 390.0 | 4.33 | 10.03 | 997 | 232.2 > 1,196.5 > 557.6 |
+| rocksdb-blob-nosync (nosync) | single | mixed | empty | 10,000 | 10,207 | 342.2 | 0.98 | 1.38 | 269 | 0.0 > 423.6 > 67.6 |
+| rocksdb-blob-nosync (nosync) | single | mixed | populated | 10,000 | 10,228 | 342.9 | 0.98 | 9.53 | 272 | 336.4 > 787.4 > 403.6 |
+| rocksdb-blob-nosync (nosync) | batch | mixed | empty | 10,000 | 10,717 | 359.3 | 0.93 | 1.43 | 666 | 0.0 > 267.5 > 67.6 |
+| rocksdb-blob-nosync (nosync) | batch | mixed | populated | 10,000 | 10,478 | 351.3 | 0.95 | 9.92 | 670 | 336.4 > 608.4 > 403.6 |
+| rocksdb-blob-nosync (nosync) | single | commoncrawl | empty | 9,999 | 2,304 | 389.4 | 4.34 | 2.96 | 511 | 0.0 > 734.1 > 324.9 |
+| rocksdb-blob-nosync (nosync) | single | commoncrawl | populated | 9,999 | 1,962 | 331.5 | 5.10 | 11.70 | 540 | 232.2 > 2,274.4 > 557.7 |
+| rocksdb-blob-nosync (nosync) | batch | commoncrawl | empty | 9,999 | 2,296 | 388.0 | 4.35 | 3.04 | 1,006 | 0.0 > 558.0 > 324.7 |
+| rocksdb-blob-nosync (nosync) | batch | commoncrawl | populated | 9,999 | 2,272 | 383.9 | 4.40 | 10.07 | 1,030 | 232.2 > 1,508.6 > 557.6 |
+| rocksdb-packed-sync | single | mixed | empty | 10,000 | 6,858 | 229.9 | 1.46 | 1.14 | 242 | 0.0 > 80.7 > 58.6 |
+| rocksdb-packed-sync | single | mixed | populated | 10,000 | 7,442 | 249.5 | 1.34 | 7.07 | 287 | 292.2 > 372.6 > 350.2 |
+| rocksdb-packed-sync | batch | mixed | empty | 10,000 | 9,863 | 330.7 | 1.01 | 1.40 | 586 | 0.0 > 89.2 > 58.6 |
+| rocksdb-packed-sync | batch | mixed | populated | 10,000 | 9,942 | 333.3 | 1.01 | 7.04 | 599 | 292.2 > 368.3 > 350.2 |
+| rocksdb-packed-sync | single | commoncrawl | empty | 9,999 | 2,067 | 349.3 | 4.84 | 2.74 | 471 | 0.0 > 301.1 > 298.0 |
+| rocksdb-packed-sync | single | commoncrawl | populated | 9,999 | 2,076 | 350.8 | 4.82 | 7.88 | 523 | 195.4 > 496.3 > 493.2 |
+| rocksdb-packed-sync | batch | commoncrawl | empty | 9,999 | 2,304 | 389.3 | 4.34 | 2.75 | 956 | 0.0 > 303.1 > 297.9 |
+| rocksdb-packed-sync | batch | commoncrawl | populated | 9,999 | 2,277 | 384.8 | 4.39 | 7.96 | 952 | 195.4 > 498.3 > 493.1 |
+| rocksdb-packed-nosync (nosync) | single | mixed | empty | 10,000 | 10,196 | 341.8 | 0.98 | 1.13 | 269 | 0.0 > 80.7 > 58.6 |
+| rocksdb-packed-nosync (nosync) | single | mixed | populated | 10,000 | 10,513 | 352.5 | 0.95 | 7.09 | 288 | 292.2 > 372.6 > 350.2 |
+| rocksdb-packed-nosync (nosync) | batch | mixed | empty | 10,000 | 10,238 | 343.3 | 0.98 | 1.40 | 587 | 0.0 > 89.2 > 58.6 |
+| rocksdb-packed-nosync (nosync) | batch | mixed | populated | 10,000 | 10,297 | 345.2 | 0.97 | 7.11 | 600 | 292.2 > 368.3 > 350.2 |
+| rocksdb-packed-nosync (nosync) | single | commoncrawl | empty | 9,999 | 2,235 | 377.7 | 4.47 | 2.74 | 494 | 0.0 > 301.1 > 298.0 |
+| rocksdb-packed-nosync (nosync) | single | commoncrawl | populated | 9,999 | 2,318 | 391.7 | 4.31 | 7.84 | 506 | 195.4 > 496.3 > 493.2 |
+| rocksdb-packed-nosync (nosync) | batch | commoncrawl | empty | 9,999 | 2,323 | 392.5 | 4.30 | 2.80 | 966 | 0.0 > 303.1 > 297.9 |
+| rocksdb-packed-nosync (nosync) | batch | commoncrawl | populated | 9,999 | 2,321 | 392.2 | 4.31 | 7.89 | 950 | 195.4 > 498.3 > 493.1 |
+| sqlite-zstd | single | mixed | empty | 10,000 | 2,383 | 79.9 | 4.20 | 0.30 | 179 | 0.0 > 81.0 > 77.9 |
+| sqlite-zstd | single | mixed | populated | 10,000 | 2,534 | 85.0 | 3.95 | 1.92 | 179 | 390.0 > 470.0 > 467.9 |
+| sqlite-zstd | batch | mixed | empty | 10,000 | 7,219 | 242.0 | 1.39 | 0.25 | 397 | 0.0 > 80.2 > 77.9 |
+| sqlite-zstd | batch | mixed | populated | 10,000 | 7,117 | 238.6 | 1.41 | 1.86 | 397 | 390.0 > 470.0 > 467.9 |
+| sqlite-zstd | single | commoncrawl | empty | 9,999 | 1,132 | 191.3 | 8.83 | 1.35 | 415 | 0.0 > 336.1 > 331.7 |
+| sqlite-zstd | single | commoncrawl | populated | 9,999 | 1,098 | 185.6 | 9.10 | 2.24 | 416 | 287.1 > 623.1 > 618.9 |
+| sqlite-zstd | batch | commoncrawl | empty | 9,999 | 1,586 | 268.1 | 6.30 | 1.04 | 605 | 0.0 > 336.6 > 331.7 |
+| sqlite-zstd | batch | commoncrawl | populated | 9,999 | 1,604 | 271.1 | 6.23 | 2.14 | 603 | 287.1 > 623.1 > 618.9 |
+| sqlite-zstd-wal | single | mixed | empty | 10,000 | 6,350 | 212.9 | 1.57 | 0.21 | 179 | 0.0 > 85.7 > 80.7 |
+| sqlite-zstd-wal | single | mixed | populated | 10,000 | 6,411 | 215.0 | 1.56 | 1.61 | 179 | 390.0 > 474.9 > 467.9 |
+| sqlite-zstd-wal | batch | mixed | empty | 10,000 | 6,669 | 223.6 | 1.50 | 0.22 | 398 | 0.0 > 90.3 > 80.2 |
+| sqlite-zstd-wal | batch | mixed | populated | 10,000 | 6,868 | 230.3 | 1.46 | 1.61 | 398 | 390.0 > 480.3 > 467.9 |
+| sqlite-zstd-wal | single | commoncrawl | empty | 9,999 | 1,470 | 248.3 | 6.80 | 1.13 | 420 | 0.0 > 342.4 > 336.3 |
+| sqlite-zstd-wal | single | commoncrawl | populated | 9,999 | 1,506 | 254.4 | 6.64 | 1.89 | 416 | 287.1 > 630.3 > 623.1 |
+| sqlite-zstd-wal | batch | commoncrawl | empty | 9,999 | 1,537 | 259.7 | 6.51 | 0.89 | 603 | 0.0 > 349.6 > 336.6 |
+| sqlite-zstd-wal | batch | commoncrawl | populated | 9,999 | 1,517 | 256.3 | 6.59 | 1.79 | 602 | 287.1 > 636.2 > 623.1 |
+| sqlite-zstd-dict-wal | single | mixed | empty | 10,000 | 5,805 | 194.6 | 1.72 | 0.16 | 190 | 0.0 > 64.0 > 59.0 |
+| sqlite-zstd-dict-wal | single | mixed | populated | 10,000 | 6,096 | 204.4 | 1.64 | 1.22 | 190 | 290.4 > 359.4 > 348.2 |
+| sqlite-zstd-dict-wal | batch | mixed | empty | 10,000 | 6,361 | 213.3 | 1.57 | 0.17 | 419 | 0.0 > 68.8 > 59.1 |
+| sqlite-zstd-dict-wal | batch | mixed | populated | 10,000 | 6,591 | 221.0 | 1.52 | 1.34 | 417 | 290.4 > 363.6 > 354.4 |
+| sqlite-zstd-dict-wal | single | commoncrawl | empty | 9,999 | 1,325 | 223.9 | 7.54 | 0.98 | 426 | 0.0 > 327.2 > 320.2 |
+| sqlite-zstd-dict-wal | single | commoncrawl | populated | 9,999 | 1,328 | 224.5 | 7.53 | 1.53 | 418 | 188.3 > 513.4 > 508.3 |
+| sqlite-zstd-dict-wal | batch | commoncrawl | empty | 9,999 | 1,344 | 227.1 | 7.44 | 0.88 | 600 | 0.0 > 333.1 > 320.7 |
+| sqlite-zstd-dict-wal | batch | commoncrawl | populated | 9,999 | 1,327 | 224.3 | 7.53 | 1.42 | 600 | 188.3 > 520.9 > 508.3 |
+
+Upserts, 500 rows one write each, second of two runs (the first in brackets):
+
+| variant | ms per row | compaction s | peak RSS MiB | MiB before > after upserts > after compaction | compaction |
+| --- | ---: | ---: | ---: | --- | --- |
+| sqlite-zstd | 0.81 (0.78) | 4.2 (4.3) | 101 | 1,026.3 > 1,042.3 > 1,026.3 | VACUUM |
+| sqlite-zstd-dict | 1.83 (1.84) | 3.3 (3.2) | 116 | 763.9 > 779.9 > 763.9 | VACUUM |
+| rocksdb-zstd-sync | 0.14 (0.15) | 15.1 (15.1) | 212 | 815.7 > 831.6 > 815.1 | flush, then compact_range with bottommost force |
+| rocksdb-zstd-nosync | 0.10 (0.10) | 15.0 (15.2) | 211 | 815.7 > 831.6 > 815.1 | flush, then compact_range with bottommost force |
+| rocksdb-blob-sync | 0.16 (0.14) | 16.3 (16.3) | 181 | 884.2 > 900.1 > 884.5 | flush, then compact_range with bottommost force; blob GC at cutoff 1.0 rewrites every blob file |
+| rocksdb-blob-nosync | 0.10 (0.10) | 16.2 (16.4) | 178 | 884.2 > 900.1 > 884.5 | flush, then compact_range with bottommost force; blob GC at cutoff 1.0 rewrites every blob file |
+| rocksdb-packed-sync | 0.13 (0.13) | 14.3 (14.2) | 268 | 768.9 > 785.2 > 768.3 | flush, then compact_range with bottommost force |
+| rocksdb-packed-nosync | 0.09 (0.10) | 14.1 (14.1) | 267 | 768.9 > 785.2 > 768.3 | flush, then compact_range with bottommost force |
+
+Every build wrote and counted 130,880 rows (each regime build its own rows and raw
+bytes, as `sizes.json` has them) and left no write-ahead log; every insert child found
+the row count grown by exactly the rows inserted and no log left after compaction; every
+upsert child found 130,880 rows and all 500 changed Markdown bodies after compaction.
+
+What the tables say:
+
+- **On disk RocksDB lands with the dictionary store, not with the column stores.**
+  Packed into one value per row it is 0.174 of raw against 0.173 for the dictionary
+  store; in three column families 0.184; with blob files 0.200, still under plain
+  per-row zstd (0.232). A 16 KiB block holds several small pages and compresses them
+  together, so RocksDB gains most on short pages (Rust: 0.154 against 0.313 for per-row
+  zstd) and least on large ones, which fill a block alone (Common Crawl: 0.176 to 0.192
+  against 0.196); blob files compress each body on its own and give that gain back.
+  DuckDB's whole-segment compression stays ahead on every regime but GitHub, by most on
+  Rust and Sphinx (0.072 and 0.094).
+  Written a row at a time it keeps its ratio once compacted: 10,000 mixed rows land at
+  0.175 to 0.202 after the full compaction, the dictionary store at 0.176 after
+  `VACUUM`.
+- **It is the fastest writer measured, as the caller sees it.** Unsynced it outruns
+  buffered Avro, and synced it outruns every store that makes each write durable, with
+  its compression left to background threads and the compaction. Synced per write it takes 6,858
+  to 7,442 single-row inserts a second on mixed rows, against 2,383 to 2,534 for its
+  durability peer `sqlite-zstd` and 5,805 to 6,096 for the dictionary store in WAL mode;
+  unsynced, 10,045 to 10,513, against 6,350 to 6,411 for `sqlite-zstd-wal`. On Common
+  Crawl rows it takes 1,865 to 2,318 a second, against 1,325 to 1,328 for the dictionary
+  store. A 500-row upsert synced per write costs 0.13 to 0.16 ms a row, against 0.81 for
+  `sqlite-zstd` and 1.83 for the dictionary store, both under a rollback journal with
+  `synchronous=FULL`; unsynced it costs 0.09 to 0.10 ms. Why the dictionary store upserts
+  at twice plain zstd's time was not looked into. (The dictionary store took 1.84 and 1.83 ms in this
+  run's two upsert runs, so the 0.79 ms of its first run in the gaps section was the
+  outlier, not the 1.88.)
+- **It pays in memory, in transient disk and in compaction.** Every RocksDB process
+  carries a 128 MiB block cache and up to 128 MiB of memtables by design. Point lookups
+  stay small (61 to 71 MiB, 0.07 to 0.09 ms, against 54 MiB and 0.047 ms), but the scan
+  peaks at 196 to 312 MiB in the column-family layouts and 548 MiB packed, against 72
+  for the dictionary store; a by-hand rerun of the `rocksdb-zstd` and `rocksdb-packed`
+  scans found the block cache at 120 MiB at the end, inside its cap, so the rest of
+  those peaks is outside the cache. The packed
+  layout reads every whole row for a scan or a metadata select: 2.3 s at 546 to 548 MiB.
+  Bulk builds peaked at 883 to 922 MiB (the dictionary store's: 713 MiB), 256-row batches of Common Crawl pages at 950 to
+  1,030 MiB (SQLite: 600 to 605), single-row inserts of them at 471 to 540 MiB (SQLite: 415 to 426). Before
+  compaction the column-family stores held up to 2,442 MiB for 9,999 Common Crawl rows
+  of 1,690 MiB raw into a base of 205 to 232 MiB, while the packed store held 498 MiB; this is
+  consistent with RocksDB keeping a log file until every column family whose writes it
+  holds has flushed, which the small `meta` family rarely does, but the files were not
+  broken down. A full compaction rewrote the whole store: 14.1 to 16.4 s after 500
+  upserts, against 3.2 to 4.3 s for `VACUUM`, and 7.0 to 12.4 s after 10,000 inserts
+  into a 50,000-row base, against 1.2 to 2.2 s.
+
+Updated against the gaps section: RocksDB is the only option that beats the dictionary
+store on writes and upserts at its disk ratio with every write durable and lookups in
+the same tenth of a millisecond (buffered Avro writes faster than the synced RocksDB
+store, at a better ratio, but loses its buffered rows on a crash and looks up in
+0.74 ms); it trades a single file and SQLite's small footprint for a directory of
+about twenty files, a quarter-gigabyte of configured caches, a full compaction about
+four times as long as `VACUUM` and a binding outside the standard library.
+
 ## Verdict
 
 **On disk, yes. In memory while querying, no.**
@@ -768,6 +1031,11 @@ and single-row upserts, the shape a crawler writes in, took 1.5 GB of RSS and gr
 file by 30% at checkpoint. The temporary store's working set is point lookups and
 single-row writes with an occasional scan, and SQLite with per-row zstd served every one
 of them in under 92 MiB (raw SQLite in under 139 MiB).
+
+RocksDB, measured last, does not change that answer. Its block compression sees a few
+pages at a time, so it lands with the dictionary SQLite store on disk (0.174 to 0.200),
+not with DuckDB (0.127); it writes faster than SQLite and looks a page up in 0.07 to
+0.09 ms against SQLite's 0.047, at more memory.
 
 ## Caveats
 
@@ -819,6 +1087,15 @@ of them in under 92 MiB (raw SQLite in under 139 MiB).
   lookups on Avro ran 5 identities, not 200, because each reads the whole file; compare
   them per item. The DuckDB extension's zstd support was established on this build only
   (`345c3f4e82`), from the files written here and a by-hand 20-row probe of its writer.
+- **RocksDB is one configuration.** The cache and memtable sizes, the 16 KiB blocks
+  and the forced full compaction are this prototype's choices; RocksDB normally
+  compacts in the background and the full compaction stands in for `VACUUM`. Its peak
+  RSS beyond the 128 MiB block cache, and the transient disk of the column-family
+  layouts before compaction, were observed, not broken down. A shared zstd dictionary
+  for RocksDB's blocks (`max_dict_bytes`) was not run. Its write and upsert rates leave
+  out the compression its background threads and the compaction do, and the
+  recommended WAL SQLite store was not upserted beside it. The binding is a third party's
+  (`rocksdict`); the one RocksDB's site links to is archived.
 - **No concurrency.** One writer and no readers at a time; the mirror's real access
   pattern (a crawler writing while a converter reads) was not exercised.
 - **The columnar files were written from the DuckDB store and read with literals.**
@@ -855,7 +1132,7 @@ and column takes it from 0.232 to 0.173 of raw at no measurable query cost, so t
 recommended store is **SQLite with per-row zstd against a per-host (here per-regime)
 dictionary, in WAL mode**. A later decision record can cite these numbers directly.
 
-The gaps section measured the one alternative left standing, Avro with zstd in 1 MiB
+The gaps section measured the alternative the Avro section left standing, Avro with zstd in 1 MiB
 blocks and a sidecar index, as a store a crawler writes: buffered into blocks it takes
 8,000 single-row writes a second and lands at 0.130 of raw, against about 6,000 and
 0.176 for the dictionary store; it upserts as fast; and it gives up per-row durability,
@@ -867,7 +1144,30 @@ fetched again, one process owns the files, and old versions can wait for a perio
 rewrite. None of that holds for the temporary store as specified, so the recommendation
 stands.
 
-Three follow-ups are worth measuring if disk becomes the constraint:
+The RocksDB section measured the candidate closest to the dictionary store. At the same
+disk (0.174 packed into one value per row, 0.184 in three column families, against
+0.173) it writes faster (6,858 to 7,442 single-row inserts a second synced per write,
+10,045 to 10,513 unsynced, against 5,805 to 6,096 for the dictionary store in WAL mode),
+upserts faster (0.13 to 0.16 ms a row synced against 1.83 under a rollback journal; the
+recommended WAL configuration was not upserted), with its compression left to background
+threads and the compaction, and looks a page up in
+0.07 to 0.09 ms against 0.047. It pays in memory by configuration (a 128 MiB block
+cache and up to 128 MiB of memtables per process; scans at 196 to 548 MiB against 72,
+bulk loads at 883 to 922 MiB against 713 and 256-row batches of large pages near 1 GiB), in transient disk (up to
+2,442 MiB before compaction for 1,690 MiB of Common Crawl rows written into a base of
+205 to 232 MiB, in the column-family layouts), in a full compaction about four times as long as
+`VACUUM` (14 to 16 s after 500 upserts), and in operability: a directory of about twenty
+files, a tuning surface of a dozen options, and a binding outside the standard library.
+The recommendation stands, because what RocksDB adds is write and upsert speed beyond
+what the temporary store needs: the dictionary store already commits about 6,000
+single-row writes a second, which by judgement, not measurement, is well above the rate
+a crawler fetching over the network produces pages. RocksDB wins where writes and
+refetch upserts arrive faster than SQLite can take them, a quarter-gigabyte per process
+is affordable, and a directory of files with its own compaction is acceptable; packed
+into one value per row if the reads are lookups, in column families if scans and
+metadata selects matter too.
+
+Four follow-ups are worth measuring if disk or write rate becomes the constraint:
 
 - The dictionary's scope and size: one per regime and column at 128 KiB was measured;
   per host, per crawl, larger, or retrained as a host's chrome changes were not, and the
@@ -879,6 +1179,9 @@ Three follow-ups are worth measuring if disk becomes the constraint:
   is left is the crash consistency of the file and its index, a log-structured store
   built by hand, and the dictionary SQLite store gets within 0.05 of its disk without
   one.
+- RocksDB with a zstd dictionary shared by its blocks (`max_dict_bytes`, with
+  `zstd_max_train_bytes`), the RocksDB counterpart of the dictionary store, and with
+  `max_total_wal_size` bounding the column-family layouts' log before compaction.
 - Parquet with zstd as an append-once archive of raw HTML written in bulk after a run
   and read by scans, where its compression (0.124 of raw, the same as DuckDB's) is the
   whole point and its lookup cost does not apply. That is a different store from the
