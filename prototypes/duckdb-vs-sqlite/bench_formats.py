@@ -2,6 +2,7 @@
 # requires-python = ">=3.14,<3.15"
 # dependencies = [
 #   "avro==1.12.2",
+#   "diskcache==5.6.3",
 #   "duckdb==2.0.0",
 #   "fastavro==1.13.1",
 #   "rocksdict==0.3.29",
@@ -50,6 +51,21 @@ measured. `--per-regime` then builds each regime of each store on its own, measu
 and deletes it. `--upserts --only rocksdb` runs the upserts on the three stores, synced
 and unsynced, with `sqlite-zstd` and `sqlite-zstd-dict` as in-run references, and saves
 `formats-upserts-rocksdb.json`.
+
+Six diskcache stores (diskcache 5.6.3: SQLite in WAL mode plus a `.val` file for any
+value of 32 KiB and up) join them under `--only diskcache`, each written through a
+`Disk` subclass that compresses the bodies as the SQLite stores do: `diskcache-pickle`
+(the stock Disk, bodies as str), `diskcache-zstd` (each body plain zstd level 3) and
+`diskcache-zstd-dict` (each body against sqlite-zstd-dict's (regime, column) dictionary,
+copied beside the store) keep one pickled row per key; `-inline` raises the spill
+threshold so nothing leaves SQLite, `-fanout` is a FanoutCache of 8 shards and `-split`
+is three Caches (`meta/`, `html/`, `markdown/`). Every setting is passed on every open:
+no eviction, no culling, no statistics, no tag index, diskcache's SQLite defaults.
+Builds write unsynced transactions of 256 rows and compact with `check(fix=True)`, which
+runs VACUUM. `--per-regime` works as for RocksDB, and `--upserts --only diskcache` runs
+the upserts on the six, with `synchronous=FULL` and a fsync of every spilled file and its
+directory (`-sync`) or diskcache's `synchronous=NORMAL` (`-nosync`), against the same
+in-run references, and saves `formats-upserts-diskcache.json`.
 """
 
 from __future__ import annotations
@@ -58,6 +74,7 @@ import argparse
 import gc
 import json
 import os
+import pickle
 import re
 import resource
 import shutil
@@ -71,6 +88,7 @@ from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import diskcache
 import duckdb
 import fastavro
 import rocksdict
@@ -96,6 +114,28 @@ FORMATS = SCRATCH / "formats"
 EXTENSIONS = SCRATCH / "extensions"
 IDS_FILE = RESULTS / "formats-ids.json"
 EXPLAIN_DIR = RESULTS / "formats-explain"
+DICT_STORE = FORMATS / "sqlite-zstd-dict" / "pages.sqlite"
+DICTIONARIES = "dictionaries.sqlite"
+DISKCACHE_LAYOUTS = [
+    "pickle",
+    "zstd",
+    "zstd-dict",
+    "zstd-dict-inline",
+    "zstd-dict-fanout",
+    "zstd-dict-split",
+]
+DISKCACHE_SHARDS = 8
+DISKCACHE_INLINE = 1 << 40
+DISKCACHE_THRESHOLD = diskcache.DEFAULT_SETTINGS["disk_min_file_size"]
+DISKCACHE_SIZE_LIMIT = 1 << 62
+DISKCACHE_TIMEOUT = 60
+DISKCACHE_SPLIT = ["meta", "html", "markdown"]
+DISKCACHE_LIMIT = "SQLite page cache 32 MiB, mmap 64 MiB"
+DISKCACHE_CAPS = (
+    "SQLite page cache 8,192 pages (32 MiB) and mmap up to 64 MiB per database;"
+    " fanout has 8 databases, split has 3"
+)
+DISKCACHE_COMPACTION = "check(fix=True): integrity_check, VACUUM, files and counts reconciled"
 NEW_VARIANTS = [
     "parquet-zstd",
     "parquet-zstd-rg2k",
@@ -115,6 +155,7 @@ NEW_VARIANTS = [
     "rocksdb-zstd",
     "rocksdb-blob",
     "rocksdb-packed",
+    *(f"diskcache-{layout}" for layout in DISKCACHE_LAYOUTS),
 ]
 REFERENCES = ["sqlite-zstd", "duckdb-zstd"]
 ONLY_REFERENCES = ["parquet-zstd", "sqlite-zstd-dict", "duckdb-zstd"]
@@ -156,6 +197,17 @@ ROCKSDB_UPSERTS = [
     "sqlite-zstd-dict",
     *(f"rocksdb-{layout}-{d}" for layout in ("zstd", "blob", "packed") for d in DURABILITY),
 ]
+DISKCACHE_UPSERTS = [
+    "sqlite-zstd",
+    "sqlite-zstd-dict",
+    *(f"diskcache-{layout}-{d}" for layout in DISKCACHE_LAYOUTS for d in DURABILITY),
+]
+KV_FAMILIES = {"rocksdb", "diskcache"}
+UPSERTS_BY_FAMILY = {
+    None: UPSERT_VARIANTS,
+    "rocksdb": ROCKSDB_UPSERTS,
+    "diskcache": DISKCACHE_UPSERTS,
+}
 
 
 def avro_type(column: str) -> str | list[str]:
@@ -704,6 +756,423 @@ def build_rocksdb(
     return note, {"rows_written": written, "raw_bytes": raw, **info}
 
 
+# ------------------------------------------------------------- diskcache ---
+
+
+def disk_codec(layout: str) -> str:
+    """The body codec of a diskcache layout: `pickle` (none), `zstd` or `dict`."""
+    return layout if layout in {"pickle", "zstd"} else "dict"
+
+
+def copy_dictionaries(target: Path, regime: str | None = None) -> int:
+    """Copy sqlite-zstd-dict's trained dictionaries, or one regime's, beside a store.
+
+    They land in `<target>/dictionaries.sqlite`, outside every cache directory, because
+    `check(fix=True)` deletes any file in a cache directory it does not know.
+    """
+    source = sqlite3.connect(f"file:{DICT_STORE}?mode=ro", uri=True)
+    where = " WHERE regime = ?" if regime else ""
+    rows = source.execute(
+        f"SELECT regime, column, data FROM dictionaries{where}",  # noqa: S608  fixed filter
+        (regime,) if regime else (),
+    ).fetchall()
+    source.close()
+    out = sqlite3.connect(target / DICTIONARIES)
+    out.execute(
+        "CREATE TABLE dictionaries (regime TEXT, column TEXT, data BLOB,"
+        " PRIMARY KEY (regime, column))"
+    )
+    with out:
+        out.executemany("INSERT INTO dictionaries VALUES (?, ?, ?)", rows)
+    out.close()
+    return len(rows)
+
+
+def read_dictionaries(path: Path) -> list[tuple[str, str, bytes]]:
+    """The (regime, column, data) rows of a store's `dictionaries.sqlite`."""
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    rows = connection.execute("SELECT regime, column, data FROM dictionaries").fetchall()
+    connection.close()
+    return rows
+
+
+class PageDisk(diskcache.Disk):
+    """diskcache's Disk with each body compressed as sqlite-zstd or sqlite-zstd-dict does.
+
+    A whole-row cache (`column` None) stores the page's eleven columns as one dict; a
+    split layout stores the meta dict in `meta/` and one body in `html/` or `markdown/`,
+    handed in as `{"regime": ..., column: body}`. `codec` picks the body compression:
+    `pickle` leaves the bodies as str (the stock Disk), `zstd` compresses each with plain
+    zstd level 3, `dict` with the (regime, column) dictionary, falling back to plain zstd
+    where a regime has none. The meta columns stay plain. The stock `store` then pickles
+    a dict, keeps bytes as they are, and moves any value of `min_file_size` bytes or more
+    to a `.val` file. With `fsync`, each such file is fsynced, then its directory, and the
+    parent of any directory the write created, before `store` returns: before the row's
+    transaction commits. Every setting arrives as a `disk_` setting on every open.
+    """
+
+    def __init__(  # noqa: PLR0913  diskcache passes every disk_ setting as a keyword
+        self,
+        directory: str,
+        *,
+        min_file_size: int = 0,
+        pickle_protocol: int = 0,
+        codec: str = "pickle",
+        column: str | None = None,
+        fsync: bool = False,
+        dictionaries: str | None = None,
+    ) -> None:
+        """Keep the settings; load the compressors from `dictionaries` for the dict codec."""
+        super().__init__(directory, min_file_size=min_file_size, pickle_protocol=pickle_protocol)
+        self.root = Path(directory)
+        self.codec = codec
+        self.column = column
+        self.fsync = fsync
+        self.dictionaries = dictionaries
+        self.plain = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
+        self.compressors: dict[tuple[str, str], zstandard.ZstdCompressor] = {}
+        if codec == "dict" and dictionaries:
+            for regime, name, data in read_dictionaries(Path(dictionaries)):
+                self.compressors[regime, name] = zstandard.ZstdCompressor(
+                    level=ZSTD_LEVEL, dict_data=zstandard.ZstdCompressionDict(data)
+                )
+        self.fresh: list[Path] = []
+
+    def body(self, regime: str, column: str, text: str | None) -> str | bytes | None:
+        """One body in the codec: as it is for pickle, zstd bytes otherwise."""
+        if text is None or self.codec == "pickle":
+            return text
+        compressor = self.plain
+        if self.codec == "dict":
+            compressor = self.compressors.get((regime, column), self.plain)
+        return compressor.compress(text.encode())
+
+    def store(
+        self,
+        value: dict[str, Any],
+        read: bool,  # noqa: FBT001  diskcache's own signature
+        key: Any = diskcache.UNKNOWN,  # noqa: ANN401  diskcache's keys are any type
+    ) -> tuple[int, int, str | None, Any]:
+        """Compress the bodies, let the stock Disk store the value, fsync a spilled file."""
+        stored: Any
+        if self.column in BODY_COLUMNS:
+            stored = self.body(value["regime"], self.column, value[self.column])
+        elif self.column is None:
+            stored = {
+                c: self.body(value["regime"], c, value[c]) if c in BODY_COLUMNS else value[c]
+                for c in COLUMNS
+            }
+        else:
+            stored = value
+        self.fresh = []
+        result: tuple[int, int, str | None, Any] = super().store(stored, read, key)
+        if self.fsync and result[2] is not None:
+            self.sync(self.root / result[2])
+        return result
+
+    def filename(
+        self,
+        key: Any = diskcache.UNKNOWN,  # noqa: ANN401  diskcache's keys are any type
+        value: Any = diskcache.UNKNOWN,  # noqa: ANN401  diskcache's values are any type
+    ) -> tuple[str, str]:
+        """The stock random name; remember which of its two directories do not exist yet."""
+        filename, full_path = super().filename(key, value)
+        parent = Path(full_path).parent
+        self.fresh = [d for d in (parent, parent.parent) if not d.exists()]
+        return filename, full_path
+
+    def sync(self, path: Path) -> None:
+        """Sync a new file, its directory, and the parent of each directory it created."""
+        for target in (path, path.parent, *(d.parent for d in self.fresh)):
+            descriptor = os.open(target, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+
+def disk_settings(layout: str, target: Path, *, sync: bool) -> dict[str, Any]:
+    """Every setting of a diskcache open, passed explicitly since diskcache persists them."""
+    defaults = diskcache.DEFAULT_SETTINGS
+    codec = disk_codec(layout)
+    return {
+        "timeout": DISKCACHE_TIMEOUT,
+        "disk": PageDisk,
+        "eviction_policy": "none",
+        "cull_limit": 0,
+        "statistics": False,
+        "tag_index": False,
+        "size_limit": DISKCACHE_SIZE_LIMIT,
+        "sqlite_synchronous": 2 if sync else 1,
+        "sqlite_journal_mode": defaults["sqlite_journal_mode"],
+        "sqlite_auto_vacuum": defaults["sqlite_auto_vacuum"],
+        "sqlite_cache_size": defaults["sqlite_cache_size"],
+        "sqlite_mmap_size": defaults["sqlite_mmap_size"],
+        "disk_min_file_size": (
+            DISKCACHE_INLINE if layout.endswith("-inline") else DISKCACHE_THRESHOLD
+        ),
+        "disk_pickle_protocol": pickle.HIGHEST_PROTOCOL,
+        "disk_codec": codec,
+        "disk_fsync": sync,
+        "disk_dictionaries": str(target / DICTIONARIES) if codec == "dict" else None,
+    }
+
+
+def disk_files(target: Path) -> dict[str, Any]:
+    """Allocated bytes of the SQLite files, and the count and bytes of spilled `.val` files."""
+    databases = list(target.rglob("cache.db"))
+    spilled = list(target.rglob("*.val"))
+    return {
+        "databases": len(databases),
+        "cache_db_bytes": sum(p.stat().st_blocks * 512 for p in databases),
+        "val_files": len(spilled),
+        "val_bytes": sum(p.stat().st_blocks * 512 for p in spilled),
+    }
+
+
+class DiskStore:
+    """One diskcache store in its layout: one Cache, a FanoutCache of 8, or three Caches.
+
+    The whole-row Cache and the FanoutCache live in `<target>/cache/`, the split
+    layout's in `<target>/meta/`, `html/` and `markdown/`; the dictionaries sit beside
+    them. Every measured path uses the public API; `sql_count` and `synchronous` reach
+    the SQLite files and connections only to check what the API reports.
+    """
+
+    def __init__(self, layout: str, target: Path, *, sync: bool = False) -> None:
+        """Open or create the store with every setting passed."""
+        self.layout = layout
+        self.target = target
+        self.split = layout.endswith("-split")
+        settings = disk_settings(layout, target, sync=sync)
+        self.caches: dict[str, Any]
+        if self.split:
+            self.caches = {
+                c: diskcache.Cache(target / c, disk_column=c, **settings) for c in DISKCACHE_SPLIT
+            }
+        elif layout.endswith("-fanout"):
+            self.caches = {
+                "row": diskcache.FanoutCache(
+                    target / "cache", shards=DISKCACHE_SHARDS, disk_column=None, **settings
+                )
+            }
+        else:
+            self.caches = {"row": diskcache.Cache(target / "cache", disk_column=None, **settings)}
+        self.decompressors = {0: zstandard.ZstdDecompressor()}
+        if disk_codec(layout) == "dict":
+            for _, _, data in read_dictionaries(target / DICTIONARIES):
+                found = zstandard.ZstdCompressionDict(data)
+                self.decompressors[found.dict_id()] = zstandard.ZstdDecompressor(dict_data=found)
+
+    def shards(self) -> list[Any]:
+        """Every underlying Cache: one, three, or the FanoutCache's eight."""
+        caches = []
+        for cache in self.caches.values():
+            if isinstance(cache, diskcache.FanoutCache):
+                caches += cache._shards  # noqa: SLF001  a check only: the shards' own connections
+            else:
+                caches.append(cache)
+        return caches
+
+    @staticmethod
+    def set(cache: Any, identity: str, value: dict[str, Any]) -> None:  # noqa: ANN401  diskcache is untyped
+        """One `set`; FanoutCache returns False on a lock timeout, which must not pass."""
+        if cache.set(identity, value) is not True:
+            msg = f"diskcache refused {identity}"
+            raise RuntimeError(msg)
+
+    def put(self, page: dict[str, Any], parts: Iterable[str]) -> None:
+        """Set one page in the named caches; a split page without HTML deletes its key."""
+        identity = page["identity"]
+        for part in parts:
+            if part == "row":
+                self.set(self.caches["row"], identity, page)
+            elif part == "meta":
+                self.set(self.caches["meta"], identity, {c: page[c] for c in META_COLUMNS})
+            elif page[part] is None:
+                self.caches[part].delete(identity)
+            else:
+                self.set(self.caches[part], identity, {"regime": page["regime"], part: page[part]})
+
+    def put_many(self, pages: list[dict[str, Any]]) -> None:
+        """One transaction per cache: one for a Cache, one per shard for the FanoutCache.
+
+        The split layout writes its three caches in three transactions, one after another,
+        so a crash can leave a page's meta without its bodies.
+        """
+        for part, cache in self.caches.items():
+            with cache.transact(retry=True):
+                for page in pages:
+                    self.put(page, [part])
+
+    def write_one(self, page: dict[str, Any]) -> None:
+        """One `set` per cache, each its own transaction."""
+        self.put(page, self.caches)
+
+    def decode(self, value: str | bytes | None) -> bytes | None:
+        """A stored body as bytes: encoded for pickle, decompressed by its frame's dictionary."""
+        if value is None or isinstance(value, str):
+            return None if value is None else value.encode()
+        return self.decompressors[zstandard.get_frame_parameters(value).dict_id].decompress(value)
+
+    def row(self, identity: str) -> dict[str, Any] | None:
+        """The whole stored row of a whole-row layout."""
+        found: dict[str, Any] | None = self.caches["row"].get(identity)
+        return found
+
+    def get(self, identity: str) -> tuple[bytes | None, bytes | None]:
+        """The HTML and Markdown of one page; None for an absent body or page."""
+        if self.split:
+            return (
+                self.decode(self.caches["html"].get(identity)),
+                self.decode(self.caches["markdown"].get(identity)),
+            )
+        found = self.row(identity)
+        if found is None:
+            return None, None
+        return self.decode(found["html"]), self.decode(found["markdown"])
+
+    def values(self, part: str) -> Iterator[Any]:
+        """Every value of one cache, keys in rowid order (`iter`), one `get` each."""
+        cache = self.caches[part]
+        for identity in cache:
+            found = cache.get(identity)
+            if found is None:
+                msg = f"{identity} vanished during the scan"
+                raise RuntimeError(msg)
+            yield found
+
+    def markdown_bodies(self) -> Iterator[bytes | None]:
+        """Every Markdown body; a whole-row layout unpickles every row to get it."""
+        if self.split:
+            yield from (self.decode(v) for v in self.values("markdown"))
+        else:
+            yield from (self.decode(v["markdown"]) for v in self.values("row"))
+
+    def metas(self) -> Iterator[dict[str, Any]]:
+        """Every row's meta dict; a whole-row layout unpickles the whole row for it."""
+        yield from self.values("meta" if self.split else "row")
+
+    def count(self) -> int:
+        """Rows, by `len` of the meta or whole-row cache."""
+        return len(self.caches["meta" if self.split else "row"])
+
+    def sql_count(self) -> dict[str, int]:
+        """`count(*)` of each cache's table, read beside the open connections: a check."""
+        counts = {}
+        for part, cache in self.caches.items():
+            total = 0
+            directory = self.target / ("cache" if part == "row" else part)
+            for database in directory.rglob("cache.db"):
+                connection = sqlite3.connect(database)
+                (n,) = connection.execute("SELECT count(*) FROM Cache").fetchone()
+                connection.close()
+                total += n
+            if total != len(cache):
+                msg = f"{self.target} {part}: len {len(cache)} but count(*) {total}"
+                raise RuntimeError(msg)
+            counts[part] = total
+        if self.split and counts["markdown"] != counts["meta"]:
+            msg = f"{self.target}: {counts['meta']} metas but {counts['markdown']} Markdown bodies"
+            raise RuntimeError(msg)
+        return counts
+
+    def synchronous(self) -> tuple[list[int], list[bool]]:
+        """`PRAGMA synchronous` on each Cache's own connection, and each Disk's fsync flag."""
+        pragmas = [
+            cache._sql("PRAGMA synchronous").fetchone()[0]  # noqa: SLF001  a check only: the pragma is per connection
+            for cache in self.shards()
+        ]
+        return pragmas, [bool(cache.disk.fsync) for cache in self.shards()]
+
+    def compact(self) -> list[str]:
+        """`check(fix=True)` on every Cache, which runs VACUUM; close; fail on any leftover.
+
+        `check` also runs `integrity_check` and reconciles the files, the stored size and
+        the stored count with the table; any warning but an empty directory fails.
+        """
+        found = []
+        for cache in self.caches.values():
+            found += [str(w.message) for w in cache.check(fix=True, retry=True)]
+        self.close()
+        if bad := [w for w in found if not w.startswith("empty directory")]:
+            msg = f"{self.target}: check(fix=True) warned: {bad[:3]}"
+            raise RuntimeError(msg)
+        return found
+
+    def info(self) -> dict[str, Any]:
+        """The diskcache version, `volume()`, the SQLite and spilled-file bytes."""
+        return {
+            "diskcache_version": diskcache.__version__,
+            "volume": sum(cache.volume() for cache in self.caches.values()),
+            **disk_files(self.target),
+        }
+
+    def close(self) -> None:
+        """Close every Cache; fail if a WAL or shm file is left beside any of its databases.
+
+        Only the files beside each `cache.db` are looked at, not the whole tree: walking
+        thousands of `.val` files would put a second or more into every timed close.
+        """
+        directories = [Path(cache.directory) for cache in self.shards()]
+        for cache in self.caches.values():
+            cache.close()
+        if left := [
+            str(path.relative_to(self.target))
+            for directory in directories
+            for path in (directory / "cache.db-wal", directory / "cache.db-shm")
+            if path.exists()
+        ]:
+            msg = f"{self.target}: files left after close: {left}"
+            raise RuntimeError(msg)
+
+
+def disk_layout(layout: str) -> str:
+    """One phrase naming a diskcache layout: its caches, its codec, its spill."""
+    if layout.endswith("-split"):
+        shape = "three Caches meta/, html/, markdown/"
+    elif layout.endswith("-fanout"):
+        shape = f"FanoutCache of {DISKCACHE_SHARDS} shards, one pickled row per key"
+    else:
+        shape = "one Cache, one pickled row per key"
+    codec = {
+        "pickle": "bodies as str (stock Disk)",
+        "zstd": "bodies zstd level 3",
+        "dict": "bodies zstd level 3 against the (regime, column) dictionary",
+    }[disk_codec(layout)]
+    spill = (
+        "nothing spills" if layout.endswith("-inline") else "values of 32 KiB and up in .val files"
+    )
+    return f"{shape}; {codec}; {spill}"
+
+
+def build_diskcache(
+    variant: str, target: Path, rows: int | None, regime: str | None = None
+) -> tuple[str, dict[str, Any]]:
+    """Write the rows in transactions of SQLITE_BATCH, unsynced; compact; close.
+
+    A dict layout first copies the dictionaries sqlite-zstd-dict trained, only the
+    regime's for a regime build; they count in the store's size.
+    """
+    layout = variant.removeprefix("diskcache-")
+    dictionaries = copy_dictionaries(target, regime) if disk_codec(layout) == "dict" else 0
+    store = DiskStore(layout, target)
+    written = raw = 0
+    batch: list[dict[str, Any]] = []
+    for page in avro_rows(rows, regime):
+        batch.append(page)
+        written += 1
+        raw += page["html_bytes"] + page["markdown_bytes"]
+        if len(batch) >= SQLITE_BATCH:
+            store.put_many(batch)
+            batch.clear()
+    if batch:
+        store.put_many(batch)
+    warned = store.compact()
+    note = f"{disk_layout(layout)}; diskcache {diskcache.__version__}, {dictionaries} dictionaries"
+    return note, {"rows_written": written, "raw_bytes": raw, "check_warnings": len(warned)}
+
+
 BUILDERS: dict[str, Callable[[str, Path, int | None], str]] = {
     "parquet": build_parquet,
     "vortex": build_vortex,
@@ -711,27 +1180,49 @@ BUILDERS: dict[str, Callable[[str, Path, int | None], str]] = {
     "avro": build_avro,
     "sqlite": build_sqlite_dict,
 }
+EXTRA_BUILDERS: dict[
+    str, Callable[[str, Path, int | None, str | None], tuple[str, dict[str, Any]]]
+] = {"rocksdb": build_rocksdb, "diskcache": build_diskcache}
+
+
+def recount(variant: str, target: Path) -> dict[str, Any]:
+    """Reopen a key-value store after its build and count its rows.
+
+    RocksDB reopens read-only. diskcache has no read-only open (every open rewrites its
+    Settings rows), so the reopen also cross-checks `len` with `count(*)` and reports
+    the spill and `volume()`.
+    """
+    if family(variant) == "rocksdb":
+        store = RocksStore(variant, target, read_only=True)
+        rows = store.count()
+        store.close()
+        return {"rows": rows}
+    cache = DiskStore(variant.removeprefix("diskcache-"), target)
+    found = {"rows": cache.count(), "rows_sql": cache.sql_count(), **cache.info()}
+    cache.close()
+    return found
 
 
 def build_child(variant: str, target: Path, rows: int | None, regime: str | None) -> None:
     """Build one variant into `target` and print wall, RSS and the layout note.
 
-    A RocksDB build also reports the rows it wrote, their raw bytes, the rows a read-only
-    reopen counts (outside the timed region, after the RSS is read) and its file sizes.
+    A RocksDB or diskcache build also reports the rows it wrote, their raw bytes, the rows
+    a reopen counts and its file sizes, all outside the timed region, after the RSS is read;
+    a diskcache note names its spilled files from that reopen, never from a timed walk.
     """
     target.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     extra: dict[str, Any] = {}
-    if family(variant) == "rocksdb":
-        note, extra = build_rocksdb(variant, target, rows, regime)
+    if family(variant) in KV_FAMILIES:
+        note, extra = EXTRA_BUILDERS[family(variant)](variant, target, rows, regime)
     else:
         note = BUILDERS[family(variant)](variant, target, rows)
     wall = time.perf_counter() - started
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # bytes on macOS
     if extra:
-        store = RocksStore(variant, target, read_only=True)
-        extra["rows"] = store.count()
-        store.close()
+        extra.update(recount(variant, target))
+    if "val_files" in extra:
+        note += f", {extra['val_files']} .val files of {extra['val_bytes'] / 2**20:.0f} MiB"
     report = {"variant": variant, "wall_s": wall, "rss_bytes": rss, "note": note}
     print(json.dumps({**report, **extra}))
 
@@ -886,9 +1377,41 @@ def rocksdb_query(variant: str, query: str, target: Path) -> dict[str, Any]:
     return {"items": items, "memory_limit": ROCKS_LIMIT, "threads": None, "caps": ROCKS_CAPS}
 
 
+def diskcache_query(variant: str, query: str, target: Path) -> dict[str, Any]:
+    """The three read shapes on a diskcache store, reopened with its settings.
+
+    `point` gets both bodies; `scan` digests every Markdown body; `meta` reads every
+    row's meta dict. Scans walk the keys with `iter` and `get` each, one SQL round trip
+    per row; a whole-row layout unpickles the whole row for `scan` and `meta`.
+    """
+    store = DiskStore(variant.removeprefix("diskcache-"), target)
+    items = 0
+    if query == "point":
+        for identity in json.loads(IDS_FILE.read_text()):
+            html, markdown = store.get(identity)
+            if markdown is not None:
+                digest(html or b"")
+                digest(markdown)
+                items += 1
+    elif query == "scan":
+        for markdown in store.markdown_bodies():
+            digest(markdown or b"")
+            items += 1
+    else:
+        for _ in store.metas():
+            items += 1
+    store.close()
+    return {
+        "items": items,
+        "memory_limit": DISKCACHE_LIMIT,
+        "threads": None,
+        "caps": DISKCACHE_CAPS,
+    }
+
+
 def settings_of(variant: str) -> list[str]:
     """The settings a variant is measured under: its own, DuckDB's two, fastavro too."""
-    if family(variant) in {"sqlite", "rocksdb"}:
+    if family(variant) in {"sqlite", *KV_FAMILIES}:
         return ["default"]
     if family(variant) == "avro":
         return ["default", DUCKDB_LIMIT, FASTAVRO]
@@ -904,6 +1427,8 @@ def query_child(variant: str, query: str, setting: str, target: Path) -> None:
         found = sqlite_query(variant, query, target)
     elif family(variant) == "rocksdb":
         found = rocksdb_query(variant, query, target)
+    elif family(variant) == "diskcache":
+        found = diskcache_query(variant, query, target)
     else:
         found = duckdb_query(variant, query, setting, target)
     wall = time.perf_counter() - started
@@ -1167,12 +1692,51 @@ def rocksdb_upsert_child(variant: str, target: Path) -> dict[str, Any]:
     return report
 
 
+def diskcache_upsert_child(variant: str, target: Path) -> dict[str, Any]:
+    """Upsert into a diskcache store, one `set` per row and cache, compact, check.
+
+    A `-sync` clone is reopened with `synchronous=FULL` and the fsyncing Disk, which a
+    reopen applies (diskcache stores the settings passed and resets its pragmas); the
+    report carries the pragma read back from each Cache's connection and the fsync flag.
+    """
+    sync = variant.endswith("-sync")
+    layout = store_of(variant).removeprefix("diskcache-")
+    report: dict[str, Any] = {"size_before": store_bytes(target), "sync": sync}
+    store = DiskStore(layout, target, sync=sync)
+    report["expected_rows"] = store.count()
+    report["synchronous"], report["fsync"] = store.synchronous()
+    started = time.perf_counter()
+    items = 0
+    for page in upsert_rows():
+        store.write_one(page)
+        items += 1
+    report["items"] = items
+    report["wall_upserts"] = time.perf_counter() - started
+    report["size_after_upserts"] = store_bytes(target)
+    started = time.perf_counter()
+    report["check_warnings"] = len(store.compact())
+    report["wall_compact"] = time.perf_counter() - started
+    report["size_after_compaction"] = store_bytes(target)
+    check = DiskStore(layout, target)
+    report["rows_after"] = check.count()
+    report["rows_sql"] = check.sql_count()
+    report["changed_found"] = sum(
+        check.get(page["identity"])[1] == page["markdown"].encode() for page in upsert_rows()
+    )
+    report.update(check.info())
+    check.close()
+    report["compaction"] = DISKCACHE_COMPACTION
+    return report
+
+
 def upsert_child(variant: str, target: Path) -> None:
     """One upsert measurement; print its JSON line, or fail if a check does not hold."""
     if family(variant) == "avro":
         report = avro_upsert_child(variant, target)
     elif family(variant) == "rocksdb":
         report = rocksdb_upsert_child(variant, target)
+    elif family(variant) == "diskcache":
+        report = diskcache_upsert_child(variant, target)
     else:
         report = sqlite_upsert_child(variant, target)
     if report["rows_after"] != report["expected_rows"] or report["changed_found"] != len(
@@ -1423,18 +1987,18 @@ def measure_all(variants: list[str]) -> list[dict[str, Any]]:
             for query in QUERIES
             for setting in settings_of(variant)
         ]
-        if family(variant) not in {"sqlite", "rocksdb"}:
+        if family(variant) not in {"sqlite", *KV_FAMILIES}:
             run_child(["explain", variant, str(target_of(variant))])
     return queries
 
 
 def run_upserts(only: str | None) -> None:
-    """Measure the upserts of the first four stores, or with `only` rocksdb, of RocksDB's."""
-    if only not in {None, "rocksdb"}:
-        sys.exit("--upserts takes no --only but rocksdb")
-    results = measure_upserts(ROCKSDB_UPSERTS if only else UPSERT_VARIANTS)
+    """Measure the upserts of the first four stores, or of one key-value family's."""
+    if only not in UPSERTS_BY_FAMILY:
+        sys.exit("--upserts takes no --only but rocksdb or diskcache")
+    results = measure_upserts(UPSERTS_BY_FAMILY[only])
     print_upserts(results)
-    out = RESULTS / ("formats-upserts-rocksdb.json" if only else "formats-upserts.json")
+    out = RESULTS / (f"formats-upserts-{only}.json" if only else "formats-upserts.json")
     out.write_text(json.dumps(results, indent=2) + "\n")
     print(f"\nsaved {out}")
 
@@ -1453,12 +2017,12 @@ def main() -> None:
         "--upserts",
         action="store_true",
         help="measure upserts on sqlite-zstd, sqlite-zstd-dict and two Avro stores (offline);"
-        " with --only rocksdb, on the RocksDB stores synced and not",
+        " with --only rocksdb or diskcache, on that family's stores synced and not",
     )
     parser.add_argument(
         "--per-regime",
         action="store_true",
-        help="with --only rocksdb, also build, measure and delete each regime on its own",
+        help="with --only rocksdb or diskcache, also build, measure and delete each regime",
     )
     args = parser.parse_args()
     if args.child:
@@ -1467,8 +2031,8 @@ def main() -> None:
     if args.upserts:
         run_upserts(args.only)
         return
-    if args.per_regime and args.only != "rocksdb":
-        sys.exit("--per-regime needs --only rocksdb")
+    if args.per_regime and args.only not in KV_FAMILIES:
+        sys.exit("--per-regime needs --only rocksdb or --only diskcache")
     for needed in (DUCKDB_SOURCE, SQLITE_SOURCE, STORES / "sqlite-zstd" / "pages.sqlite"):
         if not needed.exists():
             sys.exit(f"no store at {needed}; run load_stores.py first")

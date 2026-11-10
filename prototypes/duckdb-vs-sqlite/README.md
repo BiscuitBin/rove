@@ -46,16 +46,24 @@ the two bodies in blob files, and one packed value per row. Each is measured on 
 overall and per regime and on the read shapes, joins the insert benchmark with its
 write-ahead log synced per write and not, and runs the upserts.
 
+Ticket 10 adds six diskcache stores (diskcache 5.6.3, which is SQLite in WAL mode plus a
+file for any value of 32 KiB and up), written through a `Disk` subclass that compresses
+the bodies as the SQLite stores do: pickled rows with the bodies as they are, with plain
+zstd and with the dictionary zstd, then the dictionary variant with nothing spilled to
+files, in eight shards and split into three caches. They are measured on every axis
+RocksDB was, synced per write and not, both as a rival store and as a library that could
+implement the dictionary SQLite store.
+
 Four query shapes: point lookup by identity, a full scan of every Markdown body, a
 metadata-only select, and an upsert of one row at a time. Each measurement runs in a
 fresh subprocess and reports the child's own peak RSS and wall time. DuckDB queries run
 twice, at the default memory limit and under a 512 MB limit.
 
 Insert throughput is measured separately, on the five stores plus the two SQLite stores
-in WAL mode, and later on Avro, the dictionary SQLite store in WAL mode and the six
-RocksDB variants: 10,000 rows inserted one transaction at a time and 256 rows at a
-time, into an empty store and into one already holding 50,000 rows, with two row
-mixes. The results page's "Insert throughput" section has the table.
+in WAL mode, and later on Avro, the dictionary SQLite store in WAL mode, the six RocksDB
+variants and the twelve diskcache variants: 10,000 rows inserted one transaction at a
+time and 256 rows at a time, into an empty store and into one already holding 50,000
+rows, with two row mixes. The results page's "Insert throughput" section has the table.
 
 ## The corpus
 
@@ -79,7 +87,7 @@ HTML-only regimes get their Markdown from a throwaway converter.
 
 Each script carries a PEP 723 header and runs with `uv run`, which resolves its own
 environment on the first run (Python 3.14, duckdb, zstandard, warcio, the converter,
-fastavro, avro and rocksdict).
+fastavro, avro, rocksdict and diskcache).
 Nothing is added to the project's dependencies.
 
 ```sh
@@ -95,6 +103,9 @@ uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only rocksdb --per-regime
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts --only rocksdb
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants rocksdb-zstd-sync,rocksdb-zstd-nosync,rocksdb-blob-sync,rocksdb-blob-nosync,rocksdb-packed-sync,rocksdb-packed-nosync,sqlite-zstd,sqlite-zstd-wal,sqlite-zstd-dict-wal --suffix rocksdb
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only diskcache --per-regime
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts --only diskcache
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants diskcache-pickle-sync,diskcache-pickle-nosync,diskcache-zstd-sync,diskcache-zstd-nosync,diskcache-zstd-dict-sync,diskcache-zstd-dict-nosync,diskcache-zstd-dict-inline-sync,diskcache-zstd-dict-inline-nosync,diskcache-zstd-dict-fanout-sync,diskcache-zstd-dict-fanout-nosync,diskcache-zstd-dict-split-sync,diskcache-zstd-dict-split-nosync,sqlite-zstd,sqlite-zstd-wal,sqlite-zstd-dict-wal --suffix diskcache
 ```
 
 The fourth command needs only the corpus, not the stores, and accepts `--populate` and
@@ -117,12 +128,17 @@ clones of the three RocksDB stores the tenth built, synced and unsynced, beside
 `formats-upserts-rocksdb.json`. The twelfth runs the insert benchmark on the six RocksDB
 variants and three SQLite references, which needs the dictionary store the fifth built,
 and saves `inserts-rocksdb.json`. None of the three reaches the network once `uv` has
-fetched rocksdict. The first command accepts any subset of
+fetched rocksdict. The last three do for diskcache what the three before them do for
+RocksDB, with the dictionary store's trained dictionaries copied beside each dictionary
+variant, and save `formats-diskcache.json`, `formats-upserts-diskcache.json` and
+`inserts-diskcache.json`; they too need the stores the fifth built, and reach no network
+once `uv` has fetched diskcache. The first command accepts any subset of
 `rust,sphinx,wikipedia,commoncrawl,github` and a per-source cap. Data, downloads,
 databases and raw results all land under `ai_tmp/duckdb-vs-sqlite/`, which is gitignored
-and excluded from every hook; a full build needs roughly 39 GB there: the corpus file,
+and excluded from every hook; a full build needs roughly 48 GB there: the corpus file,
 the five stores, the nine format stores, the six Avro stores (4.3 GB), the three RocksDB
-stores (2.4 GB) and the three extensions, the download cache and the insert benchmark's
+stores (2.4 GB), the six diskcache stores (8.8 GB, 4.5 GB of it the uncompressed one)
+and the three extensions, the download cache and the insert benchmark's
 four row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the
 base store and its clone. Rerunning a script wipes and rebuilds its outputs, except the
 row samples, which the insert benchmark keeps and reuses.

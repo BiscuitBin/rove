@@ -1,14 +1,16 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the twelve commands below, on an
+Measured on 2026-11-06, 2026-11-07, 2026-11-09 and 2026-11-10 with the fifteen commands
+below, on an
 Apple M5 Pro (18 cores, 64 GB) running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0,
 zstandard 0.25.0 and SQLite 3.53.1 as bundled with that Python, plus fastavro 1.13.1 and
 avro 1.12.2 for the Avro section and rocksdict 0.3.29 (bundling RocksDB 9.8.4) for the
-RocksDB section. Every number on this page comes from one run of the twelve commands
-below, except the tracer-bullet figures named in the first caveat, the block counts of
-the DuckDB probe named in the insert section, the 20-row codec probe named in the Avro
-section, the allocation probe named in the gaps section and the sync and cache probes
-named in the RocksDB section:
+RocksDB section and diskcache 5.6.3 for the diskcache section. Every number on this page
+comes from one run of the fifteen commands below, except the tracer-bullet figures named
+in the first caveat, the block counts of the DuckDB probe named in the insert section,
+the 20-row codec probe named in the Avro section, the allocation probe named in the gaps
+section, the sync and cache probes named in the RocksDB section and the 2,000-row probe
+and the open timing named in the diskcache section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
@@ -23,13 +25,17 @@ uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only rocksdb --per-regime
 uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts --only rocksdb
 uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants rocksdb-zstd-sync,rocksdb-zstd-nosync,rocksdb-blob-sync,rocksdb-blob-nosync,rocksdb-packed-sync,rocksdb-packed-nosync,sqlite-zstd,sqlite-zstd-wal,sqlite-zstd-dict-wal --suffix rocksdb
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --only diskcache --per-regime
+uv run prototypes/duckdb-vs-sqlite/bench_formats.py --upserts --only diskcache
+uv run prototypes/duckdb-vs-sqlite/bench_inserts.py --variants diskcache-pickle-sync,diskcache-pickle-nosync,diskcache-zstd-sync,diskcache-zstd-nosync,diskcache-zstd-dict-sync,diskcache-zstd-dict-nosync,diskcache-zstd-dict-inline-sync,diskcache-zstd-dict-inline-nosync,diskcache-zstd-dict-fanout-sync,diskcache-zstd-dict-fanout-nosync,diskcache-zstd-dict-split-sync,diskcache-zstd-dict-split-nosync,sqlite-zstd,sqlite-zstd-wal,sqlite-zstd-dict-wal --suffix diskcache
 ```
 
-The raw output of the last eleven commands is kept beside the data, under
+The raw output of the last fourteen commands is kept beside the data, under
 `ai_tmp/duckdb-vs-sqlite/results/` (`sizes.json`, `queries.json`, `inserts.json`,
 `formats.json`, `formats-avro.json`, `inserts-avro.json`, `inserts-gaps.json`,
 `formats-upserts.json`, `formats-rocksdb.json`, `formats-upserts-rocksdb.json`,
-`inserts-rocksdb.json` and the `formats-explain/` files), which is gitignored.
+`inserts-rocksdb.json`, `formats-diskcache.json`, `formats-upserts-diskcache.json`,
+`inserts-diskcache.json` and the `formats-explain/` files), which is gitignored.
 
 ## The question
 
@@ -743,8 +749,9 @@ What the tables say:
   and takes 36% more disk for the same 10,000 rows (59.0 MiB against 43.5).
 - **Upserts cost under 2 ms a row on all four; compaction is what differs.** The rows
   took 0.44 to 1.88 ms (the dictionary store's two runs, 0.79 and 1.88 ms, differ more
-  than twofold; rerun beside RocksDB it took 1.84 and 1.83 ms, so the 0.79 ms run is the
-  outlier, and why is not known). Each store grew 16 MiB. `VACUUM` returned both SQLite
+  than twofold; rerun beside RocksDB it took 1.84 and 1.83 ms and beside diskcache 0.73
+  and 0.77 ms, so its time lands near 0.75 or near 1.85 ms from one run to the next, and
+  why is not known). Each store grew 16 MiB. `VACUUM` returned both SQLite
   files to the exact size in 3.4 to 4.1 s at 96 to 111 MiB of peak RSS. Avro has no
   in-place reclaim: compaction rewrote the whole 539 to 761 MiB file and rebuilt the
   index in 11.0 to 13.1 s at 423 to 429 MiB, a cost that grows with the store, not with
@@ -985,10 +992,11 @@ What the tables say:
   Common Crawl rows it takes 1,865 to 2,318 a second, against 1,325 to 1,328 for the
   dictionary store. A 500-row upsert synced per write costs 0.13 to 0.16 ms a row,
   against 0.81 for `sqlite-zstd` and 1.83 for the dictionary store, both under a
-  rollback journal with `synchronous=FULL`; unsynced it costs 0.09 to 0.10 ms. Why the
-  dictionary store upserts at twice plain zstd's time was not looked into. (The
-  dictionary store took 1.84 and 1.83 ms in this run's two upsert runs, so the 0.79 ms
-  of its first run in the gaps section was the outlier, not the 1.88.)
+  rollback journal with `synchronous=FULL`; unsynced it costs 0.09 to 0.10 ms. The
+  dictionary store took twice plain zstd's time in both of this run's upsert runs (1.84
+  and 1.83 ms), but its time is bimodal across runs, near 0.75 or near 1.85 ms (the
+  gaps section has 0.79 and 1.88, the diskcache section 0.73 and 0.77), and why was not
+  looked into.
 - **It pays in memory, in transient disk and in compaction.** Every RocksDB process
   carries a 128 MiB block cache and up to 128 MiB of memtables by design. Point lookups
   stay small (61 to 71 MiB, 0.07 to 0.09 ms, against 54 MiB and 0.047 ms), but the scan
@@ -1015,6 +1023,262 @@ store, at a better ratio, but loses its buffered rows on a crash and looks up in
 about twenty files, a quarter-gigabyte of configured caches, a full compaction about
 four times as long as `VACUUM` and a binding outside the standard library.
 
+## diskcache
+
+diskcache is a Python library that keeps a key-value cache in SQLite, in WAL mode with
+`synchronous=NORMAL`, and moves any value of 32 KiB and up out of the database into a
+file of its own. It is measured here two ways: as one more rival store, on every axis
+RocksDB was, and as a library that could implement the recommended store, since the
+dictionary store is SQLite in WAL mode too.
+
+**The package.** `diskcache` 5.6.3, pinned in the two scripts' PEP 723 headers only. It
+is the latest release (2023-08-31); the wheel is pure Python and declares
+`requires_python >=3`, but its classifiers stop at 3.9 and upstream says it is tested to
+3.10, so it is untested upstream on the Python 3.14 these scripts run. A reading of its
+source and a 2,000-row probe settled what its documentation leaves open, and the smoke
+and full runs are the evidence it works on 3.14.8:
+
+- a value spills to a `.val` file when its serialized length is at least
+  `disk_min_file_size`;
+- with `eviction_policy='none'` and `cull_limit=0` it never culls, even far past
+  `size_limit` (the default limit is 1 GB, the corpus 4.4 GB raw);
+- `len()` agrees with `count(*)`, and `close()` leaves no `-wal` or `-shm`;
+- `sqlite_auto_vacuum=1` shrinks `cache.db` as rows are overwritten, and
+  `check(fix=True)` runs `VACUUM`, so it is the compaction here;
+- nothing in diskcache calls fsync;
+- settings passed when an existing cache is opened take effect, and are stored: a later
+  opener that passes none inherits them;
+- a bare `set` removes an overwritten value's old file after its commit, but inside an
+  outer `transact()` it removes it before the outer commit, so a rollback or a crash
+  there leaves a row pointing at a deleted file (no measured path overwrites inside a
+  transaction);
+- FanoutCache has `transact()`, which locks every shard and then commits each apart, so
+  a batch across shards is not atomic; its `set` returns False on a lock timeout
+  instead of raising, which every write here checks.
+
+**The setup.** Six stores. Every open passes every setting, since diskcache stores them:
+no eviction, no culling, no statistics, no tag index, a `size_limit` of 2^62, a 60 s
+timeout, and diskcache's SQLite defaults (WAL, auto-vacuum FULL, an 8,192-page cache of
+32 MiB and a 64 MiB mmap per database). A `Disk` subclass compresses each body as the
+SQLite stores do, the metadata plain, and hands the row to the stock `store`, which
+pickles it:
+
+- `diskcache-pickle`: the stock Disk, the bodies as they are, one pickled row per key.
+- `diskcache-zstd`: each body plain zstd level 3, `sqlite-zstd`'s codec.
+- `diskcache-zstd-dict`: each body against `sqlite-zstd-dict`'s (regime, column)
+  dictionary, copied beside the store and counted in its size: the like-for-like match
+  for the recommendation.
+- `diskcache-zstd-dict-inline`: the same with the spill threshold at 1 TiB, so nothing
+  leaves SQLite.
+- `diskcache-zstd-dict-fanout`: the same in a FanoutCache of 8 shards.
+- `diskcache-zstd-dict-split`: three Caches, `meta/`, `html/` and `markdown/`, so a scan
+  or metadata select reads one of them; a page is written in three transactions, one
+  per cache, so a crash can leave its metadata without its bodies.
+
+Each build writes transactions of 256 rows unsynced, compacts with `check(fix=True)` and
+closes; the child fails on a `-wal` or `-shm` left beside any database, and a reopen
+counts the rows by `len()` and `count(*)` outside the timed region. Reads walk the keys
+with `iter` and `get` each, one SQL round trip per row; a whole-row layout unpickles the
+whole row, both bodies included, for a scan or a metadata select, by design. Inserts and
+upserts run `-nosync`, diskcache's own `synchronous=NORMAL`, the exact peer of
+`sqlite-zstd-wal` and `sqlite-zstd-dict-wal` and of `rocksdb-*-nosync`, and `-sync`,
+with `synchronous=FULL` and a fsync of every spilled file, its directory and the parent
+of any directory the write created, before the commit. `-sync` is durable per write, the
+durability peer of the rollback-journal `sqlite-zstd`, but not its cost peer: in WAL
+mode a commit syncs the log once, where a rollback journal syncs the journal and the
+database. Every `-sync` child read `synchronous=2` back from each of its connections and
+every `-nosync` child 1. Every measured path uses diskcache's public API; the `count(*)`
+check and that read-back reach the files and the connection as checks only. The first
+full run was set aside: closing a store walked its whole tree to look for a leftover
+log, inside the timed region, which added about 0.8 s to every `diskcache-pickle` read
+and 0.08 to 0.17 s to the other spilling layouts' (nothing to the inline one); the check
+now looks beside each `cache.db` only, and the three commands were run again. The review
+before the commit then found the build still walking the tree inside its timed region,
+to name the spilled files in its note; the note now takes them from the untimed reopen,
+and the formats command was run a third time, its write times moving by 0.55 s at most.
+
+Size, bulk built from `sqlite-raw` in rowid order, compacted and closed (the reference
+rows are from the formats run and the per-regime section):
+
+| variant | files | allocated MiB | allocated/raw | cache.db MiB | .val files | .val MiB | write s | write peak RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| diskcache-pickle | 30,568 | 4,632.6 | 1.048 | 761.7 | 30,567 | 3,870.9 | 17.3 | 640 |
+| diskcache-zstd | 4,580 | 1,061.0 | 0.240 | 741.0 | 4,579 | 320.0 | 15.6 | 591 |
+| diskcache-zstd-dict | 3,975 | 808.7 | 0.183 | 519.4 | 3,973 | 288.2 | 15.1 | 624 |
+| diskcache-zstd-dict-inline | 2 | 803.9 | 0.182 | 802.8 | 0 | 0.0 | 16.1 | 625 |
+| diskcache-zstd-dict-fanout | 3,982 | 807.9 | 0.183 | 518.6 | 3,973 | 288.2 | 16.5 | 1,424 |
+| diskcache-zstd-dict-split | 3,107 | 871.8 | 0.197 | 653.9 | 3,103 | 216.9 | 17.0 | 841 |
+| sqlite-zstd-dict | | 763.9 | 0.173 | | | | 26.0 | 713 |
+| sqlite-zstd | | 1,026.3 | 0.232 | | | | | |
+| duckdb-zstd | | 560.0 | 0.127 | | | | | |
+
+Per regime, allocated over raw bytes, each (regime, store) pair built on its own with
+only that regime's dictionaries; the SQLite column is the per-regime section's and the
+RocksDB column the RocksDB section's:
+
+| regime | rows | raw MiB | sqlite-zstd | rocksdb-packed | diskcache-pickle | diskcache-zstd | diskcache-zstd-dict | diskcache-zstd-dict-inline | diskcache-zstd-dict-fanout | diskcache-zstd-dict-split |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rust | 62,067 | 835.7 | 0.313 | 0.159 | 1.106 | 0.324 | 0.199 | 0.199 | 0.199 | 0.232 |
+| sphinx | 9,703 | 593.1 | 0.195 | 0.157 | 1.034 | 0.200 | 0.151 | 0.150 | 0.151 | 0.161 |
+| wikipedia | 30,000 | 1,273.5 | 0.230 | 0.182 | 1.044 | 0.237 | 0.165 | 0.165 | 0.165 | 0.179 |
+| commoncrawl | 9,999 | 1,689.6 | 0.196 | 0.176 | 1.015 | 0.201 | 0.187 | 0.185 | 0.188 | 0.193 |
+| github | 19,111 | 29.8 | 0.818 | 0.465 | 1.692 | 1.040 | 0.867 | 0.867 | 0.875 | 0.938 |
+
+Reads, warm cache, second of two runs, a fresh process each, with the in-run references:
+
+| variant | query | memory limit | peak RSS MiB | wall s | ms per item | items |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| diskcache-pickle | point | SQLite page cache 32 MiB, mmap 64 MiB | 59 | 0.012 | 0.059 | 200 |
+| diskcache-pickle | scan | SQLite page cache 32 MiB, mmap 64 MiB | 359 | 7.268 | 0.056 | 130,880 |
+| diskcache-pickle | meta | SQLite page cache 32 MiB, mmap 64 MiB | 346 | 6.563 | 0.050 | 130,880 |
+| diskcache-zstd | point | SQLite page cache 32 MiB, mmap 64 MiB | 56 | 0.011 | 0.053 | 200 |
+| diskcache-zstd | scan | SQLite page cache 32 MiB, mmap 64 MiB | 178 | 1.847 | 0.014 | 130,880 |
+| diskcache-zstd | meta | SQLite page cache 32 MiB, mmap 64 MiB | 163 | 0.812 | 0.006 | 130,880 |
+| diskcache-zstd-dict | point | SQLite page cache 32 MiB, mmap 64 MiB | 60 | 0.012 | 0.058 | 200 |
+| diskcache-zstd-dict | scan | SQLite page cache 32 MiB, mmap 64 MiB | 182 | 1.771 | 0.014 | 130,880 |
+| diskcache-zstd-dict | meta | SQLite page cache 32 MiB, mmap 64 MiB | 167 | 0.744 | 0.006 | 130,880 |
+| diskcache-zstd-dict-inline | point | SQLite page cache 32 MiB, mmap 64 MiB | 60 | 0.013 | 0.063 | 200 |
+| diskcache-zstd-dict-inline | scan | SQLite page cache 32 MiB, mmap 64 MiB | 184 | 1.705 | 0.013 | 130,880 |
+| diskcache-zstd-dict-inline | meta | SQLite page cache 32 MiB, mmap 64 MiB | 173 | 0.702 | 0.005 | 130,880 |
+| diskcache-zstd-dict-fanout | point | SQLite page cache 32 MiB, mmap 64 MiB | 73 | 0.024 | 0.122 | 200 |
+| diskcache-zstd-dict-fanout | scan | SQLite page cache 32 MiB, mmap 64 MiB | 571 | 1.793 | 0.014 | 130,880 |
+| diskcache-zstd-dict-fanout | meta | SQLite page cache 32 MiB, mmap 64 MiB | 560 | 0.750 | 0.006 | 130,880 |
+| diskcache-zstd-dict-split | point | SQLite page cache 32 MiB, mmap 64 MiB | 66 | 0.016 | 0.080 | 200 |
+| diskcache-zstd-dict-split | scan | SQLite page cache 32 MiB, mmap 64 MiB | 186 | 1.457 | 0.011 | 130,880 |
+| diskcache-zstd-dict-split | meta | SQLite page cache 32 MiB, mmap 64 MiB | 156 | 0.505 | 0.004 | 130,880 |
+| parquet-zstd | point | 51.1 GiB | 1,396 | 22.992 | 114.960 | 200 |
+| parquet-zstd | point | 512MB | failed: out of memory | | | |
+| parquet-zstd | scan | 51.1 GiB | 800 | 1.090 | 0.008 | 130,880 |
+| parquet-zstd | scan | 488.2 MiB | 798 | 1.096 | 0.008 | 130,880 |
+| parquet-zstd | meta | 51.1 GiB | 144 | 0.102 | 0.001 | 130,880 |
+| parquet-zstd | meta | 488.2 MiB | 143 | 0.102 | 0.001 | 130,880 |
+| sqlite-zstd-dict | point | SQLite default | 56 | 0.009 | 0.046 | 200 |
+| sqlite-zstd-dict | scan | SQLite default | 75 | 1.104 | 0.008 | 130,880 |
+| sqlite-zstd-dict | meta | SQLite default | 55 | 0.183 | 0.001 | 130,880 |
+| duckdb-zstd | point | 51.1 GiB | 548 | 2.439 | 12.197 | 200 |
+| duckdb-zstd | point | 488.2 MiB | 547 | 2.478 | 12.388 | 200 |
+| duckdb-zstd | scan | 51.1 GiB | 635 | 0.972 | 0.007 | 130,880 |
+| duckdb-zstd | scan | 488.2 MiB | 635 | 0.982 | 0.008 | 130,880 |
+| duckdb-zstd | meta | 51.1 GiB | 107 | 0.082 | 0.001 | 130,880 |
+| duckdb-zstd | meta | 488.2 MiB | 106 | 0.078 | 0.001 | 130,880 |
+
+Insert throughput, one run per cell, a fresh process each, the range over the empty and
+the populated cell; every cell is in `inserts-diskcache.json` and the report's appendix.
+The three SQLite variants run beside them: `sqlite-zstd` is the durability peer of
+`-sync`, the two WAL variants the exact peers of `-nosync`, and `sqlite-zstd-dict-wal`
+is the recommendation:
+
+| variant | single, mixed | batch, mixed | single, Common Crawl | batch, Common Crawl | peak RSS MiB, single, mixed / Common Crawl | 10,000 mixed rows singly, compacted / raw | compaction s, populated |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| diskcache-pickle-sync | 4,467 to 4,580 | 6,074 to 6,221 | 1,356 to 1,402 | 1,525 to 1,549 | 300 to 310 / 458 to 498 | 1.048 | 3.0 to 3.2 |
+| diskcache-pickle-nosync (nosync) | 5,536 to 5,720 | 6,548 to 6,654 | 1,532 to 1,571 | 1,638 to 1,639 | 299 to 311 / 461 to 496 | 1.048 | 2.9 to 3.2 |
+| diskcache-zstd-sync | 4,770 to 4,950 | 6,043 to 6,203 | 1,326 to 1,358 | 1,396 to 1,432 | 312 to 321 / 560 to 562 | 0.240 | 2.5 to 2.7 |
+| diskcache-zstd-nosync (nosync) | 5,570 to 5,633 | 6,200 to 6,573 | 1,339 to 1,437 | 1,462 to 1,476 | 312 to 321 / 561 to 564 | 0.240 | 2.4 to 2.6 |
+| diskcache-zstd-dict-sync | 4,579 to 4,830 | 5,887 to 5,909 | 1,181 to 1,203 | 1,260 to 1,264 | 307 to 332 / 514 to 516 | 0.186 | 1.8 to 1.9 |
+| diskcache-zstd-dict-nosync (nosync) | 5,439 to 5,517 | 6,255 to 6,263 | 1,209 to 1,248 | 1,302 to 1,314 | 306 to 332 / 513 to 519 | 0.186 | 1.7 to 1.8 |
+| diskcache-zstd-dict-inline-sync | 4,643 to 4,869 | 6,211 to 6,395 | 1,235 to 1,242 | 1,310 | 328 to 332 / 513 | 0.185 | 2.4 to 2.6 |
+| diskcache-zstd-dict-inline-nosync (nosync) | 5,384 to 5,554 | 6,198 to 6,416 | 1,261 to 1,284 | 1,309 to 1,318 | 328 to 332 / 513 | 0.185 | 2.4 to 2.5 |
+| diskcache-zstd-dict-fanout-sync | 3,985 to 4,501 | 5,526 to 5,794 | 1,148 to 1,152 | 1,226 to 1,255 | 379 to 819 / 704 to 1,022 | 0.186 | 1.3 to 1.4 |
+| diskcache-zstd-dict-fanout-nosync (nosync) | 4,942 to 4,950 | 5,746 to 6,024 | 1,183 to 1,201 | 1,263 to 1,280 | 381 to 819 / 706 to 1,022 | 0.186 | 1.3 to 1.5 |
+| diskcache-zstd-dict-split-sync | 3,032 to 3,173 | 5,448 to 5,961 | 1,045 to 1,058 | 1,242 to 1,265 | 337 to 525 / 623 to 704 | 0.200 | 2.0 |
+| diskcache-zstd-dict-split-nosync (nosync) | 4,128 to 4,323 | 5,591 to 5,894 | 1,111 to 1,174 | 1,292 to 1,298 | 337 to 525 / 621 to 705 | 0.200 | 1.9 to 2.0 |
+| sqlite-zstd | 2,122 to 2,505 | 6,891 to 7,117 | 1,106 to 1,143 | 1,578 to 1,605 | 180 / 417 to 418 | 0.232 | 1.9 to 2.3 |
+| sqlite-zstd-wal | 6,368 to 6,374 | 6,920 to 6,974 | 1,480 to 1,499 | 1,506 to 1,521 | 180 / 416 to 418 | 0.241 | 1.6 to 2.1 |
+| sqlite-zstd-dict-wal | 5,974 to 6,165 | 6,584 to 6,599 | 1,289 to 1,315 | 1,340 to 1,357 | 189 to 192 / 419 | 0.176 | 1.2 to 1.5 |
+
+Upserts, 500 rows one `set` per row and cache, second of two runs (the first in
+brackets). The diskcache compaction is `check(fix=True)`: `integrity_check`, `VACUUM`,
+a walk of every file and a reconciliation of the stored size and count, so its time is
+not `VACUUM`'s alone:
+
+| variant | ms per row | compaction s | peak RSS MiB | MiB before > after upserts > after compaction | .val files |
+| --- | ---: | ---: | ---: | --- | ---: |
+| sqlite-zstd | 0.79 (0.75) | 4.1 (4.0) | 103 | 1,026.3 > 1,042.3 > 1,026.3 | |
+| sqlite-zstd-dict | 0.77 (0.73) | 3.2 (3.2) | 119 | 763.9 > 779.9 > 763.9 | |
+| diskcache-pickle-sync | 0.65 (0.66) | 7.0 (7.1) | 269 | 4,632.6 > 4,636.6 > 4,632.6 | 30,567 |
+| diskcache-pickle-nosync | 0.58 (0.64) | 7.4 (7.3) | 269 | 4,632.6 > 4,636.6 > 4,632.6 | 30,567 |
+| diskcache-zstd-sync | 0.55 (0.61) | 6.2 (6.3) | 250 | 1,061.0 > 1,065.0 > 1,061.0 | 4,579 |
+| diskcache-zstd-nosync | 0.49 (0.49) | 6.2 (6.3) | 250 | 1,061.0 > 1,065.0 > 1,061.0 | 4,579 |
+| diskcache-zstd-dict-sync | 0.65 (0.70) | 4.3 (4.5) | 262 | 808.7 > 812.7 > 808.7 | 3,973 |
+| diskcache-zstd-dict-nosync | 0.51 (0.49) | 4.3 (4.3) | 262 | 808.7 > 812.7 > 808.7 | 3,973 |
+| diskcache-zstd-dict-inline-sync | 1.28 (0.61) | 6.1 (6.1) | 259 | 803.9 > 807.9 > 803.9 | 0 |
+| diskcache-zstd-dict-inline-nosync | 0.52 (0.51) | 6.0 (6.2) | 259 | 803.9 > 807.9 > 803.9 | 0 |
+| diskcache-zstd-dict-fanout-sync | 0.60 (0.58) | 3.3 (3.3) | 1,014 | 807.9 > 815.2 > 807.9 | 3,973 |
+| diskcache-zstd-dict-fanout-nosync | 0.46 (0.48) | 3.3 (3.3) | 1,015 | 807.9 > 815.2 > 807.9 | 3,973 |
+| diskcache-zstd-dict-split-sync | 1.31 (1.22) | 5.2 (5.2) | 474 | 871.8 > 883.2 > 871.8 | 3,103 |
+| diskcache-zstd-dict-split-nosync | 0.97 (0.99) | 5.2 (5.1) | 474 | 871.8 > 883.2 > 871.8 | 3,103 |
+
+Every build wrote and counted 130,880 rows by `len()` and `count(*)` (each regime build
+its own rows and raw bytes, as `sizes.json` has them) and `check(fix=True)` warned of
+nothing; every insert child found the row count grown by exactly the rows inserted and
+no log left; every upsert child found 130,880 rows and all 500 changed Markdown bodies
+through a reopen.
+
+What the tables say:
+
+- **As a library for the recommended store, diskcache costs a little on most axes and
+  saves little.** With the same codec and durability, `diskcache-zstd-dict` takes 808.7
+  MiB against 763.9 (0.183 against 0.173, 6% more: the pickled row and the cache's own
+  columns) and commits 5,439 to 5,517 single-row inserts a second against 5,974 to 6,165
+  for `sqlite-zstd-dict-wal`, about 10% fewer (1,209 to 1,248 against 1,289 to 1,315 on
+  Common Crawl rows). A lookup takes 0.058 ms against 0.046, but that time includes
+  opening the store, as it does for every store here, and a by-hand timing of the
+  single-cache layouts, warm (the second of two fresh-process runs each), found
+  diskcache's open at 2.0 to 3.3 ms (every open rewrites its stored settings; the
+  eight-shard open took 15.7 to 23.3 ms) and its 200 gets at 6.4 to 7.8 ms, about 0.03
+  ms each, so the gap is its open, not its lookup. Scans take 1.8 s against 1.1 and
+  metadata selects 0.74 s against 0.18, for two reasons the split layout separates: it
+  unpickles no body for the metadata select and still takes 0.50 s, and scans in 1.5 s,
+  so most of the gap is the `iter`-then-`get` path, one SQL round trip per row, and the
+  rest (0.24 s of the metadata select, 0.3 s of the scan) is unpickling whole rows. The
+  split layout pays for that at 0.197 of raw and 30% fewer single-row inserts than the
+  dictionary store (4,128 to 4,323 a second unsynced), since each row commits three
+  times.
+- **Its upserts are faster, the one axis it wins.** In the same run the dictionary
+  codec upserted at 0.65 (0.70) ms a row with `synchronous=FULL`, the durability peer of
+  the dictionary store under a rollback journal at 0.77 (0.73), and at 0.51 (0.49) ms
+  in its own WAL mode. That WAL figure is the nearest thing measured to the recommended
+  store upserted in WAL mode, which no section ran: the same codec and durability in a
+  different row format and with auto-vacuum on, so indicative, not the number. Its
+  compaction is slower (4.3 s against 3.2) because it is more than `VACUUM`.
+- **The spill to files buys nothing on this corpus.** Kept inline, the dictionary layout
+  is the same size (0.182 against 0.183) and looks up no faster (0.063 against 0.058
+  ms); only 3,973 of 130,880 rows spill once compressed, 288 MiB in all. Uncompressed,
+  the stock Disk spills 30,567 rows (3,871 MiB) and the store is larger than the data
+  (1.048 of raw), with scans of 7.3 s. Inline, the compaction takes longer (6.1 s
+  against 4.3 after the upserts) because its `VACUUM` rewrites 803 MiB instead of 519.
+- **Durability per write is cheap in WAL mode.** Cell for cell, `-sync` takes 9 to 27%
+  fewer single-row inserts on mixed rows than `-nosync` (12 and 16% for the dictionary
+  layout, 4,579 to 4,830 against 5,439 to 5,517; 27% for the split layout, which commits
+  three times a row). On mixed rows the single-cache layouts run 1.8 to 2.2 times as
+  fast as their durability peer, the rollback-journal `sqlite-zstd` (2,122 to 2,505),
+  because a WAL commit syncs one file, and the split layout 1.3 to 1.4 times; on Common
+  Crawl rows, where the bytes dominate, the single-cache layouts run 1.0 to 1.2 times as
+  fast and the split layout is slower (0.93 to 0.95).
+- **It pays in memory, and its configuration may explain most of it.** diskcache's
+  defaults give every database a 32 MiB page cache and a 64 MiB mmap, up to 96 MiB per
+  database against SQLite's 2 MB default cache in the other stores; no smaller setting
+  was run, so how much of the gap they account for was not measured. The dictionary
+  layout's single-row inserts peak at 306 to 332 MiB against 189 to 192 for the
+  dictionary store, the compressed single-cache and split layouts' scans at 178 to 186
+  MiB against 75 (the pickle layout's at 359), and the single-cache layouts' upserts at
+  250 to 269 MiB against 103 to 119 (the split layout's at 474). The FanoutCache carries
+  eight of each: scans at 571 MiB, upserts at 1,014 to 1,015, inserts at up to 1,058,
+  and it writes no faster with one writer (4,942 to 4,950 single-row inserts a second
+  unsynced).
+
+The dictionary store's write time and peak in the size table include training its nine
+dictionaries; the diskcache builds copy them, so the two builds are not comparable.
+
+Updated against the RocksDB section: diskcache is SQLite underneath, and it lands just
+behind the dictionary store on disk and inserts, well behind on scans, metadata selects
+and memory, and ahead of it on upserts, not between it and RocksDB. Its one contribution
+to the decision is the WAL-mode upsert figure above; as a library it adds a pickled row
+format, a second set of files for large values that this corpus does not need, a
+compaction that is not plain `VACUUM`, a transaction that is not crash-safe for
+overwritten spilled values, and a dependency untested upstream on the Python it would
+run on, in exchange for a dictionary-like API the store's few queries do not need.
+
 ## Verdict
 
 **On disk, yes. In memory while querying, no.**
@@ -1038,6 +1302,14 @@ RocksDB, measured last, does not change that answer. Its block compression sees 
 pages at a time, so it lands with the dictionary SQLite store on disk (0.174 to 0.200),
 not with DuckDB (0.127); it writes faster than SQLite and looks a page up in 0.07 to
 0.09 ms against SQLite's 0.047, at more memory.
+
+diskcache, measured after it, does not change it either. It is SQLite underneath, and
+with the dictionary store's codec it lands just behind that store on disk and inserts
+(0.183 of raw against 0.173, about 10% fewer single-row inserts), well behind on scans
+and metadata selects (slower through its per-row API) and on memory (which its larger
+default page cache and mmap may explain; not measured), and ahead of it only on upserts;
+as a library it would add a dependency to the recommended store and take nothing away
+the store needs.
 
 ## Caveats
 
@@ -1099,6 +1371,16 @@ not with DuckDB (0.127); it writes faster than SQLite and looks a page up in 0.0
   out the compression its background threads and the compaction do, and the
   recommended WAL SQLite store was not upserted beside it. The binding is a third party's
   (`rocksdict`); the one RocksDB's site links to is archived.
+- **diskcache is one configuration of an old release.** 5.6.3 is from 2023 and untested
+  upstream on Python 3.14; it ran here with its own SQLite defaults (a 32 MiB page cache
+  and a 64 MiB mmap per database), which may account for most of its memory over the
+  dictionary store, and a smaller cache was not tried. Its rows are pickled dicts, so a
+  whole-row layout pays for both bodies on every scan and metadata select; the split
+  layout's writes and the FanoutCache's batches are not atomic across their databases.
+  Its compaction, `check(fix=True)`, does more than `VACUUM`. Its read times include an
+  open that rewrites its stored settings, 2.0 to 3.3 ms warm by hand for one database,
+  and its scans make one `get` per row. Its `-nosync` upsert is the only WAL-mode upsert
+  of the dictionary codec measured, through a different row format with auto-vacuum on.
 - **No concurrency.** One writer and no readers at a time; the mirror's real access
   pattern (a crawler writing while a converter reads) was not exercised.
 - **The columnar files were written from the DuckDB store and read with literals.**
@@ -1152,8 +1434,9 @@ The RocksDB section measured the candidate closest to the dictionary store. At t
 disk (0.174 packed into one value per row, 0.184 in three column families, against
 0.173) it writes faster (6,858 to 7,442 single-row inserts a second synced per write,
 10,045 to 10,513 unsynced, against 5,805 to 6,096 for the dictionary store in WAL mode),
-upserts faster (0.13 to 0.16 ms a row synced against 1.83 under a rollback journal; the
-recommended WAL configuration was not upserted), with its compression left to background
+upserts faster (0.13 to 0.16 ms a row synced against 0.73 to 1.88 for the dictionary
+store under a rollback journal, whose time is bimodal across runs; the recommended WAL
+configuration was not upserted), with its compression left to background
 threads and the compaction, and looks a page up in 0.07 to 0.09 ms against 0.047. It
 pays in memory by configuration (a 128 MiB block cache and up to 128 MiB of memtables
 per process; scans at 196 to 548 MiB against 72, bulk loads at 883 to 922 MiB against
@@ -1171,7 +1454,31 @@ is affordable, and a directory of files with its own compaction is acceptable; p
 into one value per row if the reads are lookups, in column families if scans and
 metadata selects matter too.
 
-Four follow-ups are worth measuring if disk or write rate becomes the constraint:
+The diskcache section measured the recommended store's own engine behind a library. With
+the dictionary store's codec and durability, diskcache lands just behind it on disk and
+inserts and well behind on scans, metadata selects and memory: 0.183 of raw against
+0.173, 5,439 to 5,517 single-row inserts a second against 5,974 to 6,165, scans in 1.8 s
+against 1.1 and metadata selects in 0.74 s against 0.18 (one `get` per row, and whole
+rows unpickled), and single-row inserts at 306 to 332 MiB against 189 to 192, which its
+larger default page cache and mmap may explain (not measured). Its lookups match once
+its heavier open is set aside, and it upserts faster: 0.65 (0.70) ms a row synced,
+against 0.77 (0.73) for the dictionary store under a rollback journal in the same run.
+Its spill of large values to files gains nothing on this corpus, its shards add memory
+without speed for one writer, and splitting the columns into three caches speeds the
+metadata select at the cost of atomic writes. The recommendation stands and should be
+built on `sqlite3` directly, as measured: diskcache would add a 2023 release untested
+upstream on Python 3.14, a pickled row format and a compaction that is not `VACUUM`, for
+a dictionary-like API the store's few queries do not need. diskcache wins only where its
+own features are the point: a cache with eviction, expiry and tags, many processes
+sharing it, or values large enough that keeping them out of the database file matters.
+Its WAL-mode upsert, 0.49 and 0.51 ms a row unsynced, is the nearest measure of the
+recommended store's, which no section upserted.
+
+Five follow-ups are worth measuring if disk or write rate becomes the constraint:
+
+- The recommended store as configured, in WAL mode with `synchronous=NORMAL`, under the
+  upserts, and the cause of the dictionary store's upsert time moving between about 0.75
+  and about 1.85 ms from one run to the next under a rollback journal.
 
 - The dictionary's scope and size: one per regime and column at 128 KiB was measured;
   per host, per crawl, larger, or retrained as a host's chrome changes were not, and the

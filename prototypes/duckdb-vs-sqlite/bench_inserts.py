@@ -1,13 +1,14 @@
 # /// script
 # requires-python = ">=3.14,<3.15"
 # dependencies = [
+#   "diskcache==5.6.3",
 #   "duckdb==2.0.0",
 #   "fastavro==1.13.1",
 #   "rocksdict==0.3.29",
 #   "zstandard==0.25.0",
 # ]
 # ///
-"""PROTOTYPE, throwaway: insert throughput of sixteen store variants, from empty and populated.
+"""PROTOTYPE, throwaway: insert throughput of 28 store variants, from empty and populated.
 
 Two insert modes (`single`: one transaction per row, the crawler's pattern; `batch`: 256
 rows per transaction), two row mixes (`mixed`: a stride sample over the whole corpus;
@@ -32,8 +33,14 @@ durable one at a time (`durability: "buffered"`). `sqlite-zstd-dict-wal` is
 are `bench_formats.py`'s three RocksDB layouts, each written with `sync` on (the WAL is
 synced per write batch, durable per write) and off (`durability: "process crash only"`,
 the peer of SQLite WAL with `synchronous=NORMAL`); their compaction flushes and fully
-compacts every column family. `--variants` restricts the run and `--suffix` names the
-results file.
+compacts every column family. The twelve `diskcache-*` variants are `bench_formats.py`'s
+six diskcache layouts, each `-sync` (`synchronous=FULL`, every spilled `.val` file and its
+directory fsynced before the commit: durable per write) and `-nosync` (diskcache's
+`synchronous=NORMAL` in WAL mode, `durability: "process crash only"`). `single` is one
+`set` per row per cache, each its own transaction; `batch` is one `transact()` per
+BATCH rows per cache (per shard for the FanoutCache, three in turn for the split
+layout). Their compaction is `check(fix=True)`, which runs VACUUM. `--variants` restricts
+the run and `--suffix` names the results file.
 """
 
 from __future__ import annotations
@@ -57,10 +64,20 @@ from bench_formats import (
     AVRO_BLOCK_1M,
     AVRO_PARSED,
     AVRO_SYNC,
+    DICT_STORE,
+    DICTIONARIES,
+    DISKCACHE_CAPS,
+    DISKCACHE_COMPACTION,
+    DISKCACHE_INLINE,
+    DISKCACHE_LAYOUTS,
+    DISKCACHE_THRESHOLD,
     DURABILITY,
-    FORMATS,
     ROCKS_CAPS,
+    DiskStore,
     RocksStore,
+    copy_dictionaries,
+    disk_codec,
+    disk_layout,
     live_bytes,
     rocks_layout,
     store_of,
@@ -91,6 +108,7 @@ VARIANTS = [
     "avro-zstd-1m",
     "sqlite-zstd-dict-wal",
     *(f"rocksdb-{layout}-{d}" for layout in ("zstd", "blob", "packed") for d in DURABILITY),
+    *(f"diskcache-{layout}-{d}" for layout in DISKCACHE_LAYOUTS for d in DURABILITY),
 ]
 MODES = ["single", "batch"]
 MIXES = ["mixed", "commoncrawl"]
@@ -104,7 +122,6 @@ PLACEHOLDERS = ", ".join("?" * len(COLUMNS))
 INSERT_SQL = f"INSERT INTO pages ({COLUMN_LIST}) VALUES ({PLACEHOLDERS})"  # noqa: S608  fixed column names
 BODY_COLUMNS = {"html", "markdown"}
 CC_MARKER = b'"regime": "commoncrawl"'
-DICT_STORE = FORMATS / "sqlite-zstd-dict" / "pages.sqlite"
 
 
 def stream(source: Path) -> Iterator[dict[str, Any]]:
@@ -516,6 +533,57 @@ class RocksdbInserter(Inserter):
         self.info["compaction"] = "flush, then compact_range with bottommost force"
 
 
+class DiskcacheInserter(Inserter):
+    """A diskcache store in one of bench_formats's layouts, synced per write or not.
+
+    The Disk compresses the bodies, so the per-row compressor of the base class is not
+    used. A dict layout copies the trained dictionaries into a fresh store; a cloned base
+    already has them.
+    """
+
+    def __init__(self, variant: str, target: Path) -> None:
+        """Remember the layout and the durability; no per-row compressor."""
+        super().__init__(variant, target)
+        self.compressor = None
+        self.layout = store_of(variant).removeprefix("diskcache-")
+        self.sync = variant.endswith("-sync")
+
+    def open(self) -> None:
+        """Create or open the store: an empty directory, or a clone of the base."""
+        self.target.mkdir(parents=True, exist_ok=True)
+        if disk_codec(self.layout) == "dict" and not (self.target / DICTIONARIES).exists():
+            copy_dictionaries(self.target)
+        self.store = DiskStore(self.layout, self.target, sync=self.sync)
+        inline = self.layout.endswith("-inline")
+        self.info = {
+            "layout": disk_layout(self.layout),
+            "durability": "per write" if self.sync else "process crash only",
+            "sync": self.sync,
+            "caps": DISKCACHE_CAPS,
+            "threshold": DISKCACHE_INLINE if inline else DISKCACHE_THRESHOLD,
+        }
+        self.info["synchronous"], self.info["fsync"] = self.store.synchronous()
+
+    def count(self) -> int:
+        """Rows, by `len` of the meta or whole-row cache."""
+        return self.store.count()
+
+    def insert_single(self, source: Path) -> None:
+        """One `set` per row per cache, each its own transaction."""
+        for page in stream(source):
+            self.store.write_one(page)
+
+    def insert_batch(self, source: Path) -> None:
+        """One transaction per BATCH rows per cache (per shard for the FanoutCache)."""
+        for batch in batches(source):
+            self.store.put_many(batch)
+
+    def compact(self) -> None:
+        """`check(fix=True)`, then close; no WAL or shm may remain anywhere in the store."""
+        self.info["check_warnings"] = len(self.store.compact())
+        self.info["compaction"] = DISKCACHE_COMPACTION
+
+
 def inserter(variant: str, target: Path) -> Inserter:
     """The inserter class for a variant name: an exact name first, then a family prefix."""
     exact: dict[str, type[Inserter]] = {
@@ -527,6 +595,7 @@ def inserter(variant: str, target: Path) -> Inserter:
         "avro": AvroInserter,
         "sqlite": SqliteInserter,
         "rocksdb": RocksdbInserter,
+        "diskcache": DiskcacheInserter,
     }
     kind = exact.get(variant) or prefixes.get(variant.split("-", maxsplit=1)[0], DuckdbInserter)
     return kind(variant, target)
@@ -772,7 +841,10 @@ def main() -> None:
     variants = args.variants.split(",") if args.variants else VARIANTS
     if unknown := set(variants) - set(VARIANTS):
         sys.exit(f"unknown variants {sorted(unknown)}; choose from {VARIANTS}")
-    if "sqlite-zstd-dict-wal" in variants and not DICT_STORE.exists():
+    needs_dictionaries = any(
+        v == "sqlite-zstd-dict-wal" or v.startswith("diskcache-zstd-dict") for v in variants
+    )
+    if needs_dictionaries and not DICT_STORE.exists():
         sys.exit(f"no dictionary store at {DICT_STORE}; run bench_formats.py first")
     files = prepare(args.populate, args.insert)
     INSERTS_DIR.mkdir(parents=True, exist_ok=True)
