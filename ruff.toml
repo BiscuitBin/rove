@@ -34,6 +34,12 @@ ban-relative-imports = "all"
   "T201",   # The wheel smoke prints its verdict.
   "S603",   # The smoke runs sys.executable and the rovo script, fixed arguments, no shell.
 ]
+"prototypes/**" = [
+  "INP001", # Prototype scripts are standalone, run with `uv run`, not an importable package.
+  "T201",   # The prototype scripts print their tables.
+  "S603",   # The bench spawns sys.executable with fixed arguments, no shell.
+  "S607",   # The bench names the interpreter it spawns by sys.executable, not by PATH.
+]
 
 # Formatter settings retain their defaults, except its file set. ruff 0.17 also
 # formats Python blocks inside Markdown; those blocks are quotations (tickets
