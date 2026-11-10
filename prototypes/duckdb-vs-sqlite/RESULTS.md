@@ -1,14 +1,14 @@
 # Results: DuckDB against SQLite as the temporary page store
 
-Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the twelve commands below, on an Apple M5 Pro (18 cores, 64 GB)
-running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0, zstandard 0.25.0 and SQLite
-3.53.1 as bundled with that Python, plus fastavro 1.13.1 and avro 1.12.2 for the Avro
-section and rocksdict 0.3.29 (bundling RocksDB 9.8.4) for the RocksDB section. Every
-number on this page comes from one run of the twelve commands below, except the
-tracer-bullet figures named in the first caveat, the block counts of the DuckDB probe
-named in the insert section, the 20-row codec probe named in the Avro section, the
-allocation probe named in the gaps section and the sync and cache probes named in the
-RocksDB section:
+Measured on 2026-11-06, 2026-11-07 and 2026-11-09 with the twelve commands below, on an
+Apple M5 Pro (18 cores, 64 GB) running macOS 26.4 on APFS, Python 3.14.8, duckdb 2.0.0,
+zstandard 0.25.0 and SQLite 3.53.1 as bundled with that Python, plus fastavro 1.13.1 and
+avro 1.12.2 for the Avro section and rocksdict 0.3.29 (bundling RocksDB 9.8.4) for the
+RocksDB section. Every number on this page comes from one run of the twelve commands
+below, except the tracer-bullet figures named in the first caveat, the block counts of
+the DuckDB probe named in the insert section, the 20-row codec probe named in the Avro
+section, the allocation probe named in the gaps section and the sync and cache probes
+named in the RocksDB section:
 
 ```sh
 uv run prototypes/duckdb-vs-sqlite/build_corpus.py --sources rust,sphinx,wikipedia,commoncrawl,github
@@ -727,9 +727,9 @@ the Avro children also found them through the live index before compacting, with
 
 What the tables say:
 
-- **Buffered into 1 MiB blocks, Avro is the fastest single-row writer and lands at
-  its bulk ratio.** 8,066 to 8,348 rows/s on mixed rows against 5,982 to 6,200 for
-  `sqlite-zstd-wal` in the same run, and 1,613 to 1,631 on Common Crawl rows against
+- **Buffered into 1 MiB blocks, Avro outruns every SQLite store a row at a time and
+  lands at its bulk ratio.** 8,066 to 8,348 rows/s on mixed rows against 5,982 to 6,200
+  for `sqlite-zstd-wal` in the same run, and 1,613 to 1,631 on Common Crawl rows against
   1,487 to 1,489; 10,000 mixed rows land at 0.130 of raw (43.5 MiB), the 0.128 of the
   bulk-written file, where `avro-zstd` appending a row at a time landed at 0.188. The
   price is durability: a crash loses the rows still buffered, up to a block, and the
@@ -742,8 +742,9 @@ What the tables say:
   same. Against buffered Avro the dictionary store writes 25 to 30% fewer rows a second
   and takes 36% more disk for the same 10,000 rows (59.0 MiB against 43.5).
 - **Upserts cost under 2 ms a row on all four; compaction is what differs.** The rows
-  took 0.44 to 1.88 ms (the dictionary store's two runs, 0.79 and 1.88 ms, show the
-  noise of one run of 500 fsyncs). Each store grew 16 MiB. `VACUUM` returned both SQLite
+  took 0.44 to 1.88 ms (the dictionary store's two runs, 0.79 and 1.88 ms, differ more
+  than twofold; rerun beside RocksDB it took 1.84 and 1.83 ms, so the 0.79 ms run is the
+  outlier, and why is not known). Each store grew 16 MiB. `VACUUM` returned both SQLite
   files to the exact size in 3.4 to 4.1 s at 96 to 111 MiB of peak RSS. Avro has no
   in-place reclaim: compaction rewrote the whole 539 to 761 MiB file and rebuilt the
   index in 11.0 to 13.1 s at 423 to 429 MiB, a cost that grows with the store, not with
@@ -764,11 +765,11 @@ merge level by level, each file a sequence of compressed blocks. It is measured 
 one more option on every axis above.
 
 **The binding.** `rocksdict` 0.3.29, pinned in the two scripts' PEP 723 headers only,
-ships a Python 3.14 wheel for macOS arm64 that bundles RocksDB 9.8.4 and zstd 1.5.7; every
-store's `LOG` header names RocksDB 9.8.4. python-rocksdb, the binding RocksDB's site
-links to, was archived in June 2025, has had no release since 2019 and ships no wheels.
-Speedb, the RocksDB fork, was dropped: its only binding stops at Python 3.12 and Speedb
-has not released since January 2024.
+ships a Python 3.14 wheel for macOS arm64 that bundles RocksDB 9.8.4 and zstd 1.5.7;
+every store's `LOG` header names RocksDB 9.8.4. python-rocksdb, the binding RocksDB's
+site links to, was archived in June 2025, has had no release since 2019 and ships no
+wheels. Speedb, the RocksDB fork, was dropped: its only binding stops at Python 3.12 and
+Speedb has not released since January 2024.
 
 **The setup.** Three stores, every option passed explicitly on every open: block zstd
 level 3 at every level, 16 KiB blocks in one 128 MiB LRU cache shared by every column
@@ -783,8 +784,8 @@ codec is RocksDB's, block by block.
   64 MiB files) and blob garbage collection at age cutoff 1.0, so a full compaction
   rewrites every blob file and reclaims every stale blob.
 - `rocksdb-packed`: one value per row in the default column family, a header of two
-  lengths, then the metadata JSON, the HTML and the Markdown. A scan or a metadata select
-  reads and slices every whole row; that is the layout's cost, by design.
+  lengths, then the metadata JSON, the HTML and the Markdown. A scan or a metadata
+  select reads and slices every whole row; that is the layout's cost, by design.
 
 Each build writes `WriteBatch`es of 256 rows without syncing, then flushes every column
 family, compacts it fully (`compact_range` with bottommost compaction forced) and
@@ -800,18 +801,19 @@ peers: SQLite under a rollback journal syncs the journal and the database file o
 commit, RocksDB syncs its log once. Neither issues `F_FULLFSYNC`. A by-hand probe on
 this disk timed a synced RocksDB write of 30 KB at 0.046 ms, `os.fsync` after the same
 write at 0.042 ms and `F_FULLFSYNC` at 3.7 ms; RocksDB's own statistics counted 1,000
-log syncs for 1,000 synced writes. The timed write is not the same work either: a RocksDB
-write appends to the log and inserts into a memtable, and the compression happens when a
-memtable is flushed, on RocksDB's two background threads during the loop or in the
-compaction afterwards, which is timed and reported apart; SQLite compresses every body
-on the timed thread. The insert and upsert rates below are the rate a caller sees, not
-the whole cost of the write. The SQLite upsert stores ran under a rollback journal with
-`synchronous=FULL`, so the synced RocksDB upserts are their peers; the unsynced ones have
-no measured SQLite peer, since SQLite in WAL mode was not upserted.
+log syncs for 1,000 synced writes. The timed write is not the same work either: a
+RocksDB write appends to the log and inserts into a memtable, and the compression
+happens when a memtable is flushed, on RocksDB's two background threads during the loop
+or in the compaction afterwards, which is timed and reported apart; SQLite compresses
+every body on the timed thread. The insert and upsert rates below are the rate a caller
+sees, not the whole cost of the write. The SQLite upsert stores ran under a rollback
+journal with `synchronous=FULL`, so the synced RocksDB upserts are their peers; the
+unsynced ones have no measured SQLite peer, since SQLite in WAL mode was not upserted.
 
-Size, bulk built from `sqlite-raw` in rowid order, compacted and closed (the references
-below the line are from the formats run and the per-regime section; the dictionary
-store's write cost is its build in the formats run, 256-row batches then `VACUUM`):
+Size, bulk built from `sqlite-raw` in rowid order, compacted and closed (the three
+reference rows after the RocksDB stores are from the formats run and the per-regime
+section; the dictionary store's write cost is its build in the formats run, 256-row
+batches then `VACUUM`):
 
 | variant | files | allocated MiB | allocated/raw | SST MiB | blob MiB | LOG KiB | write s | write peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -971,39 +973,39 @@ What the tables say:
   against 0.196); blob files compress each body on its own and give that gain back.
   DuckDB's whole-segment compression stays ahead on every regime but GitHub, by most on
   Rust and Sphinx (0.072 and 0.094).
-  Written a row at a time it keeps its ratio once compacted: 10,000 mixed rows land at
+  Written a row at a time RocksDB keeps its ratio once compacted: 10,000 mixed rows land at
   0.175 to 0.202 after the full compaction, the dictionary store at 0.176 after
   `VACUUM`.
 - **It is the fastest writer measured, as the caller sees it.** Unsynced it outruns
   buffered Avro, and synced it outruns every store that makes each write durable, with
-  its compression left to background threads and the compaction. Synced per write it takes 6,858
-  to 7,442 single-row inserts a second on mixed rows, against 2,383 to 2,534 for its
-  durability peer `sqlite-zstd` and 5,805 to 6,096 for the dictionary store in WAL mode;
-  unsynced, 10,045 to 10,513, against 6,350 to 6,411 for `sqlite-zstd-wal`. On Common
-  Crawl rows it takes 1,865 to 2,318 a second, against 1,325 to 1,328 for the dictionary
-  store. A 500-row upsert synced per write costs 0.13 to 0.16 ms a row, against 0.81 for
-  `sqlite-zstd` and 1.83 for the dictionary store, both under a rollback journal with
-  `synchronous=FULL`; unsynced it costs 0.09 to 0.10 ms. Why the dictionary store upserts
-  at twice plain zstd's time was not looked into. (The dictionary store took 1.84 and 1.83 ms in this
-  run's two upsert runs, so the 0.79 ms of its first run in the gaps section was the
-  outlier, not the 1.88.)
+  its compression left to background threads and the compaction. Synced per write it
+  takes 6,858 to 7,442 single-row inserts a second on mixed rows, against 2,383 to 2,534
+  for its durability peer `sqlite-zstd` and 5,805 to 6,096 for the dictionary store in
+  WAL mode; unsynced, 10,045 to 10,513, against 6,350 to 6,411 for `sqlite-zstd-wal`. On
+  Common Crawl rows it takes 1,865 to 2,318 a second, against 1,325 to 1,328 for the
+  dictionary store. A 500-row upsert synced per write costs 0.13 to 0.16 ms a row,
+  against 0.81 for `sqlite-zstd` and 1.83 for the dictionary store, both under a
+  rollback journal with `synchronous=FULL`; unsynced it costs 0.09 to 0.10 ms. Why the
+  dictionary store upserts at twice plain zstd's time was not looked into. (The
+  dictionary store took 1.84 and 1.83 ms in this run's two upsert runs, so the 0.79 ms
+  of its first run in the gaps section was the outlier, not the 1.88.)
 - **It pays in memory, in transient disk and in compaction.** Every RocksDB process
   carries a 128 MiB block cache and up to 128 MiB of memtables by design. Point lookups
   stay small (61 to 71 MiB, 0.07 to 0.09 ms, against 54 MiB and 0.047 ms), but the scan
   peaks at 196 to 312 MiB in the column-family layouts and 548 MiB packed, against 72
   for the dictionary store; a by-hand rerun of the `rocksdb-zstd` and `rocksdb-packed`
   scans found the block cache at 120 MiB at the end, inside its cap, so the rest of
-  those peaks is outside the cache. The packed
-  layout reads every whole row for a scan or a metadata select: 2.3 s at 546 to 548 MiB.
-  Bulk builds peaked at 883 to 922 MiB (the dictionary store's: 713 MiB), 256-row batches of Common Crawl pages at 950 to
-  1,030 MiB (SQLite: 600 to 605), single-row inserts of them at 471 to 540 MiB (SQLite: 415 to 426). Before
-  compaction the column-family stores held up to 2,442 MiB for 9,999 Common Crawl rows
-  of 1,690 MiB raw into a base of 205 to 232 MiB, while the packed store held 498 MiB; this is
-  consistent with RocksDB keeping a log file until every column family whose writes it
-  holds has flushed, which the small `meta` family rarely does, but the files were not
-  broken down. A full compaction rewrote the whole store: 14.1 to 16.4 s after 500
-  upserts, against 3.2 to 4.3 s for `VACUUM`, and 7.0 to 12.4 s after 10,000 inserts
-  into a 50,000-row base, against 1.2 to 2.2 s.
+  those peaks is outside the cache. The packed layout reads every whole row for a scan
+  or a metadata select: 2.3 s at 546 to 548 MiB. Bulk builds peaked at 883 to 922 MiB
+  (the dictionary store's: 713 MiB), 256-row batches of Common Crawl pages at 950 to
+  1,030 MiB (SQLite: 600 to 605), single-row inserts of them at 471 to 540 MiB (SQLite:
+  415 to 426). Before compaction the column-family stores held up to 2,442 MiB for 9,999
+  Common Crawl rows of 1,690 MiB raw into a base of 205 to 232 MiB, while the packed
+  store held 498 MiB; this is consistent with RocksDB keeping a log file until every
+  column family whose writes it holds has flushed, which the small `meta` family rarely
+  does, but the files were not broken down. A full compaction rewrote the whole store:
+  14.1 to 16.4 s after 500 upserts, against 3.2 to 4.3 s for `VACUUM`, and 7.0 to 12.4 s
+  after 10,000 inserts into a 50,000-row base, against 1.2 to 2.2 s.
 
 Updated against the gaps section: RocksDB is the only option that beats the dictionary
 store on writes and upserts at its disk ratio with every write durable and lookups in
@@ -1060,7 +1062,8 @@ not with DuckDB (0.127); it writes faster than SQLite and looks a page up in 0.0
 - **DuckDB threads.** DuckDB ran with its default 18 threads; SQLite is single-threaded.
   The memory limit column is what DuckDB reports; in the query runs SQLite ran at its
   default 2 MB page cache and its default rollback journal, not WAL mode. The insert
-  runs add the two WAL variants.
+  runs add the WAL variants: `sqlite-raw-wal` and `sqlite-zstd-wal`, and from the gaps
+  run on `sqlite-zstd-dict-wal`.
 - **Insert cells ran once, and the fsync is APFS's.** The spread between the empty and
   populated cells of one (variant, mode, mix), which should agree, is the best guide to
   the noise: under 10% for every SQLite and files cell, up to 20% for DuckDB. On macOS
@@ -1121,28 +1124,29 @@ mode: SQLite with per-row zstd under `journal_mode=WAL` and `synchronous=NORMAL`
 as fast as batching, while DuckDB written a row at a time is five times slower and loses
 the disk advantage that was its case (0.57 of raw against 0.23). The columnar files do
 not change the choice: Parquet matches DuckDB's disk but a point lookup reads a whole
-column chunk (116 ms and 1.4 GB, failing under 512 MB), Vortex is three and a half
-times Parquet on disk, and Lance with a BTREE index is the best lookup DuckDB can offer
-(1.1 ms at 123 MiB) at 0.21 of raw, still twenty times SQLite's time and three times its
-memory. Avro read through DuckDB is worse than all of them (a whole-file read per lookup,
-failing under 512 MB); read through fastavro with a sidecar index it looks up in under a
-millisecond and, in 1 MiB zstd blocks, matches DuckDB's disk, but only as an append-only
-log whose blocks must be batched to stay small. What does move is the SQLite store itself: a zstd dictionary trained per regime
-and column takes it from 0.232 to 0.173 of raw at no measurable query cost, so the
-recommended store is **SQLite with per-row zstd against a per-host (here per-regime)
-dictionary, in WAL mode**. A later decision record can cite these numbers directly.
+column chunk (116 ms and 1.4 GB, failing under 512 MB), Vortex is three and a half times
+Parquet on disk, and Lance with a BTREE index is the best lookup DuckDB can offer (1.1
+ms at 123 MiB) at 0.21 of raw, still twenty times SQLite's time and three times its
+memory. Avro read through DuckDB is worse than all of them (a whole-file read per
+lookup, failing under 512 MB); read through fastavro with a sidecar index it looks up in
+under a millisecond and, in 1 MiB zstd blocks, matches DuckDB's disk, but only as an
+append-only log whose blocks must be batched to stay small. What does move is the SQLite
+store itself: a zstd dictionary trained per regime and column takes it from 0.232 to
+0.173 of raw at no measurable query cost, so the recommended store is **SQLite with
+per-row zstd against a per-host (here per-regime) dictionary, in WAL mode**. A later
+decision record can cite these numbers directly.
 
-The gaps section measured the alternative the Avro section left standing, Avro with zstd in 1 MiB
-blocks and a sidecar index, as a store a crawler writes: buffered into blocks it takes
-8,000 single-row writes a second and lands at 0.130 of raw, against about 6,000 and
-0.176 for the dictionary store; it upserts as fast; and it gives up per-row durability,
-in-place reclaim (a compaction rewrites the whole file, 11 s for this one, against a
-3.4 s `VACUUM`), lookups (0.74 ms against 0.05), the metadata select (1.9 s against
-0.2) and a single file with transactions. Avro wins only where disk is the binding
-constraint, losing up to a block of pages on a crash is acceptable because they can be
-fetched again, one process owns the files, and old versions can wait for a periodic
-rewrite. None of that holds for the temporary store as specified, so the recommendation
-stands.
+The gaps section measured the alternative the Avro section left standing, Avro with zstd
+in 1 MiB blocks and a sidecar index, as a store a crawler writes: buffered into blocks
+it takes 8,000 single-row writes a second and lands at 0.130 of raw, against about 6,000
+and 0.176 for the dictionary store; it upserts as fast; and it gives up per-row
+durability, in-place reclaim (a compaction rewrites the whole file, 11 s for this one,
+against a 3.4 s `VACUUM`), lookups (0.74 ms against 0.05), the metadata select (1.9 s
+against 0.2) and a single file with transactions. Avro wins only where disk is the
+binding constraint, losing up to a block of pages on a crash is acceptable because they
+can be fetched again, one process owns the files, and old versions can wait for a
+periodic rewrite. None of that holds for the temporary store as specified, so the
+recommendation stands.
 
 The RocksDB section measured the candidate closest to the dictionary store. At the same
 disk (0.174 packed into one value per row, 0.184 in three column families, against
@@ -1150,12 +1154,12 @@ disk (0.174 packed into one value per row, 0.184 in three column families, again
 10,045 to 10,513 unsynced, against 5,805 to 6,096 for the dictionary store in WAL mode),
 upserts faster (0.13 to 0.16 ms a row synced against 1.83 under a rollback journal; the
 recommended WAL configuration was not upserted), with its compression left to background
-threads and the compaction, and looks a page up in
-0.07 to 0.09 ms against 0.047. It pays in memory by configuration (a 128 MiB block
-cache and up to 128 MiB of memtables per process; scans at 196 to 548 MiB against 72,
-bulk loads at 883 to 922 MiB against 713 and 256-row batches of large pages near 1 GiB), in transient disk (up to
-2,442 MiB before compaction for 1,690 MiB of Common Crawl rows written into a base of
-205 to 232 MiB, in the column-family layouts), in a full compaction about four times as long as
+threads and the compaction, and looks a page up in 0.07 to 0.09 ms against 0.047. It
+pays in memory by configuration (a 128 MiB block cache and up to 128 MiB of memtables
+per process; scans at 196 to 548 MiB against 72, bulk loads at 883 to 922 MiB against
+713 and 256-row batches of large pages near 1 GiB), in transient disk (up to 2,442 MiB
+before compaction for 1,690 MiB of Common Crawl rows written into a base of 205 to 232
+MiB, in the column-family layouts), in a full compaction about four times as long as
 `VACUUM` (14 to 16 s after 500 upserts), and in operability: a directory of about twenty
 files, a tuning surface of a dozen options, and a binding outside the standard library.
 The recommendation stands, because what RocksDB adds is write and upsert speed beyond

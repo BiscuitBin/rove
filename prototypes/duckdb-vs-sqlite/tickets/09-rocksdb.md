@@ -26,6 +26,7 @@ compaction, so the final report can weigh it against the dictionary SQLite store
    - `rocksdb-packed`: one value per row in the default column family, a two-length
      header then the meta JSON, the HTML and the Markdown; a scan or metadata select
      reads every whole row, by design.
+
    Each build writes `WriteBatch`es of 256 rows unsynced, then flushes and compacts every
    column family with bottommost compaction forced, closes, and fails if a WAL file of
    nonzero size remains; a read-only reopen counts the rows outside the timed region.
@@ -40,7 +41,10 @@ compaction, so the final report can weigh it against the dictionary SQLite store
    is the build's. `sqlite-zstd`, `sqlite-zstd-wal` and `sqlite-zstd-dict-wal` run
    beside them as in-run references. The first full run stopped on a race: measuring
    an open store listed a log file that a background job deleted before it was
-   measured. `live_bytes` skips such a file, and the run was redone from the start.
+   measured. `live_bytes` skips such a file, and the run was redone from the start. The
+   upsert run had finished before the fix. The old helper counted the same files the
+   same way and differed only in stopping on such a file, so a run that finished
+   measured what `live_bytes` would have.
 4. **Upserts.** `bench_formats.py --upserts --only rocksdb` runs the 500 upserts on APFS
    clones of the three stores, synced and not, one `WriteBatch` per row, then the full
    compaction, and checks 130,880 rows and the 500 changed bodies through a read-only

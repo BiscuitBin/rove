@@ -40,11 +40,11 @@ benchmark, appending to the file with an fsync per write. Ticket 08 adds the zst
 store and the dictionary SQLite store to the insert benchmark and measures upserts on
 both.
 
-Ticket 09 adds three RocksDB stores, RocksDB 9.8.4 through the `rocksdict` binding: three
-column families keyed by identity (metadata JSON, HTML, Markdown), the same with the two
-bodies in blob files, and one packed value per row. Each is measured on size overall
-and per regime and on the read shapes, joins the insert benchmark with its write-ahead
-log synced per write and not, and runs the upserts.
+Ticket 09 adds three RocksDB stores, RocksDB 9.8.4 through the `rocksdict` binding:
+three column families keyed by identity (metadata JSON, HTML, Markdown), the same with
+the two bodies in blob files, and one packed value per row. Each is measured on size
+overall and per regime and on the read shapes, joins the insert benchmark with its
+write-ahead log synced per write and not, and runs the upserts.
 
 Four query shapes: point lookup by identity, a full scan of every Markdown body, a
 metadata-only select, and an upsert of one row at a time. Each measurement runs in a
@@ -52,9 +52,10 @@ fresh subprocess and reports the child's own peak RSS and wall time. DuckDB quer
 twice, at the default memory limit and under a 512 MB limit.
 
 Insert throughput is measured separately, on the five stores plus the two SQLite stores
-in WAL mode: 10,000 rows inserted one transaction at a time and 256 rows at a time, into
-an empty store and into one already holding 50,000 rows, with two row mixes. The results
-page's "Insert throughput" section has the table.
+in WAL mode, and later on Avro, the dictionary SQLite store in WAL mode and the six
+RocksDB variants: 10,000 rows inserted one transaction at a time and 256 rows at a
+time, into an empty store and into one already holding 50,000 rows, with two row
+mixes. The results page's "Insert throughput" section has the table.
 
 ## The corpus
 
@@ -77,8 +78,8 @@ HTML-only regimes get their Markdown from a throwaway converter.
 ## How to run
 
 Each script carries a PEP 723 header and runs with `uv run`, which resolves its own
-environment on the first run (Python 3.14, duckdb, zstandard, warcio, the converter, fastavro, avro
-and rocksdict).
+environment on the first run (Python 3.14, duckdb, zstandard, warcio, the converter,
+fastavro, avro and rocksdict).
 Nothing is added to the project's dependencies.
 
 ```sh
@@ -110,18 +111,21 @@ fifth built, and saves `inserts-gaps.json`. The ninth runs 500 upserts on `sqlit
 and saves `formats-upserts.json`; it reaches no network. The tenth builds the three
 RocksDB stores, and each regime of each on its own (built, measured, deleted), reads
 them beside `parquet-zstd`, `sqlite-zstd-dict` and `duckdb-zstd`, which the fifth must
-have built, and saves `formats-rocksdb.json`. The eleventh runs the 500 upserts on the
-three RocksDB stores, synced and unsynced, beside `sqlite-zstd` and `sqlite-zstd-dict`,
-and saves `formats-upserts-rocksdb.json`. The twelfth runs the insert benchmark on the
-six RocksDB variants and three SQLite references and saves `inserts-rocksdb.json`. None
-of the three reaches the network once `uv` has fetched rocksdict. The first command accepts any subset of `rust,sphinx,wikipedia,commoncrawl,github` and
-a per-source cap. Data, downloads, databases and raw results all land under
-`ai_tmp/duckdb-vs-sqlite/`, which is gitignored and excluded from every hook; a full
-build needs roughly 39 GB there: the corpus file, the five stores, the nine format
-stores, the six Avro stores (4.3 GB), the three RocksDB stores (2.4 GB) and the three extensions, the download cache and the insert benchmark's four
-row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the base
-store and its clone. Rerunning a script wipes and rebuilds
-its outputs, except the row samples, which the insert benchmark keeps and reuses.
+have built, and saves `formats-rocksdb.json`. The eleventh runs the 500 upserts on
+clones of the three RocksDB stores the tenth built, synced and unsynced, beside
+`sqlite-zstd` and `sqlite-zstd-dict`, which the fifth built, and saves
+`formats-upserts-rocksdb.json`. The twelfth runs the insert benchmark on the six RocksDB
+variants and three SQLite references, which needs the dictionary store the fifth built,
+and saves `inserts-rocksdb.json`. None of the three reaches the network once `uv` has
+fetched rocksdict. The first command accepts any subset of
+`rust,sphinx,wikipedia,commoncrawl,github` and a per-source cap. Data, downloads,
+databases and raw results all land under `ai_tmp/duckdb-vs-sqlite/`, which is gitignored
+and excluded from every hook; a full build needs roughly 39 GB there: the corpus file,
+the five stores, the nine format stores, the six Avro stores (4.3 GB), the three RocksDB
+stores (2.4 GB) and the three extensions, the download cache and the insert benchmark's
+four row-sample files (5 GB), plus about 5 GB more while that benchmark runs, for the
+base store and its clone. Rerunning a script wipes and rebuilds its outputs, except the
+row samples, which the insert benchmark keeps and reuses.
 
 The prototype's Python and Markdown pass the repository gate; the data never does.
 The tickets are under `tickets/` in this directory.
