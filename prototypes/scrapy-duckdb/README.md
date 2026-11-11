@@ -36,7 +36,8 @@ for the per-ticket network notice; the DuckDB study for the measurements.
 - The guest is a `python:3.12` image with Scrapy installed by `pip` at first create and
   persisted on the machine's own disk. Ticket 01 climbs a ladder if that does not hold:
   a community Scrapy image, then a venv on the ext4 disk.
-- One machine, named `scrapy-proto`, created persistent, detached and with networking
+- One machine, named `scrapy-proto` (since ticket 07, this branch drives `rocks-proto` instead, the
+  same machine plus a host mount), created persistent, detached and with networking
   on, so separate processes reopen it by name. It is stopped, not deleted, between
   sessions. It is never managed with a `with` block, because `Machine.__exit__` deletes
   the machine.
@@ -46,7 +47,9 @@ for the per-ticket network notice; the DuckDB study for the measurements.
   it does not hold, so a replay never touches the site.
 - Polite defaults are baked in and robots.txt is always obeyed: there is no ignore flag.
   The User-Agent names the prototype.
-- The store is one DuckDB file, `ai_tmp/scrapy-duckdb/prototype.duckdb` at the
+- Since ticket 09 every `--store` value loads a fresh per-run file, `<run_id>-<arm>.duckdb`, and the
+  shared file below keeps only the `runs` row (`scrapyproto sql --run <run_id>` queries a run's pages).
+  Until then: the store is one DuckDB file, `ai_tmp/scrapy-duckdb/prototype.duckdb` at the
   repository root, with a `runs` table and a `pages` table whose `html` column is
   declared `USING COMPRESSION ZSTD`. `--store bulk` (the default) loads the feed on the
   host after the run; `--store per-item` writes each page from the item pipeline into a
@@ -83,6 +86,10 @@ uv run scrapyproto sql "select status, count(*) from pages group by 1" --run RUN
 uv run scrapyproto crawl --start-url URL --exclude 'glob' --dry-run        # ticket 04
 uv run scrapyproto vm install-duckdb                     # ticket 05: guest DuckDB pin (network)
 uv run scrapyproto crawl --start-url URL --store per-item                 # ticket 05
+uv run python -u spike_rocks.py all                       # ticket 07: RocksDB across the mount
+uv run scrapyproto crawl --start-url URL --store all       # ticket 08: rocks-queue, jsonl-tail and bulk
+uv run scrapyproto consume RUN_ID                          # ticket 08: resume a live arm's host side
+uv run python bench_queries.py table LOG...               # ticket 09: replay logs to medians
 uv run python bench_queries.py bench --urls-from F --scratch D F1 F2      # ticket 05
 uv run scrapyproto vm down                               # stop; `vm up` reconnects
 uv run scrapyproto vm destroy                            # delete the machine and the state file
@@ -1389,6 +1396,17 @@ crash in the `runs` row; the manifest beside it records exit 137.
 SIGKILLed 1.5 s after the launch line, with rocks-queue at 55 committed rows and jsonl-tail at 57.
 `scrapyproto consume` resumed both, finished and recorded the run: 200 rows each, 0 duplicates, and
 both equal to the run's bulk file in every set.
+
+**The probes again, after review moment 1's fixes** (`logs/09-after-review-*.txt`), since the crash
+probe, the resume probe and `--store all` ran before them. On Workspace, offline: `--store all` stored
+200 pages in each arm, both live arms equal to bulk in every set; `--crash-after 100` left 99 rows in
+each live arm (cursors `p:000000000098` and byte 42109951, 0 bytes past the last line) and the run
+unrecorded; a host SIGKILLed at 57 and 59 committed rows resumed through `consume` to 200 each, 0
+duplicates, equal to bulk. So the outcomes above hold on the committed code. These runs came after a
+`vm down` and `vm up`, and the guest clock offset had moved to -443 ms (+- 1.4 ms): a reboot resets the
+guest's clock from the host's, which is why every latency here takes its own offset. The resumed
+run's latency line counts only the pages its `consume` committed (143 and 141): arrivals are written
+by the process that committed them.
 
 **Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/09-1.md`). Three findings, all valid
 and fixed, after which the 45 replays were rerun and every replay figure above is from the rerun:
