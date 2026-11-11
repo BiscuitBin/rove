@@ -64,6 +64,13 @@ for the per-ticket network notice; the DuckDB study for the measurements.
 
 ## How to run
 
+**Since ticket 07 this branch drives `rocks-proto`, not `scrapy-proto`.** `MACHINE_NAME` in
+`machine.py` names the second machine, created with a host mount for the live-queue question (see
+"Tickets 07 to 09" at the end). `scrapy-proto`, which holds tickets 01 to 06's caches, belongs to the
+`scrapy-duckdb-prototype` branch and nothing here can address it. The commands below, `spike.py`
+included, therefore act on `rocks-proto`. The host interpreter is pinned below 3.15 (uv picks 3.14),
+since `rocksdict` 0.3.29 has no cp315 wheel; tickets 01 to 06 ran on 3.15.0.
+
 ```sh
 cd prototypes/scrapy-duckdb
 uv sync
@@ -98,6 +105,9 @@ the agent runs the adversarial review loop below.
 | `04-guiding-and-filtering-parameters.md` | Guiding and filtering parameters, proven on Graph and Workspace | 03 |
 | `05-per-item-duckdb-versus-bulk-load.md` | The per-item DuckDB path, compared with the bulk load | 03 |
 | `06-verdict.md` | Verdict | 04, 05 |
+| `07-spike-rocksdb-across-the-mount.md` | Spike: RocksDB across a smol host mount | 06 |
+| `08-the-queue-store-and-consumer.md` | The queue store and its host consumer | 07 |
+| `09-live-queue-versus-bulk.md` | The live queue compared with the bulk load | 08 |
 
 ## Adversarial review
 
@@ -1039,3 +1049,115 @@ the per-item file's own 25 rows (`bench_queries.py edges`, `logs/05-11`), or rea
 - **A gentler close.** A writer that closes without an explicit CHECKPOINT still leaves no WAL (798720
   bytes, `logs/05-11` part 1), because DuckDB checkpoints on a clean close. The explicit CHECKPOINT is
   kept so that the stats can time it.
+
+## Tickets 07 to 09: RocksDB as a live queue
+
+**The question.** Tickets 01 to 06 carry a run's pages from the guest to the host only after the run: a
+JSONL feed on the guest disk, pulled with `read_file` once the done marker appears, then bulk-loaded.
+The host sees nothing until then, and a spider killed mid-run leaves a feed that `check_feed` refuses
+whole. Can RocksDB be a live queue instead: the spider appends pages to RocksDB and the host consumes
+them into DuckDB while the crawl runs? And does that beat the current solution, on what?
+
+**Design choices, made with the maintainer.** A live queue only; RocksDB is not tried as a container
+pulled after the run. The binding is `rocksdict` 0.3.29: the `python-rocksdb` the question linked is
+an sdist last released in 2019 that needs a system librocksdb. A new machine, `rocks-proto`, because a
+smol host mount can only be given at create. Scale: ticket 03's 25-page Graph crawl and ticket 04's
+two 200-page crawls. A control arm was added: a JSONL feed written to the same mount and tailed by the
+host, so that whatever the mount alone provides is not credited to RocksDB.
+
+### Ticket 07: the spike
+
+**The machine.** `scrapyproto vm up` created `rocks-proto` from `python:3.12` with ticket 01's
+`ResourceSpec` and one mount, `MountSpec(<repo>/ai_tmp/scrapy-duckdb/queue, /queue, read_only=False,
+staged=False)` (`logs/07-01`): create to running 3.05 s, `pip install scrapy==2.20.0` 8.91 s, `pip
+install rocksdict==0.3.29` 1.67 s, 14.1 s in all. **This is the first live run of `vm up`'s create
+path**, which ticket 06 listed as never run: `Machine.list` shows `rocks-proto` with its
+`scrapyproto-generation` label, matching the state file, and `owned` is true. Whether `python:3.12` was
+already in the host's image cache is not measured (it was pulled for `scrapy-proto` in ticket 01), so
+3.05 s is not a cold-pull time. In the guest the mount is `virtiofs`, `rw,relatime`; a file the guest
+(root) creates appears on the host owned by the host user, mode 0600. `/out` does not exist on a new
+machine; `crawl` creates it.
+
+**Pins.** Host: CPython 3.14.8 (uv's pick under `requires-python = ">=3.13,<3.15"`), rocksdict 0.3.29,
+DuckDB 2.0.0, smolmachines 1.32.4. Guest: Python 3.12, Scrapy 2.20.0, rocksdict 0.3.29.
+
+**The clock.** Latencies below are host receive time minus guest write time, so the guest's clock
+offset is measured first, NTP-style over the mount: the host writes a ping file, a guest poller (1 ms)
+answers with its own time, the host sees the pong. The best of 30 round trips bounds the error by
+half of it. Across the five logged runs of `spike_rocks.py` (`logs/07-02`, `07-03`, `07-05`, `07-06`,
+`07-07`), the best round trip was 1.9 to 3.9 ms, each run's error bound +- 1.0 to 2.0 ms. **The offset
+(guest minus host) moved:** -0.5 to -1.7 ms in the first four, -5.6 ms in `07-07` a few minutes later
+(and -5.0 ms in the triage rerun, not logged). The guest clock drifts against the host's by
+milliseconds over minutes, so an offset is only good beside the run it was taken for; every latency
+here uses its own run's offset, and ticket 09 must do the same. The median round trip was 45 ms in
+every run, against 2 to 4 ms at best. **Inference:** the slow leg is the host-to-guest one (the guest
+re-reading a file the host replaced), which is not the direction the queue uses; the guest-to-host
+latencies below sit at the host's poll interval.
+
+**Probe 1: a guest primary, a host secondary** (`logs/07-03`). A guest writer puts 200 values of
+75000 bytes of synthetic HTML-like text (about ticket 03's mean page) under `p:%012d`, 50 ms apart,
+then `meta:closed`. The host opens the same directory through the mount with
+`AccessType.secondary` and, every 10 ms, calls `try_catch_up_with_primary()` and reads the keys past
+its cursor. Three write modes, then a burst with no pacing:
+
+| Mode | Guest acked, host saw | put to host-visible: min, p50, p95, max (ms) | catch-up call p50, max (ms) |
+| --- | --- | --- | --- |
+| plain (no sync, no flush) | 200, 200 | 0.44, 7.90, 14.63, 17.57 | 0.41, 3.16 |
+| `flush_wal(True)` after each put | 200, 200 | 0.50, 7.20, 14.51, 15.79 | 0.35, 2.69 |
+| `WriteOptions.sync` on each put | 200, 200 | 0.56, 8.50, 15.25, 17.48 | 0.48, 2.25 |
+| plain, no pacing (burst) | 200, 200 | 0.51, 10.35, 20.27, 21.94 | 0.27, 2.38 |
+
+Every put reached the host, and `meta:closed` was seen each time. The latency is the 10 ms poll plus
+a few milliseconds; the mode makes no difference. **Inference:** guest writes to the virtiofs mount
+reach the host's file as they are written, with no writeback delay a sync would remove. The secondary
+opened 18 to 24 ms after the writer was launched. **Bytes across the mount:** the WAL is not
+compressed by default. The 200 puts made a 15772263-byte `000004.log`; ZSTD (`set_compression_type`)
+applies only to the SST written at flush (1047342 bytes here, from this too-regular synthetic text, so
+not a ratio to cite). So during a run the queue moves about as many bytes as the JSONL feed. rocksdict
+has no setter for the DB option `wal_compression`, and `set_options` refuses it, but editing the
+closed database's OPTIONS file to `wal_compression=kZSTD` and reopening with `Options.load_latest`
+works: on the host, 100 puts of 75 KB made a 14777-byte WAL instead of 7548610, and a secondary
+followed that compressed WAL put by put (scratch checks, not logged). Ticket 08 uses it; the ratio on
+real pages is ticket 09's to measure.
+
+**Probe 2: LOCK and fsync on the mount** (`logs/07-04`). A guest writer with `WriteOptions.sync` on
+every put ran 100 puts to completion over the mount: fsync works there. A second primary opened in the
+guest while the first held the database was refused (`IO error: While lock file: .../LOCK: Resource
+temporarily unavailable`). **A read-write open from the host, at the same moment, succeeded.** The
+guest's lock does not cross the mount: nothing stops a host process from opening the database as a
+second writer, which RocksDB does not survive. Verdict: the host opens a live queue only as a
+secondary, which takes no lock and writes only under its own secondary path, and opens it read-write
+only once the guest writer is known dead. The probe's database was a throwaway.
+
+**Probe 3: the writer SIGKILLed mid-write** (`logs/07-05`; rerun after the review's fixes as
+`logs/07-07`, same outcome). The first run's liveness check matched its own shell line; the review
+then found that the probe opened the database read-write whatever the check said. It now scans the
+guest's processes strictly (a failed scan raises), proves the scan sees the live writer before the
+kill, and refuses the read-write open while any writer remains. The writer SIGKILLs itself after acknowledging put 99 (100 puts),
+20 ms apart. The secondary, following live, had all 100. No writer process was left in the guest. The
+files on the host: a 7886045-byte WAL, no SST, no `meta:closed`. A fresh secondary opened afterwards
+read the same 100 keys. A host read-write open, now safe since the writer was dead, recovered the WAL
+into a 1116132-byte SST: 100 keys, contiguous from `p:000000000000`, equal to the 100 the guest
+acknowledged. Nothing acknowledged was lost and nothing unacknowledged appeared. Not measured: a
+crash of the guest kernel or the VM process, where what sits in the guest's page cache may matter
+(the latencies above suggest little does, but that is inference), and a crash during a flush.
+
+**Probe 4: a JSONL line appended on the mount, tailed from the host** (`logs/07-06`). The guest
+appends 200 lines of the same 75000-byte bodies, 50 ms apart, `flush()` after each, no fsync; the host
+reads past its byte offset every 10 ms and keeps only complete lines. All 200 arrived; no read ended
+mid-line; write to host-visible was min 0.47, p50 7.42, p95 13.68, max 15.45 ms. **That is the same as
+RocksDB's.** The liveness comes from the mount, not from RocksDB: a plain JSONL file on the same mount
+is as live. What RocksDB adds over a tailed file has to be found elsewhere: in keyed, ordered reads
+from any cursor, a recovery that is the database's own, compression of what crosses, and whatever
+tickets 08 and 09 measure.
+
+**Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/07-1.md`). Two findings, both valid
+and fixed in `spike_rocks.py`: (high) the crash probe could open a second primary from the host while
+a guest writer survived, since the liveness scan only printed its result and masked its own failure;
+(medium) `main` attached with `connect_owned` without checking ownership, which boots a stopped
+machine. It now refuses unless the state file's generation matches and the machine is already
+running, as `cli._running_or_fail` does. The review found no path to `scrapy-proto`.
+
+**Rung.** Rung 1 held: a guest primary on the mount, a host secondary following it. Rungs 2 and 3
+(checkpoints into the mount, or SSTs pulled with `read_file`) were not tried, so nothing is known
+about them.

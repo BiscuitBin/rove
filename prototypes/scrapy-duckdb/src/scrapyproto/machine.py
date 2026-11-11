@@ -7,14 +7,17 @@ The one delete is `vm destroy` in `cli.py`.
 from pathlib import Path
 from typing import Any
 
-from smol import ConnectOptions, ExecOptions, Machine, MachineConfig, ResourceSpec, SmolError
+from smol import ConnectOptions, ExecOptions, Machine, MachineConfig, MountSpec, ResourceSpec, SmolError
 
 from scrapyproto import state
 
-MACHINE_NAME = "scrapy-proto"
+# Ticket 07: this branch drives a second machine with a host mount; `scrapy-proto` (tickets 01 to 06)
+# is another branch's and nothing here can reach it by name.
+MACHINE_NAME = "rocks-proto"
 IMAGE = "python:3.12"
 SCRAPY_VERSION = "2.20.0"  # A guest pin, never a host dependency.
 DUCKDB_VERSION = "2.0.0"  # Ticket 05's guest pin: the host's, from uv.lock, so both read one file format.
+ROCKSDICT_VERSION = "0.3.29"  # Ticket 07: the host's pin; the host reads guest-written RocksDB.
 # Without target="local" the SDK may address the cloud.
 LOCAL = ConnectOptions(target="local")
 # Explicit: the engine's defaults are 4 vCPU, 8 GiB, 20 GiB storage and a 10 GiB overlay, and
@@ -24,6 +27,9 @@ INSTALL_TIMEOUT_S = 600.0
 CHECK_TIMEOUT_S = 60.0
 # Written to the machine and the state file at create: the name alone cannot tell a replacement.
 GENERATION_LABEL = "scrapyproto-generation"
+# Ticket 07: one writable host directory, shared live (not staged: staged copies back only on sync or stop).
+QUEUE_HOST_DIR = state.DEFAULT_STATE_DIR / "queue"
+QUEUE_GUEST_DIR = "/queue"
 
 
 class ProtoError(RuntimeError):
@@ -36,8 +42,10 @@ def one_line(reason: object) -> str:
 
 def create(generation: str | None = None) -> Machine:
     """Create and boot the machine; returns once the guest agent is up. Raises if the name is taken."""
+    QUEUE_HOST_DIR.mkdir(parents=True, exist_ok=True)
     config = MachineConfig(
         name=MACHINE_NAME,
+        mounts=[MountSpec(source=str(QUEUE_HOST_DIR), target=QUEUE_GUEST_DIR, read_only=False, staged=False)],
         image=IMAGE,
         labels={GENERATION_LABEL: generation} if generation else None,
         resources=RESOURCES,
@@ -116,6 +124,25 @@ def duckdb_version(mach: Machine) -> str | None:
 def install_duckdb(mach: Machine) -> str:
     """Ticket 05: pip-install the host's DuckDB pin onto the machine's disk. Reaches the network."""
     argv = ["pip", "install", "--no-input", "--root-user-action=ignore", f"duckdb=={DUCKDB_VERSION}"]
+    r = mach.exec(argv, ExecOptions(timeout=INSTALL_TIMEOUT_S))
+    if r.exit_code != 0:
+        msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"
+        raise ProtoError(msg)
+    return r.stdout.strip()[-2000:]
+
+
+def rocksdict_version(mach: Machine) -> str | None:
+    """The rocksdict version the guest's Python imports, or None (ticket 07)."""
+    r = mach.exec(
+        ["python", "-c", "import importlib.metadata as m; print(m.version('rocksdict'))"],
+        ExecOptions(timeout=CHECK_TIMEOUT_S),
+    )
+    return r.stdout.strip() if r.exit_code == 0 else None
+
+
+def install_rocksdict(mach: Machine) -> str:
+    """Ticket 07: pip-install the host's rocksdict pin onto the machine's disk. Reaches the network."""
+    argv = ["pip", "install", "--no-input", "--root-user-action=ignore", f"rocksdict=={ROCKSDICT_VERSION}"]
     r = mach.exec(argv, ExecOptions(timeout=INSTALL_TIMEOUT_S))
     if r.exit_code != 0:
         msg = f"pip exited {r.exit_code}: {(r.stderr or r.stdout).strip()[-800:]}"

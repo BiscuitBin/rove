@@ -82,6 +82,12 @@ def _create(state_dir: Path | None) -> None:
     m.install_scrapy(mach)
     typer.echo(f"[time] pip install: {time.monotonic() - t0:.2f}s")
     _require_pin(mach)
+    t0 = time.monotonic()
+    m.install_rocksdict(mach)  # Ticket 07: the queue's pin, beside Scrapy's.
+    typer.echo(f"[time] pip install rocksdict=={m.ROCKSDICT_VERSION}: {time.monotonic() - t0:.2f}s")
+    if m.rocksdict_version(mach) != m.ROCKSDICT_VERSION:
+        msg = f"guest rocksdict is {m.rocksdict_version(mach)}, the pin is {m.ROCKSDICT_VERSION}"
+        raise m.ProtoError(msg)
     state.save({**saved, "rung": "1: python:3.12 plus pip install"}, state_dir)
 
 
