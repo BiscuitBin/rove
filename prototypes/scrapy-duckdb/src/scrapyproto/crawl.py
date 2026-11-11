@@ -529,6 +529,7 @@ class RocksQueuePipeline:
         self.failed = 0
         self.put_s = 0.0
         self.put_max_s = 0.0
+        self.seen = {}  # Largest size seen per file other than an SST, deleted WALs included (_sample).
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -562,6 +563,22 @@ class RocksQueuePipeline:
         stats.set_value("proto/queue/kind", "rocks-queue")
         stats.set_value("proto/queue/compression", "sst zstd, wal zstd")
         stats.set_value("proto/queue/open_s", round(time.perf_counter() - t0, 6))
+        self._sample()
+
+    def _sample(self, wal_only=False):
+        """Record the largest size seen of each file in the queue directory but the SSTs, which the flush and
+        compaction counters count. A WAL only grows until RocksDB switches to the next and deletes it after the
+        flush, so its largest size, sampled after every put, is what was written to it; the other files are
+        sampled at open and around the close only."""
+        path = CONFIG["queue_db"]
+        for name in os.listdir(path):
+            if name.endswith(".sst") or (wal_only and not name.endswith(".log")):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(path, name))
+            except OSError:
+                continue  # Deleted between the listing and the stat: a flushed WAL, already sampled.
+            self.seen[name] = max(self.seen.get(name, 0), size)
 
     def process_item(self, item, spider=None):
         t0 = time.perf_counter()
@@ -574,6 +591,7 @@ class RocksQueuePipeline:
         took = time.perf_counter() - t0
         self.put_s += took
         self.put_max_s = max(self.put_max_s, took)
+        self._sample(wal_only=True)  # Outside the put's timing.
         return item
 
     def close_spider(self, spider=None):
@@ -595,6 +613,7 @@ class RocksQueuePipeline:
         # What crossed the mount while the run lasted: the files as they stand before the close, which may flush
         # the memtable into an SST and empty the WAL. RocksDB's wal.bytes counts before the WAL's own ZSTD.
         path = CONFIG["queue_db"]
+        self._sample()
         before = {name: os.path.getsize(os.path.join(path, name)) for name in os.listdir(path)}
         stats.set_value("proto/queue/before_close/wal_bytes", sum(v for k, v in before.items() if k.endswith(".log")))
         stats.set_value("proto/queue/before_close/sst_bytes", sum(v for k, v in before.items() if k.endswith(".sst")))
@@ -616,6 +635,23 @@ class RocksQueuePipeline:
         stats.set_value("proto/queue/dir_bytes", sum(files.values()))
         stats.set_value("proto/queue/wal_bytes", sum(v for k, v in files.items() if k.endswith(".log")))
         stats.set_value("proto/queue/sst_bytes", sum(v for k, v in files.items() if k.endswith(".sst")))
+        # What was written over the run and its close, deleted files included: the per-WAL maxima, the SST bytes
+        # RocksDB's flushes and compactions wrote (read after the close, so the close's flush counts) and the
+        # other files' largest sizes. Not counted: the first open's files deleted at reopen, transport overhead.
+        self._sample()
+        after = {}
+        for line in (self.options.get_statistics() or "").splitlines():
+            name, _, rest = line.partition(" COUNT : ")
+            if name in ("rocksdb.flush.write.bytes", "rocksdb.compact.write.bytes"):
+                after[name] = int(rest)
+        wal = sum(v for k, v in self.seen.items() if k.endswith(".log"))
+        other = sum(v for k, v in self.seen.items() if not k.endswith(".log"))
+        stats.set_value("proto/queue/written/wal_bytes", wal)
+        stats.set_value("proto/queue/written/wal_files_seen", sum(1 for k in self.seen if k.endswith(".log")))
+        for name, value in after.items():
+            stats.set_value(f"proto/queue/written/{name}", value)
+        stats.set_value("proto/queue/written/other_bytes", other)
+        stats.set_value("proto/queue/written_bytes_total", wal + sum(after.values()) + other)
 
 
 class ProtoSpider(scrapy.Spider):

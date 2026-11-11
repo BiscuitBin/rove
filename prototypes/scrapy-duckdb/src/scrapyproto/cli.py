@@ -529,6 +529,8 @@ def _follow(  # noqa: C901, PLR0912, PLR0915  one run's whole host side, as craw
         _fail(f"the spider did not finish cleanly ({outcome.why}, {close_reason}); not loaded, {hint}", state_dir)
     pulled: Path | None = None
     extra: list[Path] = []
+    bulk_file = q.arm_db(db, p.run_id, "bulk")  # Ticket 09: the bulk arm's own fresh file, like the live arms'.
+    bulk_at: list[float] = []  # When the bulk load's COMMIT returned; empty when nothing was loaded now.
     if per_item:
         pulled = db.parent / f"{p.run_id}-per-item.duckdb"
         try:
@@ -557,8 +559,8 @@ def _follow(  # noqa: C901, PLR0912, PLR0915  one run's whole host side, as craw
             # The shared runs row is the last step, so a run recorded there has every arm; each step accepts its
             # own earlier commit, so `consume` after a host death mid-way finishes what is missing.
             if p.writes_guest_feed:
-                bulk_file = q.arm_db(db, p.run_id, "bulk")
-                bulk_pages, check = store.load(bulk_file, manifest, paths["jsonl"], resume=True)
+                bulk_pages, check = store.load(bulk_file, manifest, paths["jsonl"], resume=True,
+                    on_commit=bulk_at.append)
                 _print_load(check, bulk_pages)
                 extra.append(bulk_file)
             pages = store.record_isolated(db, manifest, pulled, consumers[0].arm, p.store)
@@ -569,10 +571,16 @@ def _follow(  # noqa: C901, PLR0912, PLR0915  one run's whole host side, as craw
         typer.echo(f"[record] runs row for {p.run_id} (store {p.store}, {pages} pages) in {db}")
     else:
         try:
-            pages, check = store.load(db, manifest, paths["jsonl"])
+            pages, check = store.load(bulk_file, manifest, paths["jsonl"], on_commit=bulk_at.append)
         except (store.FeedError, duckdb.Error, OSError) as exc:
-            _fail(f"load failed, nothing written to the store: {exc}", state_dir)
+            _fail(f"load failed, nothing written to {bulk_file}: {exc}", state_dir)
         _print_load(check, pages)
+        try:
+            pages = store.record_isolated(db, manifest, bulk_file, "bulk", "bulk")
+        except (store.FeedError, duckdb.Error, OSError) as exc:
+            _fail(f"run {p.run_id} is loaded in {bulk_file} but not recorded in {db}: {exc}", state_dir)
+        pulled = bulk_file
+        typer.echo(f"[record] runs row for {p.run_id} (store bulk, {pages} pages) in {db}")
     try:
         summary = store.summary(db, p.run_id, pulled)
         others = [store.summary(f, p.run_id, f).splitlines()[0] + f"; {store.size(f)} bytes in {f}" for f in extra]
@@ -586,12 +594,14 @@ def _follow(  # noqa: C901, PLR0912, PLR0915  one run's whole host side, as craw
         f"{c.POLL_EVERY_S:.0f}s); done marker seen to summary printed {t_summary - t_done:.2f}s")
     for line in others:
         typer.echo(f"[also] {line}")
-    if consumers:
+    if consumers or bulk_at:
         # After the summary, so `bench_queries.py wall` does not count it: the guest clock, then the latency.
         try:
             offset, err = q.measure_offset(mach, c.GUEST_ROOT, p.run_id)
             for k in consumers:
-                typer.echo(f"[latency] {k.arm}: " + q.latency(k.db_path, p.run_id, offset, err, 20))
+                typer.echo(f"[latency] {k.arm}: " + q.latency(k.db_path, p.run_id, offset, err, 20, k.arrived))
+            if bulk_at:
+                typer.echo("[latency] bulk: " + q.latency_bulk(bulk_file, bulk_at[0], p.run_id, offset, err, 20))
         except (SmolError, store.FeedError, duckdb.Error, OSError) as exc:
             typer.echo(f"[latency] not measured: {m.one_line(exc)}")
     _finish(state_dir)
@@ -654,10 +664,22 @@ def runs_cmd(db: Db = store.DEFAULT_DB) -> None:
 
 
 @app.command("sql")
-def sql_cmd(query: str, db: Db = store.DEFAULT_DB) -> None:
-    """Print a query's result; the store is opened read-only."""
+def sql_cmd(
+    query: str,
+    db: Db = store.DEFAULT_DB,
+    run: Annotated[
+        str | None, typer.Option("--run", help="Query the file that holds this run's pages (its store_file).")
+    ] = None,
+) -> None:
+    """Print a query's result; the store is opened read-only. Since tickets 05, 08 and 09 a run's pages may live
+    in a file of its own, named by `runs.store_file`; `--run` queries that file, and without it a note says how
+    many runs the shared `pages` table does not hold."""
     try:
-        typer.echo(store.sql(db, query))
-    except (duckdb.Error, OSError) as exc:
+        target = store.run_file(db, run) if run else db
+        typer.echo(store.sql(target, query))
+        if not run and (n := store.elsewhere(db)):
+            typer.echo(f"note: {n} runs keep their pages in their own files, not in {db}'s pages table; "
+                "`scrapyproto runs` names them, `--run <run_id>` queries one", err=True)
+    except (duckdb.Error, OSError, store.FeedError) as exc:
         typer.echo(f"error: {m.one_line(exc)}", err=True)
         raise typer.Exit(1) from exc

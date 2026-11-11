@@ -56,6 +56,9 @@ class Consumer:
     duplicates: int = 0
     first_commit_at: float | None = None
     closed: dict[str, Any] | None = None
+    # Ticket 09: (url, time right after its batch's COMMIT returned), kept off the cursor transaction and written to
+    # `arrivals` by `latency` after the summary. A process that died loses its own; `consume` measures only its own.
+    arrived: list[tuple[str, float]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.con = store.connect(self.db_path)
@@ -74,7 +77,7 @@ class Consumer:
         if cursor == self.cursor:
             return 0
         now = time.time()
-        inserted = 0
+        new: list[str] = []
         self.con.execute("BEGIN TRANSACTION")
         try:
             for it in items:
@@ -83,8 +86,8 @@ class Consumer:
                     it.get("referrer"), it.get("outlinks"), it["fetched_at"], it.get("content_hash"), it.get("html"),
                 ]).fetchall()
                 if got:
-                    inserted += 1
-                    self.con.execute("INSERT OR IGNORE INTO arrivals VALUES (?, ?, ?)", [self.run_id, it["url"], now])
+                    new.append(it["url"])
+            inserted = len(new)
             rows, dups = self.rows + inserted, self.duplicates + len(items) - inserted
             self.con.execute(
                 "INSERT OR REPLACE INTO consumer_offsets VALUES (?, ?, ?, ?, ?, ?)",
@@ -94,9 +97,11 @@ class Consumer:
         except BaseException:
             self.con.execute("ROLLBACK")
             raise
+        committed_at = time.time()  # The rows are visible to this connection from here.
         self.cursor, self.rows, self.duplicates = cursor, rows, dups
+        self.arrived.extend((url, committed_at) for url in new)
         if inserted and self.first_commit_at is None:
-            self.first_commit_at = now
+            self.first_commit_at = committed_at
         return inserted
 
     def tick(self) -> int:
@@ -268,10 +273,16 @@ def measure_offset(mach: Machine, guest_root: str, run_id: str, rounds: int = 20
     return offset, rtt / 2
 
 
-def latency(db_path: Path, run_id: str, offset: float, err: float, rounds: int) -> str:
-    """Fetch (guest clock, corrected) to host commit, over every page this file's consumer inserted."""
+def latency(  # noqa: PLR0913, PLR0917  prototype: the clock's three numbers ride along
+    db_path: Path, run_id: str, offset: float, err: float, rounds: int, arrived: list[tuple[str, float]],
+) -> str:
+    """Fetch (guest clock, corrected) to host commit, over every page this process's consumer inserted. The
+    commit times are taken after each COMMIT returned and written to `arrivals` here, after the summary."""
     con = duckdb.connect(str(db_path))
     try:
+        con.execute(OFFSETS)
+        if arrived:
+            con.executemany("INSERT OR IGNORE INTO arrivals VALUES (?, ?, ?)", [[run_id, u, t] for u, t in arrived])
         con.execute(CLOCK_TABLE)
         con.execute("INSERT OR REPLACE INTO clock VALUES (?, ?, ?, ?)", [run_id, offset, err, rounds])
         row = con.execute(
@@ -286,8 +297,32 @@ def latency(db_path: Path, run_id: str, offset: float, err: float, rounds: int) 
     finally:
         con.close()
     if not row:
-        return f"no pages consumed (clock offset {offset * 1e3:+.2f} +- {err * 1e3:.2f} ms)"
+        return f"no arrivals recorded by this process (clock offset {offset * 1e3:+.2f} +- {err * 1e3:.2f} ms)"
     n, lo, p50, p95, hi, first = row[0]
     return (f"{n} pages, fetch -> host commit ms: min {lo * 1e3:.1f}, p50 {p50 * 1e3:.1f}, p95 {p95 * 1e3:.1f}, "
             f"max {hi * 1e3:.1f}; first fetch -> first commit {first * 1e3:.1f} ms; clock offset "
-            f"{offset * 1e3:+.2f} +- {err * 1e3:.2f} ms ({rounds} rounds, taken after the run); tick {TICK_S * 1e3:.0f} ms")
+            f"{offset * 1e3:+.2f} +- {err * 1e3:.2f} ms ({rounds} rounds, taken after the run); tick {TICK_S * 1e3:.0f} ms; "
+            "commit = each batch's COMMIT returned, rows visible to the consumer's connection, before CHECKPOINT and "
+            "close")
+
+
+def latency_bulk(db_path: Path, committed_at: float, run_id: str, offset: float, err: float, rounds: int) -> str:
+    """Ticket 09: the bulk arm's equivalent. Every page becomes visible on the host at the load's one commit,
+    `committed_at`, taken when that COMMIT returned (before the load's CHECKPOINT and close)."""
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        row = con.execute(
+            """SELECT count(*), min(d), quantile_cont(d, 0.5), quantile_cont(d, 0.95), max(d)
+            FROM (SELECT ? - epoch(fetched_at) + ? AS d FROM pages WHERE run_id = ?)""",
+            [committed_at, offset, run_id],
+        ).fetchall()[0]
+    finally:
+        con.close()
+    n, lo, p50, p95, hi = row
+    if not n:
+        return "no pages"
+    return (f"{n} pages, fetch -> host visible ms: min {lo * 1e3:.1f}, p50 {p50 * 1e3:.1f}, p95 {p95 * 1e3:.1f}, "
+        f"max {hi * 1e3:.1f}; first fetch -> first row {hi * 1e3:.1f} ms; clock offset {offset * 1e3:+.2f} +- "
+        f"{err * 1e3:.2f} ms ({rounds} rounds, taken after the run); one commit after the load; visible = the load's "
+        "COMMIT returned, rows visible to the loader's connection, before CHECKPOINT and close")
+
