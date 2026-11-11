@@ -6,7 +6,8 @@ build-backend = "hatchling.build"
 name = "scrapy-duckdb-prototype"
 version = "0.0.0"
 description = "PROTOTYPE: Scrapy inside a Smol Machines microVM, driven from a Typer command, pages in DuckDB."
-requires-python = ">=3.13"
+# <3.15: rocksdict 0.3.29 ships no cp315 wheel (ticket 07); uv then picks 3.14.
+requires-python = ">=3.13,<3.15"
 dependencies = [
   # Exact: the SDK is Alpha and releases several times a week; the prototype records one.
   "smolmachines==1.32.4",
@@ -15,6 +16,9 @@ dependencies = [
   # Exact: pinned at ticket 01's lock so tickets 03 and 05 need no re-lock. It has a cp312
   # manylinux aarch64 wheel for the guest's 3.12 install in ticket 05.
   "duckdb==2.0.0",
+  # Exact, ticket 07: the host reads the guest's RocksDB as a secondary instance, so both sides
+  # run the same RocksDB build. The maintained binding; python-rocksdb is source-only, from 2019.
+  "rocksdict==0.3.29",
 ]
 
 [project.scripts]

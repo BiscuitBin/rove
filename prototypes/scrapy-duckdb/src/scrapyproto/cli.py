@@ -3,6 +3,7 @@
 import json
 import secrets
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -10,7 +11,7 @@ import duckdb
 import typer
 from smol import Machine, SmolError
 
-from scrapyproto import crawl as c, machine as m, state, store
+from scrapyproto import crawl as c, machine as m, queue as q, state, store
 
 app = typer.Typer(name="scrapyproto", no_args_is_help=True, add_completion=False)
 vm = typer.Typer(no_args_is_help=True)
@@ -82,6 +83,12 @@ def _create(state_dir: Path | None) -> None:
     m.install_scrapy(mach)
     typer.echo(f"[time] pip install: {time.monotonic() - t0:.2f}s")
     _require_pin(mach)
+    t0 = time.monotonic()
+    m.install_rocksdict(mach)  # Ticket 07: the queue's pin, beside Scrapy's.
+    typer.echo(f"[time] pip install rocksdict=={m.ROCKSDICT_VERSION}: {time.monotonic() - t0:.2f}s")
+    if m.rocksdict_version(mach) != m.ROCKSDICT_VERSION:
+        msg = f"guest rocksdict is {m.rocksdict_version(mach)}, the pin is {m.ROCKSDICT_VERSION}"
+        raise m.ProtoError(msg)
     state.save({**saved, "rung": "1: python:3.12 plus pip install"}, state_dir)
 
 
@@ -253,7 +260,7 @@ def _print_stats(stats: dict[str, object]) -> None:
 
 
 def _host_paths(feeds_dir: Path, run_id: str) -> dict[str, Path]:
-    return {kind: feeds_dir / f"{run_id}.{kind}" for kind in ("jsonl", "run.json", "stats.json", "log")}
+    return {kind: feeds_dir / f"{run_id}.{kind}" for kind in ("jsonl", "run.json", "stats.json", "log", "plan.json")}
 
 
 @app.command("crawl")
@@ -301,8 +308,14 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     ] = False,
     store_kind: Annotated[
         str, typer.Option("--store", help="bulk: load the feed on the host after the run. per-item: the item "
-            "pipeline writes each page into a DuckDB file on the guest, pulled back afterwards."),
+            "pipeline writes each page into a DuckDB file on the guest, pulled back afterwards. jsonl-tail, "
+            "rocks-queue: live arms over the host mount, consumed into DuckDB while the crawl runs. all: both "
+            "live arms and the bulk feed at once (ticket 08)."),
     ] = "bulk",
+    crash_after: Annotated[
+        int, typer.Option("--crash-after", help="PROTOTYPE probe: the spider SIGKILLs itself after this many "
+            "pages; 0 is off."),
+    ] = 0,
     state_dir: StateDir = None,
     db: Db = store.DEFAULT_DB,
     feeds_dir: FeedsDir = store.FEEDS_DIR,
@@ -314,7 +327,7 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
             c.new_run_id(), start_url, allowed_host or [], max_pages, replay=replay,
             path_prefixes=path_prefix, include=include, exclude=exclude, max_depth=max_depth,
             keep_query_params=keep_query_param, delay=delay, concurrency=concurrency, user_agent=user_agent,
-            store=store_kind,
+            store=store_kind, crash_after=crash_after,
         )
     except ValueError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -336,38 +349,112 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
                     "`scrapyproto vm install-duckdb` (network). Nothing was requested.", state_dir)
         except SmolError as exc:
             _fail(exc, state_dir)
+    if "rocks-queue" in p.live_arms:
+        try:
+            found = m.rocksdict_version(mach)
+            if found != m.ROCKSDICT_VERSION:
+                _fail(f"the guest has rocksdict {found}, the pin is {m.ROCKSDICT_VERSION}. Nothing was requested.",
+                    state_dir)
+        except SmolError as exc:
+            _fail(exc, state_dir)
     try:
         c.prepare(mach, p)
         typer.echo(f"[crawl] lock: {c.acquire(mach, p)}")
+        # Ticket 08: the plan lands on the host before the launch, so `consume` can pick the run up again.
+        store.write_atomic(_host_paths(feeds_dir, p.run_id)["plan.json"], json.dumps(asdict(p), indent=1).encode())
         try:
             pid = c.launch(mach, p)
         except BaseException:
             c.release(mach, p)
             raise
-        typer.echo(f"[crawl] started in the guest with background=True (pid {pid}); log {p.run_dir}/crawl.log")
-        t_launched = time.monotonic()
-        try:
-            outcome = c.watch(mach, p, typer.echo)
-            t_done = time.monotonic()
-            outcome = c.collect(mach, p, outcome)
-            if outcome.exit_code is None:
-                # The wrapper died before its own release; free the lock only if it still names this run.
-                c.release(mach, p)
-        except KeyboardInterrupt:
-            # The host process was interrupted; the background run was not. Say where it stands.
-            typer.echo(
-                f"\ninterrupted on the host. Run {p.run_id} continues in the guest until it ends or "
-                f"CLOSESPIDER_TIMEOUT ({c.closespider_timeout(p.max_pages, p.delay)} s) closes it, and it "
-                f"holds the crawl lock {c.LOCK} meanwhile, so the next `scrapyproto crawl` reports busy. Its log "
-                f"and results stay in {p.run_dir} on the guest; no command pulls them (`scrapyproto load` "
-                "needs a feed on the host).",
-                err=True,
-            )
-            raise typer.Exit(130) from None
+    except SmolError as exc:
+        _fail(f"lost the machine starting run {p.run_id} (stopped by another process?): {exc}", state_dir)
+    except m.ProtoError as exc:
+        _fail(exc, state_dir)
+    typer.echo(f"[crawl] started in the guest with background=True (pid {pid}); log {p.run_dir}/crawl.log")
+    _follow(mach, p, db, feeds_dir, state_dir)
+
+
+def _drain(consumers: list[q.Consumer]) -> None:
+    """After the done marker: read what is left. The spider has exited, so nothing more will come; ticks until
+    three in a row find nothing cover the mount's few milliseconds (ticket 07)."""
+    for k in consumers:
+        quiet = 0
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and quiet < 3:  # noqa: PLR2004  three empty ticks in a row
+            quiet = quiet + 1 if k.tick() == 0 else 0
+            time.sleep(q.TICK_S)
+
+
+def _held(consumers: list[q.Consumer]) -> str:
+    """What each live arm holds on the host, for a run that will not be recorded."""
+    parts = []
+    for k in consumers:
+        if isinstance(k, q.RocksTail):
+            extra = f", meta:closed {'seen' if k.closed else 'absent'}"
+        elif isinstance(k, q.JsonlTail):
+            extra = f", {k.trailing_bytes()} bytes past the last complete line"
+        else:
+            extra = ""
+        parts.append(f"{k.arm}: {k.rows} rows ({k.duplicates} duplicates) in {k.db_path}, cursor {k.cursor!r}{extra}")
+    return "; ".join(parts)
+
+
+def _follow(  # noqa: C901, PLR0912, PLR0915  one run's whole host side, as crawl had it before ticket 08
+    mach: Machine, p: c.Plan, db: Path, feeds_dir: Path, state_dir: Path | None,
+) -> None:
+    """Watch the run to its done marker, consuming the live arms meanwhile; then pull, load or record, and print
+    the summary. Shared by `crawl` and `consume` (ticket 08), which resumes the consumers from their cursors."""
+    consumers = [q.make(arm, p.run_id, q.arm_db(db, p.run_id, arm)) for arm in p.live_arms]
+    for k in consumers:
+        if k.rows or k.cursor:
+            typer.echo(f"[consume] {k.arm}: resuming at cursor {k.cursor!r}, {k.rows} rows already in {k.db_path}")
+
+    def tick() -> None:
+        for k in consumers:
+            k.tick()
+
+    def progress() -> str:
+        return ", ".join(f"{k.arm} {k.rows} rows in host DuckDB" for k in consumers)
+
+    t_launched = time.monotonic()
+    try:
+        outcome = c.watch(mach, p, typer.echo, tick if consumers else None, progress if consumers else None,
+            q.TICK_S)
+        t_done = time.monotonic()
+        outcome = c.collect(mach, p, outcome)
+        if outcome.exit_code is None:
+            # The wrapper died before its own release; free the lock only if it still names this run.
+            c.release(mach, p)
+        _drain(consumers)
+    except KeyboardInterrupt:
+        # The host process was interrupted; the background run was not. Say where it stands.
+        if consumers:
+            resume = (f"`scrapyproto consume {p.run_id}` resumes the host side from the committed cursors ("
+                + _held(consumers) + ")")
+        else:
+            resume = "no command pulls them (`scrapyproto load` needs a feed on the host)"
+        for k in consumers:
+            k.close()
+        typer.echo(
+            f"\ninterrupted on the host. Run {p.run_id} continues in the guest until it ends or "
+            f"CLOSESPIDER_TIMEOUT ({c.closespider_timeout(p.max_pages, p.delay)} s) closes it, and it "
+            f"holds the crawl lock {c.LOCK} meanwhile, so the next `scrapyproto crawl` reports busy. Its log "
+            f"and results stay in {p.run_dir} on the guest; {resume}.",
+            err=True,
+        )
+        raise typer.Exit(130) from None
     except SmolError as exc:
         _fail(f"lost the machine during run {p.run_id} (stopped by another process?): {exc}", state_dir)
     except m.ProtoError as exc:
         _fail(exc, state_dir)
+    except (store.FeedError, duckdb.Error, ValueError, KeyError) as exc:
+        # A consumer refused what it read (a line or value that is not a page) or DuckDB failed; each commit is
+        # whole, so the files hold exactly what was committed, and `consume` can resume after a fix.
+        held = _held(consumers)
+        for k in consumers:
+            k.close()
+        _fail(f"a live consumer failed during run {p.run_id}: {type(exc).__name__}: {exc}; {held}", state_dir)
     close_reason = str(outcome.stats.get("proto/close_reason", "unknown"))
     wall = (
         outcome.finished_epoch - outcome.started_epoch
@@ -407,7 +494,15 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
         != _count(st, "proto/store/rows_inserted") + _count(st, "proto/store/duplicates_ignored")
         or _count(st, "proto/store/rows") != _count(st, "proto/store/rows_inserted")
     )
-    unstored = (st.get("proto/store/closed") != 1 or lost) if per_item else outcome.feed is None
+    # Ticket 08: a live arm is complete when the queue's meta:closed was seen, or the tailed feed ends on a line.
+    unconsumed = any(
+        (isinstance(k, q.RocksTail) and k.closed is None) or (isinstance(k, q.JsonlTail) and k.trailing_bytes())
+        for k in consumers
+    )
+    if per_item:
+        unstored = st.get("proto/store/closed") != 1 or lost
+    else:
+        unstored = unconsumed or (p.writes_guest_feed and outcome.feed is None)
     if outcome.exit_code != 0 or close_reason not in OK_REASONS or unstored:
         tail = outcome.log.decode("utf-8", "replace").splitlines()[-LOG_TAIL:]
         typer.echo(f"---- last {len(tail)} lines of crawl.log ----")
@@ -422,9 +517,20 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
             else:
                 hint = f"the per-item store was not closed (stats proto/store/closed absent); {p.guest_db} not pulled"
         else:
-            hint = f"`scrapyproto load {p.run_id}` loads it" if outcome.feed is not None else "there is no feed"
+            hints = []
+            if p.writes_guest_feed:
+                hints.append(f"`scrapyproto load {p.run_id}` loads the feed" if outcome.feed is not None
+                    else "there is no feed")
+            if consumers:
+                hints.append("held on the host, not recorded: " + _held(consumers))
+            hint = "; ".join(hints)
+        for k in consumers:
+            k.close()
         _fail(f"the spider did not finish cleanly ({outcome.why}, {close_reason}); not loaded, {hint}", state_dir)
     pulled: Path | None = None
+    extra: list[Path] = []
+    bulk_file = q.arm_db(db, p.run_id, "bulk")  # Ticket 09: the bulk arm's own fresh file, like the live arms'.
+    bulk_at: list[float] = []  # When the bulk load's COMMIT returned; empty when nothing was loaded now.
     if per_item:
         pulled = db.parent / f"{p.run_id}-per-item.duckdb"
         try:
@@ -439,14 +545,45 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
         except (m.ProtoError, store.FeedError, duckdb.Error, OSError) as exc:
             _fail(f"per-item store not recorded: {exc}", state_dir)
         typer.echo(f"[record] runs row for {p.run_id} (store per-item, {pages} pages) in {db}")
+    elif consumers:
+        # Ticket 08: each live arm finishes its own file; the first (rocks-queue under `all`) is the one the
+        # shared store records and the summary reads. Under `all` the guest feed is bulk-loaded into its own file.
+        try:
+            for k in consumers:
+                rows = k.finish(manifest, st)
+                typer.echo(f"[consume] {k.arm}: {rows} rows ({k.duplicates} duplicates) in {k.db_path}; "
+                    f"first commit {'none' if k.first_commit_at is None else 'during the run'}")
+                k.close()
+            pulled = consumers[0].db_path
+            extra = [k.db_path for k in consumers[1:]]
+            # The shared runs row is the last step, so a run recorded there has every arm; each step accepts its
+            # own earlier commit, so `consume` after a host death mid-way finishes what is missing.
+            if p.writes_guest_feed:
+                bulk_pages, check = store.load(bulk_file, manifest, paths["jsonl"], resume=True,
+                    on_commit=bulk_at.append)
+                _print_load(check, bulk_pages)
+                extra.append(bulk_file)
+            pages = store.record_isolated(db, manifest, pulled, consumers[0].arm, p.store)
+        except (store.FeedError, duckdb.Error, OSError) as exc:
+            for k in consumers:
+                k.close()
+            _fail(f"run {p.run_id} not recorded: {exc}; " + _held(consumers), state_dir)
+        typer.echo(f"[record] runs row for {p.run_id} (store {p.store}, {pages} pages) in {db}")
     else:
         try:
-            pages, check = store.load(db, manifest, paths["jsonl"])
+            pages, check = store.load(bulk_file, manifest, paths["jsonl"], on_commit=bulk_at.append)
         except (store.FeedError, duckdb.Error, OSError) as exc:
-            _fail(f"load failed, nothing written to the store: {exc}", state_dir)
+            _fail(f"load failed, nothing written to {bulk_file}: {exc}", state_dir)
         _print_load(check, pages)
+        try:
+            pages = store.record_isolated(db, manifest, bulk_file, "bulk", "bulk")
+        except (store.FeedError, duckdb.Error, OSError) as exc:
+            _fail(f"run {p.run_id} is loaded in {bulk_file} but not recorded in {db}: {exc}", state_dir)
+        pulled = bulk_file
+        typer.echo(f"[record] runs row for {p.run_id} (store bulk, {pages} pages) in {db}")
     try:
         summary = store.summary(db, p.run_id, pulled)
+        others = [store.summary(f, p.run_id, f).splitlines()[0] + f"; {store.size(f)} bytes in {f}" for f in extra]
     except (store.FeedError, duckdb.Error, OSError) as exc:
         # The commit above held: the run is stored, and only the read-back failed.
         _fail(f"run {p.run_id} is recorded in {db}, but reading it back failed: {exc}", state_dir)
@@ -455,7 +592,38 @@ def crawl_cmd(  # noqa: PLR0913, PLR0917  the ticket's flags
     t_summary = time.monotonic()
     typer.echo(f"[time] host: launch to done marker seen {t_done - t_launched:.2f}s (polled every "
         f"{c.POLL_EVERY_S:.0f}s); done marker seen to summary printed {t_summary - t_done:.2f}s")
+    for line in others:
+        typer.echo(f"[also] {line}")
+    if consumers or bulk_at:
+        # After the summary, so `bench_queries.py wall` does not count it: the guest clock, then the latency.
+        try:
+            offset, err = q.measure_offset(mach, c.GUEST_ROOT, p.run_id)
+            for k in consumers:
+                typer.echo(f"[latency] {k.arm}: " + q.latency(k.db_path, p.run_id, offset, err, 20, k.arrived))
+            if bulk_at:
+                typer.echo("[latency] bulk: " + q.latency_bulk(bulk_file, bulk_at[0], p.run_id, offset, err, 20))
+        except (SmolError, store.FeedError, duckdb.Error, OSError) as exc:
+            typer.echo(f"[latency] not measured: {m.one_line(exc)}")
     _finish(state_dir)
+
+
+@app.command("consume")
+def consume_cmd(run_id: str, db: Db = store.DEFAULT_DB, feeds_dir: FeedsDir = store.FEEDS_DIR,
+    state_dir: StateDir = None,
+) -> None:
+    """Ticket 08: pick a live-arm run up again after the host was interrupted. The consumers resume from the cursors
+    committed in their DuckDB files; the run is watched to its done marker and finished as `crawl` would."""
+    try:
+        p = c.Plan(**json.loads(_host_paths(feeds_dir, run_id)["plan.json"].read_text()))
+    except (OSError, ValueError, TypeError) as exc:
+        typer.echo(f"error: no plan for {run_id} in {feeds_dir}: {m.one_line(exc)}", err=True)
+        raise typer.Exit(1) from exc
+    if not p.live_arms:
+        typer.echo(f"error: run {run_id} has store {p.store}, not a live arm; nothing to consume", err=True)
+        raise typer.Exit(1)
+    mach = _running_or_fail(state_dir)
+    typer.echo(f"[consume] run {run_id}, store {p.store}")
+    _follow(mach, p, db, feeds_dir, state_dir)
 
 
 def _print_load(check: store.FeedCheck, pages: int) -> None:
@@ -496,10 +664,22 @@ def runs_cmd(db: Db = store.DEFAULT_DB) -> None:
 
 
 @app.command("sql")
-def sql_cmd(query: str, db: Db = store.DEFAULT_DB) -> None:
-    """Print a query's result; the store is opened read-only."""
+def sql_cmd(
+    query: str,
+    db: Db = store.DEFAULT_DB,
+    run: Annotated[
+        str | None, typer.Option("--run", help="Query the file that holds this run's pages (its store_file).")
+    ] = None,
+) -> None:
+    """Print a query's result; the store is opened read-only. Since tickets 05, 08 and 09 a run's pages may live
+    in a file of its own, named by `runs.store_file`; `--run` queries that file, and without it a note says how
+    many runs the shared `pages` table does not hold."""
     try:
-        typer.echo(store.sql(db, query))
-    except (duckdb.Error, OSError) as exc:
+        target = store.run_file(db, run) if run else db
+        typer.echo(store.sql(target, query))
+        if not run and (n := store.elsewhere(db)):
+            typer.echo(f"note: {n} runs keep their pages in their own files, not in {db}'s pages table; "
+                "`scrapyproto runs` names them, `--run <run_id>` queries one", err=True)
+    except (duckdb.Error, OSError, store.FeedError) as exc:
         typer.echo(f"error: {m.one_line(exc)}", err=True)
         raise typer.Exit(1) from exc

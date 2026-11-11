@@ -28,7 +28,10 @@ RUNS_DIR = f"{GUEST_ROOT}/runs"
 CACHE_DIR = f"{GUEST_ROOT}/httpcache"  # Shared by every run, so `--replay` reads what a live run stored.
 LOCK = f"{GUEST_ROOT}/crawl.lock"  # A symlink naming the run that holds it: `ln -s` fails if it exists.
 FLOCK = f"{GUEST_ROOT}/.lock-take"  # Serialises the check-and-take of LOCK between host processes.
-STORES = ("bulk", "per-item")  # Ticket 05: host bulk load of the feed, or the item pipeline's DuckDB file.
+# Ticket 05: host bulk load of the feed, or the item pipeline's DuckDB file. Ticket 08: two live arms over the host
+# mount, consumed while the crawl runs (queue.py), and `all`, which runs both live arms and the bulk feed at once.
+STORES = ("bulk", "per-item", "jsonl-tail", "rocks-queue", "all")
+LIVE_ARMS = {"jsonl-tail": ["jsonl-tail"], "rocks-queue": ["rocks-queue"], "all": ["rocks-queue", "jsonl-tail"]}
 GUEST_DB_FILE = "pages.duckdb"  # The per-item store, in the run's directory on the guest disk.
 SPIDER_FILE = "proto_spider.py"  # `runspider` imports it as module `proto_spider`; the middleware path uses that.
 
@@ -72,6 +75,28 @@ class Plan:
     concurrency: int = CONCURRENCY
     user_agent: str = USER_AGENT
     store: str = "bulk"
+    crash_after: int = 0  # Ticket 08, prototype only: the spider SIGKILLs itself after this many items.
+
+    @property
+    def live_arms(self) -> list[str]:
+        return LIVE_ARMS.get(self.store, [])
+
+    @property
+    def writes_guest_feed(self) -> bool:
+        return self.store in {"bulk", "all"}
+
+    @property
+    def queue_dir(self) -> str:
+        """The run's directory on the host mount (ticket 08)."""
+        return f"{m.QUEUE_GUEST_DIR}/{self.run_id}"
+
+    @property
+    def queue_feed(self) -> str:
+        return f"{self.queue_dir}/feed.jsonl"
+
+    @property
+    def queue_db(self) -> str:
+        return f"{self.queue_dir}/rocks"
 
     @property
     def run_dir(self) -> str:
@@ -108,6 +133,7 @@ class Plan:
             "user_agent": self.user_agent,
             "robots": "obey",
             "store": self.store,
+            "crash_after": self.crash_after,
             "patterns": "glob: fnmatchcase over the whole identity; re: re.search, unanchored",
         }
 
@@ -133,6 +159,7 @@ def plan(  # noqa: PLR0913, C901, PLR0912  one flag per argument; one check per 
     concurrency: int = CONCURRENCY,
     user_agent: str = USER_AGENT,
     store: str = "bulk",
+    crash_after: int = 0,
 ) -> Plan:
     """Validate the flags into a plan; raises ValueError naming the bad flag."""
     if not start_urls:
@@ -177,12 +204,15 @@ def plan(  # noqa: PLR0913, C901, PLR0912  one flag per argument; one check per 
     if store not in STORES:
         msg = f"--store must be one of {list(STORES)}, got {store!r}"
         raise ValueError(msg)
+    if not 0 <= crash_after < max_pages:
+        msg = f"--crash-after must be 0 (off) to below --max-pages, got {crash_after}"
+        raise ValueError(msg)
     keep = sorted({k.strip() for k in keep_query_params or [] if k.strip()})
     return Plan(
         run_id, list(start_urls), allowed, max_pages, replay,
         path_prefixes=prefixes, include=list(include or []), exclude=list(exclude or []),
         max_depth=max_depth, keep_query_params=keep, delay=delay, concurrency=concurrency,
-        user_agent=user_agent, store=store,
+        user_agent=user_agent, store=store, crash_after=crash_after,
     )
 
 
@@ -228,9 +258,11 @@ def settings(p: Plan) -> dict[str, object]:
         "HTTPCACHE_IGNORE_HTTP_CODES": [429, 503],
         # A replay drops any request not in the cache instead of fetching it.
         "HTTPCACHE_IGNORE_MISSING": p.replay,
-        # The per-item path writes no feed (ticket 05): its pipeline writes the DuckDB file instead.
-        **({"FEEDS": {p.feed: {"format": "jsonlines", "encoding": "utf8", "overwrite": True}}} if p.store == "bulk"
-            else {}),
+        # The per-item path writes no feed (ticket 05): its pipeline writes the DuckDB file instead. The jsonl-tail
+        # arm's feed is on the host mount, through `tailfile://`, a line-flushed FileFeedStorage (ticket 08); the
+        # guest-disk feed keeps Scrapy's own buffered file, as tickets 03 to 05 ran it.
+        "FEEDS": feeds(p),
+        "FEED_STORAGES": {"tailfile": "proto_spider.TailFileStorage"},
         "FEED_EXPORT_ENCODING": "utf-8",
         # Ticket 05, both paths: Scrapy's own memory stat. It samples ru_maxrss at engine start and every
         # 60 s, so a short run's memusage/max is the start-up figure; the spider logs ru_maxrss at close too.
@@ -242,6 +274,16 @@ def settings(p: Plan) -> dict[str, object]:
         "TELNETCONSOLE_ENABLED": False,
         "LOG_LEVEL": "INFO",
     }
+
+
+def feeds(p: Plan) -> dict[str, dict[str, object]]:
+    spec = {"format": "jsonlines", "encoding": "utf8", "overwrite": True}
+    out: dict[str, dict[str, object]] = {}
+    if p.writes_guest_feed:
+        out[p.feed] = spec
+    if "jsonl-tail" in p.live_arms:
+        out[f"tailfile://{p.queue_feed}"] = spec
+    return out
 
 
 def config(p: Plan) -> dict[str, object]:
@@ -256,6 +298,8 @@ def config(p: Plan) -> dict[str, object]:
         "stats_path": f"{p.run_dir}/stats.json",
         "store": p.store,
         "store_path": p.guest_db,
+        "queue_db": p.queue_db,
+        "crash_after": p.crash_after,
         "schema": store_mod.SCHEMA,
     }
 
@@ -277,6 +321,7 @@ import hashlib
 import json
 import os
 import resource
+import signal
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -285,6 +330,7 @@ from urllib.parse import urldefrag, urlsplit
 import scrapy
 from scrapy import signals
 from scrapy.exceptions import CloseSpider, DontCloseSpider, IgnoreRequest
+from scrapy.extensions.feedexport import FileFeedStorage
 from scrapy.http import HtmlResponse, TextResponse
 from scrapy.linkextractors import LinkExtractor
 
@@ -443,12 +489,179 @@ class DuckDBPipeline:
         stats.set_value("proto/store/wal_after_close", os.path.exists(path + ".wal"))
 
 
+class _LineFlushed:
+    """A feed file that flushes after every write: the exporter writes one line per item, so each line reaches
+    the mount whole as soon as it is exported (ticket 08's jsonl-tail arm). Scrapy's own file is buffered."""
+
+    def __init__(self, f):
+        self._f = f
+
+    def write(self, data):
+        n = self._f.write(data)
+        self._f.flush()
+        return n
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
+class TailFileStorage(FileFeedStorage):
+    """`tailfile://<path>`: a FileFeedStorage whose file is line-flushed; only the mount feed uses it."""
+
+    def __init__(self, uri, *, feed_options=None):
+        super().__init__(uri.removeprefix("tailfile://"), feed_options=feed_options)
+
+    def open(self, spider):
+        return _LineFlushed(super().open(spider))
+
+
+class RocksQueuePipeline:
+    """Ticket 08's queue: each page is put, as it arrives, into RocksDB on the host mount under `p:%012d`, the
+    item's JSON as the value, so the host can follow it as a secondary while the crawl runs. The WAL is ZSTD-
+    compressed (rocksdict has no setter, so the closed database's OPTIONS file is edited once at open, ticket 07),
+    and so are the SSTs. At close the pipeline writes `meta:closed` with the page count and the depth corrections,
+    syncs the WAL and closes: a `meta:closed` on the host means every page before it is there too."""
+
+    def __init__(self, crawler):
+        self.crawler = crawler
+        self.db = None
+        self.seq = 0
+        self.failed = 0
+        self.put_s = 0.0
+        self.put_max_s = 0.0
+        self.seen = {}  # Largest size seen per file other than an SST, deleted WALs included (_sample).
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(crawler)
+
+    def open_spider(self, spider=None):
+        import glob
+
+        from rocksdict import DBCompressionType, Options, Rdict, WriteOptions
+
+        t0 = time.perf_counter()
+        path = CONFIG["queue_db"]
+        if os.path.exists(path):
+            raise RuntimeError(f"{path} exists: one queue per run")
+        o = Options(raw_mode=True)
+        o.create_if_missing(True)
+        o.set_compression_type(DBCompressionType.zstd())
+        Rdict(path, o).close()
+        options_file = sorted(glob.glob(path + "/OPTIONS-*"))[-1]
+        text = open(options_file, encoding="utf-8").read()
+        if text.count("wal_compression=kNoCompression") != 1:
+            raise RuntimeError(f"{options_file}: no single wal_compression line to set")
+        with open(options_file, "w", encoding="utf-8") as f:
+            f.write(text.replace("wal_compression=kNoCompression", "wal_compression=kZSTD"))
+        loaded, _ = Options.load_latest(path)
+        loaded.enable_statistics()  # RocksDB's own byte counters, read at close.
+        self.options = loaded
+        self.db = Rdict(path, loaded)
+        self.write_opt = WriteOptions()  # No sync per put: ticket 07 found it changes nothing the host sees.
+        stats = self.crawler.stats
+        stats.set_value("proto/queue/kind", "rocks-queue")
+        stats.set_value("proto/queue/compression", "sst zstd, wal zstd")
+        stats.set_value("proto/queue/open_s", round(time.perf_counter() - t0, 6))
+        self._sample()
+
+    def _sample(self, wal_only=False):
+        """Record the largest size seen of each file in the queue directory but the SSTs, which the flush and
+        compaction counters count. A WAL only grows until RocksDB switches to the next and deletes it after the
+        flush, so its largest size, sampled after every put, is what was written to it; the other files are
+        sampled at open and around the close only."""
+        path = CONFIG["queue_db"]
+        for name in os.listdir(path):
+            if name.endswith(".sst") or (wal_only and not name.endswith(".log")):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(path, name))
+            except OSError:
+                continue  # Deleted between the listing and the stat: a flushed WAL, already sampled.
+            self.seen[name] = max(self.seen.get(name, 0), size)
+
+    def process_item(self, item, spider=None):
+        t0 = time.perf_counter()
+        try:
+            self.db.put(b"p:%012d" % self.seq, json.dumps(dict(item)).encode("utf-8"), self.write_opt)
+        except Exception:
+            self.failed += 1  # Scrapy logs it and crawls on; the host's count against proto/pages catches it.
+            raise
+        self.seq += 1
+        took = time.perf_counter() - t0
+        self.put_s += took
+        self.put_max_s = max(self.put_max_s, took)
+        self._sample(wal_only=True)  # Outside the put's timing.
+        return item
+
+    def close_spider(self, spider=None):
+        stats = self.crawler.stats
+        stats.set_value("proto/queue/puts", self.seq)
+        stats.set_value("proto/queue/put_failed", self.failed)
+        stats.set_value("proto/queue/put_s_total", round(self.put_s, 6))
+        stats.set_value("proto/queue/put_s_max", round(self.put_max_s, 6))
+        if self.db is None:
+            return
+        closed = {
+            "run_id": CONFIG["run_id"],
+            "pages": self.crawler.spider.pages,
+            "puts": self.seq,
+            "depth_corrections": self.crawler.spider.depth_corrections(),
+            "at": time.time(),
+        }
+        self.db.put(b"meta:closed", json.dumps(closed).encode("utf-8"), self.write_opt)
+        # What crossed the mount while the run lasted: the files as they stand before the close, which may flush
+        # the memtable into an SST and empty the WAL. RocksDB's wal.bytes counts before the WAL's own ZSTD.
+        path = CONFIG["queue_db"]
+        self._sample()
+        before = {name: os.path.getsize(os.path.join(path, name)) for name in os.listdir(path)}
+        stats.set_value("proto/queue/before_close/wal_bytes", sum(v for k, v in before.items() if k.endswith(".log")))
+        stats.set_value("proto/queue/before_close/sst_bytes", sum(v for k, v in before.items() if k.endswith(".sst")))
+        stats.set_value("proto/queue/before_close/dir_bytes", sum(before.values()))
+        counters = {}
+        for line in (self.options.get_statistics() or "").splitlines():
+            name, _, rest = line.partition(" COUNT : ")
+            if name in ("rocksdb.wal.bytes", "rocksdb.flush.write.bytes", "rocksdb.compact.write.bytes"):
+                counters[name] = int(rest)
+        for name, value in counters.items():
+            stats.set_value(f"proto/queue/{name}_before_close", value)
+        t0 = time.perf_counter()
+        self.db.flush_wal(True)
+        self.db.close()
+        self.db = None
+        stats.set_value("proto/queue/close_s", round(time.perf_counter() - t0, 6))
+        stats.set_value("proto/queue/closed", 1)
+        files = {name: os.path.getsize(os.path.join(path, name)) for name in os.listdir(path)}
+        stats.set_value("proto/queue/dir_bytes", sum(files.values()))
+        stats.set_value("proto/queue/wal_bytes", sum(v for k, v in files.items() if k.endswith(".log")))
+        stats.set_value("proto/queue/sst_bytes", sum(v for k, v in files.items() if k.endswith(".sst")))
+        # What was written over the run and its close, deleted files included: the per-WAL maxima, the SST bytes
+        # RocksDB's flushes and compactions wrote (read after the close, so the close's flush counts) and the
+        # other files' largest sizes. Not counted: the first open's files deleted at reopen, transport overhead.
+        self._sample()
+        after = {}
+        for line in (self.options.get_statistics() or "").splitlines():
+            name, _, rest = line.partition(" COUNT : ")
+            if name in ("rocksdb.flush.write.bytes", "rocksdb.compact.write.bytes"):
+                after[name] = int(rest)
+        wal = sum(v for k, v in self.seen.items() if k.endswith(".log"))
+        other = sum(v for k, v in self.seen.items() if not k.endswith(".log"))
+        stats.set_value("proto/queue/written/wal_bytes", wal)
+        stats.set_value("proto/queue/written/wal_files_seen", sum(1 for k in self.seen if k.endswith(".log")))
+        for name, value in after.items():
+            stats.set_value(f"proto/queue/written/{name}", value)
+        stats.set_value("proto/queue/written/other_bytes", other)
+        stats.set_value("proto/queue/written_bytes_total", wal + sum(after.values()) + other)
+
+
 class ProtoSpider(scrapy.Spider):
     name = "proto"  # Fixed: HTTPCACHE_SCOPE "spider" keys the cache by it, so replays find it.
     custom_settings = {
         **SETTINGS,
         "DOWNLOADER_MIDDLEWARES": {"proto_spider.Guard": 110},
         **({"ITEM_PIPELINES": {"proto_spider.DuckDBPipeline": 300}} if CONFIG["store"] == "per-item" else {}),
+        **({"ITEM_PIPELINES": {"proto_spider.RocksQueuePipeline": 300}} if CONFIG["store"] in ("rocks-queue", "all")
+            else {}),
     }
 
     def __init__(self, *args, **kwargs):
@@ -552,6 +765,9 @@ class ProtoSpider(scrapy.Spider):
 
     def parse(self, response):
         self.in_flight -= 1
+        if CONFIG["crash_after"] and self.pages >= CONFIG["crash_after"]:
+            # Ticket 08's crash probe: die as a crash would, with no close, no stats and no flush.
+            os.kill(os.getpid(), signal.SIGKILL)
         self.pages += 1
         chain = [*response.meta.get("redirect_urls", []), response.url]
         hops = [SCOPE.identity(urldefrag(hop)[0]) for hop in chain]
@@ -753,9 +969,9 @@ def render(p: Plan) -> str:
         f"{closespider_timeout(p.max_pages, p.delay) + DEADLINE_GRACE_S:.0f} s; poll every {POLL_EVERY_S:.0f} s",
         "",
         rule,
-        "## Order of host calls (exec and write_file on scrapy-proto)",
+        f"## Order of host calls (exec and write_file on {m.MACHINE_NAME})",
         rule,
-        "1. refuse unless scrapy-proto exists, is this checkout's (state file generation) and is running",
+        f"1. refuse unless {m.MACHINE_NAME} exists, is this checkout's (state file generation) and is running",
         f"2. exec: mkdir -p {p.run_dir} {CACHE_DIR}",
         f"3. write_file {p.run_dir}/{SPIDER_FILE} and {p.run_dir}/run.sh (below)",
         f"4. exec: take the lock {LOCK} under flock (script below); refuse if another run is alive",
@@ -856,7 +1072,7 @@ def sh(mach: Machine, script: str, timeout: float = EXEC_TIMEOUT_S) -> tuple[int
 
 
 def prepare(mach: Machine, p: Plan) -> None:
-    code, _, err = sh(mach, f"mkdir -p {p.run_dir} {CACHE_DIR}")
+    code, _, err = sh(mach, f"mkdir -p {p.run_dir} {CACHE_DIR}" + (f" {p.queue_dir}" if p.live_arms else ""))
     if code != 0:
         msg = f"mkdir in the guest exited {code}: {err.strip()[-300:]}"
         raise m.ProtoError(msg)
@@ -891,9 +1107,18 @@ def _epoch(mach: Machine, path: str) -> float | None:
         return None
 
 
-def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
+def watch(  # noqa: PLR0913  the ticket 08 hooks
+    mach: Machine,
+    p: Plan,
+    say: Callable[[str], None],
+    tick: Callable[[], object] | None = None,
+    progress: Callable[[], str] | None = None,
+    tick_s: float = POLL_EVERY_S,
+) -> Outcome:
     """Poll until the done marker, a dead run or the host deadline. A SmolError (the machine stopped
-    under us, say by another process's `vm down`) propagates: nothing more can be read then."""
+    under us, say by another process's `vm down`) propagates: nothing more can be read then. Ticket 08:
+    `tick` (the live consumers) runs every `tick_s` between the guest polls, which stay POLL_EVERY_S apart,
+    and `progress` replaces the guest-side count in the progress line."""
     deadline = time.monotonic() + closespider_timeout(p.max_pages, p.delay) + DEADLINE_GRACE_S
     last_progress = 0.0
     unit = "pages in the feed" if p.store == "bulk" else "items scraped (Scrapy's log stats, every 60 s)"
@@ -912,7 +1137,8 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
             # (cd failed, run.sh never started, or a reboot first). The lock calls it stale too.
             return Outcome(why=f"run never wrote a pid ({status}); dead, as the lock rule says")
         if now - last_progress >= PROGRESS_EVERY_S:
-            say(f"[crawl] {now - t0:.0f}s: {status}, {count.strip()} {unit}")
+            say(f"[crawl] {now - t0:.0f}s: {status}, "
+                + (progress() if progress is not None else f"{count.strip()} {unit}"))
             last_progress = now
         if now > deadline:
             say(f"[crawl] host deadline passed after {now - t0:.0f}s: stopping Scrapy")
@@ -921,7 +1147,13 @@ def watch(mach: Machine, p: Plan, say: Callable[[str], None]) -> Outcome:
             status = out.strip().rpartition("|")[0]
             code = int(status.split()[1]) if status.startswith("done") else None
             return Outcome(exit_code=code, why=f"host deadline passed; killed ({status})")
-        time.sleep(POLL_EVERY_S)
+        if tick is None:
+            time.sleep(POLL_EVERY_S)
+            continue
+        next_poll = time.monotonic() + POLL_EVERY_S
+        while time.monotonic() < next_poll:
+            tick()
+            time.sleep(tick_s)
 
 
 def pull_store(mach: Machine, p: Plan) -> tuple[bytes, str]:

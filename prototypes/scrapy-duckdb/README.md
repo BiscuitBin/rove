@@ -36,7 +36,8 @@ for the per-ticket network notice; the DuckDB study for the measurements.
 - The guest is a `python:3.12` image with Scrapy installed by `pip` at first create and
   persisted on the machine's own disk. Ticket 01 climbs a ladder if that does not hold:
   a community Scrapy image, then a venv on the ext4 disk.
-- One machine, named `scrapy-proto`, created persistent, detached and with networking
+- One machine, named `scrapy-proto` (since ticket 07, this branch drives `rocks-proto` instead, the
+  same machine plus a host mount), created persistent, detached and with networking
   on, so separate processes reopen it by name. It is stopped, not deleted, between
   sessions. It is never managed with a `with` block, because `Machine.__exit__` deletes
   the machine.
@@ -46,7 +47,9 @@ for the per-ticket network notice; the DuckDB study for the measurements.
   it does not hold, so a replay never touches the site.
 - Polite defaults are baked in and robots.txt is always obeyed: there is no ignore flag.
   The User-Agent names the prototype.
-- The store is one DuckDB file, `ai_tmp/scrapy-duckdb/prototype.duckdb` at the
+- Since ticket 09 every `--store` value loads a fresh per-run file, `<run_id>-<arm>.duckdb`, and the
+  shared file below keeps only the `runs` row (`scrapyproto sql --run <run_id>` queries a run's pages).
+  Until then: the store is one DuckDB file, `ai_tmp/scrapy-duckdb/prototype.duckdb` at the
   repository root, with a `runs` table and a `pages` table whose `html` column is
   declared `USING COMPRESSION ZSTD`. `--store bulk` (the default) loads the feed on the
   host after the run; `--store per-item` writes each page from the item pipeline into a
@@ -64,6 +67,13 @@ for the per-ticket network notice; the DuckDB study for the measurements.
 
 ## How to run
 
+**Since ticket 07 this branch drives `rocks-proto`, not `scrapy-proto`.** `MACHINE_NAME` in
+`machine.py` names the second machine, created with a host mount for the live-queue question (see
+"Tickets 07 to 09" at the end). `scrapy-proto`, which holds tickets 01 to 06's caches, belongs to the
+`scrapy-duckdb-prototype` branch and nothing here can address it. The commands below, `spike.py`
+included, therefore act on `rocks-proto`. The host interpreter is pinned below 3.15 (uv picks 3.14),
+since `rocksdict` 0.3.29 has no cp315 wheel; tickets 01 to 06 ran on 3.15.0.
+
 ```sh
 cd prototypes/scrapy-duckdb
 uv sync
@@ -72,10 +82,14 @@ uv run scrapyproto vm up                                 # ticket 02: create or 
 uv run scrapyproto vm status                             # from any shell
 uv run scrapyproto crawl --start-url https://example.com --max-pages 25   # ticket 03
 uv run scrapyproto runs
-uv run scrapyproto sql "select status, count(*) from pages group by 1"
+uv run scrapyproto sql "select status, count(*) from pages group by 1" --run RUN_ID  # its own file
 uv run scrapyproto crawl --start-url URL --exclude 'glob' --dry-run        # ticket 04
 uv run scrapyproto vm install-duckdb                     # ticket 05: guest DuckDB pin (network)
 uv run scrapyproto crawl --start-url URL --store per-item                 # ticket 05
+uv run python -u spike_rocks.py all                       # ticket 07: RocksDB across the mount
+uv run scrapyproto crawl --start-url URL --store all       # ticket 08: rocks-queue, jsonl-tail and bulk
+uv run scrapyproto consume RUN_ID                          # ticket 08: resume a live arm's host side
+uv run python bench_queries.py table LOG...               # ticket 09: replay logs to medians
 uv run python bench_queries.py bench --urls-from F --scratch D F1 F2      # ticket 05
 uv run scrapyproto vm down                               # stop; `vm up` reconnects
 uv run scrapyproto vm destroy                            # delete the machine and the state file
@@ -98,6 +112,9 @@ the agent runs the adversarial review loop below.
 | `04-guiding-and-filtering-parameters.md` | Guiding and filtering parameters, proven on Graph and Workspace | 03 |
 | `05-per-item-duckdb-versus-bulk-load.md` | The per-item DuckDB path, compared with the bulk load | 03 |
 | `06-verdict.md` | Verdict | 04, 05 |
+| `07-spike-rocksdb-across-the-mount.md` | Spike: RocksDB across a smol host mount | 06 |
+| `08-the-queue-store-and-consumer.md` | The queue store and its host consumer | 07 |
+| `09-live-queue-versus-bulk.md` | The live queue compared with the bulk load | 08 |
 
 ## Adversarial review
 
@@ -453,6 +470,10 @@ templated HTML well when it is loaded in bulk. Nothing here tests SQLite.
 - That the lifecycle is complete. `vm destroy` and the labelled create have not run.
 
 The sections below are the evidence, one per ticket, in the order the tickets landed.
+
+**Since then:** tickets 07 to 09 (2026-11-11) tested RocksDB as a live queue from the guest spider to
+host DuckDB, on a second machine with a host mount. Their recommendation is at the end, under
+"Recommendation for tickets 07 to 09"; this Verdict is unchanged by them.
 
 ### Ticket 01: the spike
 
@@ -1039,3 +1060,419 @@ the per-item file's own 25 rows (`bench_queries.py edges`, `logs/05-11`), or rea
 - **A gentler close.** A writer that closes without an explicit CHECKPOINT still leaves no WAL (798720
   bytes, `logs/05-11` part 1), because DuckDB checkpoints on a clean close. The explicit CHECKPOINT is
   kept so that the stats can time it.
+
+## Tickets 07 to 09: RocksDB as a live queue
+
+**The question.** Tickets 01 to 06 carry a run's pages from the guest to the host only after the run: a
+JSONL feed on the guest disk, pulled with `read_file` once the done marker appears, then bulk-loaded.
+The host sees nothing until then, and a spider killed mid-run leaves a feed that `check_feed` refuses
+whole. Can RocksDB be a live queue instead: the spider appends pages to RocksDB and the host consumes
+them into DuckDB while the crawl runs? And does that beat the current solution, on what?
+
+**Design choices, made with the maintainer.** A live queue only; RocksDB is not tried as a container
+pulled after the run. The binding is `rocksdict` 0.3.29: the `python-rocksdb` the question linked is
+an sdist last released in 2019 that needs a system librocksdb. A new machine, `rocks-proto`, because a
+smol host mount can only be given at create. Scale: ticket 03's 25-page Graph crawl and ticket 04's
+two 200-page crawls. A control arm was added: a JSONL feed written to the same mount and tailed by the
+host, so that whatever the mount alone provides is not credited to RocksDB.
+
+### Ticket 07: the spike
+
+**The machine.** `scrapyproto vm up` created `rocks-proto` from `python:3.12` with ticket 01's
+`ResourceSpec` and one mount, `MountSpec(<repo>/ai_tmp/scrapy-duckdb/queue, /queue, read_only=False,
+staged=False)` (`logs/07-01`): create to running 3.05 s, `pip install scrapy==2.20.0` 8.91 s, `pip
+install rocksdict==0.3.29` 1.67 s, 14.1 s in all. **This is the first live run of `vm up`'s create
+path**, which ticket 06 listed as never run: `Machine.list` shows `rocks-proto` with its
+`scrapyproto-generation` label, matching the state file, and `owned` is true. Whether `python:3.12` was
+already in the host's image cache is not measured (it was pulled for `scrapy-proto` in ticket 01), so
+3.05 s is not a cold-pull time. In the guest the mount is `virtiofs`, `rw,relatime`; a file the guest
+(root) creates appears on the host owned by the host user, mode 0600. `/out` does not exist on a new
+machine; `crawl` creates it.
+
+**Pins.** Host: CPython 3.14.8 (uv's pick under `requires-python = ">=3.13,<3.15"`), rocksdict 0.3.29,
+DuckDB 2.0.0, smolmachines 1.32.4. Guest: Python 3.12, Scrapy 2.20.0, rocksdict 0.3.29.
+
+**The clock.** Latencies below are host receive time minus guest write time, so the guest's clock
+offset is measured first, NTP-style over the mount: the host writes a ping file, a guest poller (1 ms)
+answers with its own time, the host sees the pong. The best of 30 round trips bounds the error by
+half of it. Across the five logged runs of `spike_rocks.py` (`logs/07-02`, `07-03`, `07-05`, `07-06`,
+`07-07`), the best round trip was 1.9 to 3.9 ms, each run's error bound +- 1.0 to 2.0 ms. **The offset
+(guest minus host) moved:** -0.5 to -1.7 ms in the first four, -5.6 ms in `07-07` a few minutes later
+(and -5.0 ms in the triage rerun, not logged). The guest clock drifts against the host's by
+milliseconds over minutes, so an offset is only good beside the run it was taken for; every latency
+here uses its own run's offset, and ticket 09 must do the same. The median round trip was 45 ms in
+every run, against 2 to 4 ms at best. **Inference:** the slow leg is the host-to-guest one (the guest
+re-reading a file the host replaced), which is not the direction the queue uses; the guest-to-host
+latencies below sit at the host's poll interval.
+
+**Probe 1: a guest primary, a host secondary** (`logs/07-03`). A guest writer puts 200 values of
+75000 bytes of synthetic HTML-like text (about ticket 03's mean page) under `p:%012d`, 50 ms apart,
+then `meta:closed`. The host opens the same directory through the mount with
+`AccessType.secondary` and, every 10 ms, calls `try_catch_up_with_primary()` and reads the keys past
+its cursor. Three write modes, then a burst with no pacing:
+
+| Mode | Guest acked, host saw | put to host-visible: min, p50, p95, max (ms) | catch-up call p50, max (ms) |
+| --- | --- | --- | --- |
+| plain (no sync, no flush) | 200, 200 | 0.44, 7.90, 14.63, 17.57 | 0.41, 3.16 |
+| `flush_wal(True)` after each put | 200, 200 | 0.50, 7.20, 14.51, 15.79 | 0.35, 2.69 |
+| `WriteOptions.sync` on each put | 200, 200 | 0.56, 8.50, 15.25, 17.48 | 0.48, 2.25 |
+| plain, no pacing (burst) | 200, 200 | 0.51, 10.35, 20.27, 21.94 | 0.27, 2.38 |
+
+Every put reached the host, and `meta:closed` was seen each time. The latency is the 10 ms poll plus
+a few milliseconds; the mode makes no difference. **Inference:** guest writes to the virtiofs mount
+reach the host's file as they are written, with no writeback delay a sync would remove. The secondary
+opened 18 to 24 ms after the writer was launched. **Bytes across the mount:** the WAL is not
+compressed by default. The 200 puts made a 15772263-byte `000004.log`; ZSTD (`set_compression_type`)
+applies only to the SST written at flush (1047342 bytes here, from this too-regular synthetic text, so
+not a ratio to cite). So during a run the queue moves about as many bytes as the JSONL feed. rocksdict
+has no setter for the DB option `wal_compression`, and `set_options` refuses it, but editing the
+closed database's OPTIONS file to `wal_compression=kZSTD` and reopening with `Options.load_latest`
+works: on the host, 100 puts of 75 KB made a 14777-byte WAL instead of 7548610, and a secondary
+followed that compressed WAL put by put (scratch checks, not logged). Ticket 08 uses it; the ratio on
+real pages is ticket 09's to measure.
+
+**Probe 2: LOCK and fsync on the mount** (`logs/07-04`). A guest writer with `WriteOptions.sync` on
+every put ran 100 puts to completion over the mount: fsync works there. A second primary opened in the
+guest while the first held the database was refused (`IO error: While lock file: .../LOCK: Resource
+temporarily unavailable`). **A read-write open from the host, at the same moment, succeeded.** The
+guest's lock does not cross the mount: nothing stops a host process from opening the database as a
+second writer, which RocksDB does not survive. Verdict: the host opens a live queue only as a
+secondary, which takes no lock and writes only under its own secondary path, and opens it read-write
+only once the guest writer is known dead. The probe's database was a throwaway.
+
+**Probe 3: the writer SIGKILLed mid-write** (`logs/07-05`; rerun after the review's fixes as
+`logs/07-07`, same outcome). The first run's liveness check matched its own shell line; the review
+then found that the probe opened the database read-write whatever the check said. It now scans the
+guest's processes strictly (a failed scan raises), proves the scan sees the live writer before the
+kill, and refuses the read-write open while any writer remains. The writer SIGKILLs itself after acknowledging put 99 (100 puts),
+20 ms apart. The secondary, following live, had all 100. No writer process was left in the guest. The
+files on the host: a 7886045-byte WAL, no SST, no `meta:closed`. A fresh secondary opened afterwards
+read the same 100 keys. A host read-write open, now safe since the writer was dead, recovered the WAL
+into a 1116132-byte SST: 100 keys, contiguous from `p:000000000000`, equal to the 100 the guest
+acknowledged. Nothing acknowledged was lost and nothing unacknowledged appeared. Not measured: a
+crash of the guest kernel or the VM process, where what sits in the guest's page cache may matter
+(the latencies above suggest little does, but that is inference), and a crash during a flush.
+
+**Probe 4: a JSONL line appended on the mount, tailed from the host** (`logs/07-06`). The guest
+appends 200 lines of the same 75000-byte bodies, 50 ms apart, `flush()` after each, no fsync; the host
+reads past its byte offset every 10 ms and keeps only complete lines. All 200 arrived; no read ended
+mid-line; write to host-visible was min 0.47, p50 7.42, p95 13.68, max 15.45 ms. **That is the same as
+RocksDB's.** The liveness comes from the mount, not from RocksDB: a plain JSONL file on the same mount
+is as live. What RocksDB adds over a tailed file has to be found elsewhere: in keyed, ordered reads
+from any cursor, a recovery that is the database's own, compression of what crosses, and whatever
+tickets 08 and 09 measure.
+
+**Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/07-1.md`). Two findings, both valid
+and fixed in `spike_rocks.py`: (high) the crash probe could open a second primary from the host while
+a guest writer survived, since the liveness scan only printed its result and masked its own failure;
+(medium) `main` attached with `connect_owned` without checking ownership, which boots a stopped
+machine. It now refuses unless the state file's generation matches and the machine is already
+running, as `cli._running_or_fail` does. The review found no path to `scrapy-proto`.
+
+**Rung.** Rung 1 held: a guest primary on the mount, a host secondary following it. Rungs 2 and 3
+(checkpoints into the mount, or SSTs pulled with `read_file`) were not tried, so nothing is known
+about them.
+
+### Ticket 08: the queue store and its host consumer
+
+**What was built.** `crawl --store` takes three new values on `rocks-proto`:
+
+- `jsonl-tail`, the control: Scrapy's feed is written to `/queue/<run_id>/feed.jsonl` on the mount,
+  through a `tailfile://` feed storage that flushes after every write (Scrapy's own file is buffered),
+  and the host inserts each complete line past its byte offset. A partial line is never read.
+- `rocks-queue`: `RocksQueuePipeline` puts each item's JSON into RocksDB at `/queue/<run_id>/rocks`
+  under `p:%012d`, SSTs and WAL ZSTD-compressed (the WAL through ticket 07's OPTIONS-file edit), and at
+  close writes `meta:closed` with the page count and the depth corrections, syncs the WAL and closes.
+  The host follows it as a secondary (`queue.RocksTail`) and never opens it read-write.
+- `all`: both live arms and the guest-disk feed at once, so one crawl yields all three arms.
+
+Each live arm is consumed into its own DuckDB file, `ai_tmp/scrapy-duckdb/<run_id>-<arm>.duckdb`, with
+the host store's schema plus `consumer_offsets`, `arrivals` (host commit time per page) and `clock`.
+The consumers tick every 100 ms inside the existing watch loop; the guest poll stays at 5 s. Every tick
+inserts its batch and moves its cursor in one transaction, so a killed host resumes exactly where its
+last commit left off. After the done marker the consumers drain, then `finish` refuses a run whose
+rows plus duplicates differ from the spider's `proto/pages` (or from `meta:closed`), applies the depth
+corrections and writes the file's `runs` row; the shared `prototype.duckdb` records the run as
+ticket 05's per-item file was recorded (`store.record_isolated`). Under `all`, the guest-disk feed is
+bulk-loaded into `<run_id>-bulk.duckdb` too, before the shared row is written, so a run recorded in
+`prototype.duckdb` has every arm (see the review below). `crawl` writes `feeds/<run_id>.plan.json`
+before the launch, and `scrapyproto consume <run_id>` picks a live-arm run up again from that plan and the
+committed cursors. `--crash-after N` (prototype only) makes the spider SIGKILL itself before its
+`N+1`th page. After the summary, the host measures the clock offset over the mount (ticket 07's
+method, 20 rounds) and prints fetch-to-commit latency per arm; it is outside the wall time that
+`bench_queries.py wall` stops at the summary. The plan's 0.5 s tick became 100 ms, since every latency
+includes up to one tick.
+
+**The first run** (`logs/09-01-live-25-all.txt`) was ticket 09's first live crawl, run early as this
+ticket's integration test, since `rocks-proto` had no cache: ticket 03's seed, `--max-pages 25
+--path-prefix /` (ticket 05's form, so the replays match), `--store all`. It closed
+`closespider_itemcount` with 25 pages in a guest wall of 26.5 s, ticket 03's figure. Each arm holds 25
+pages. Rocks-queue's first commit came 46.9 ms after the first fetch; the bulk path's first row
+landed after the done marker, at 30.59 s plus 0.77 s after the launch.
+
+**Same pages** (`logs/08-compare-25.txt`): `bench_queries.py compare` on four pairs, each live arm
+against bulk in the live run and in single-arm replays (`logs/08-replay-25-{bulk,jsonl-tail,
+rocks-queue}.txt`, `httpcache/hit: 27` each, no miss and no `firsthand`): equal row counts, URL sets,
+`content_hash` sets and `(url, content_hash, md5(html))` sets in every pair.
+
+**Host resume** (`logs/08-resume-25-*.txt`). A `--store all` replay's host process was SIGKILLed 0.35
+s after the launch line. The guest run went on and finished. The two consumer files were left with a
+DuckDB WAL each (986 KB and 1.4 MB beside 12 KB files); a read-only open replayed them: rocks-queue had
+committed 14 rows at cursor `p:000000000013`, jsonl-tail 21 rows at byte 1688945. `scrapyproto
+consume` resumed both from those cursors, drained, finished and recorded the run: 25 rows each, 0
+duplicates, and `compare` against bulk equal in every set. The latency it printed has a 16.6 s tail,
+which is the time between the kill and the `consume`.
+
+**Bytes across the mount, a first figure** (the rocks-queue replay): the WAL before close held 419419
+bytes, against 2256699 logical bytes by RocksDB's own `rocksdb.wal.bytes` (which counts before the
+WAL's ZSTD), with no flush or compaction yet. So on these 25 real pages the queue moved 18.6% of the
+bytes it was given. The comparison with JSONL and gzip is ticket 09's.
+
+**Sharp edges of the queue path.**
+
+- **rocksdict cannot set `wal_compression`.** The pipeline creates the database, closes it, edits the
+  OPTIONS file and reopens with `Options.load_latest`; it refuses an OPTIONS file without exactly one
+  `wal_compression=kNoCompression`. A rocksdict release that adds the setter would retire this.
+- **The guest's LOCK does not cross the mount** (ticket 07). Nothing but convention keeps the host to
+  a secondary: one host process opening the queue read-write while the spider runs would corrupt it.
+- **`rocksdb.wal.bytes` is logical.** The bytes on the mount come from the directory listing just
+  before close; the close can flush the memtable into an SST and empty the WAL, so the directory after
+  close is not what crossed.
+- **Each consumer holds its DuckDB file read-write for the whole run.** DuckDB's one-writer lock
+  (ticket 05) means `scrapyproto sql` cannot read a live arm's file until the run is recorded; the host
+  sees the pages, other processes do not. **Inference:** a reader during the run would need its own
+  copy or another store.
+- **A live arm's file holds three more tables** than the bulk file, so at 25 pages its size (2371584
+  bytes) against bulk's (1323008) counts blocks those tables take, not page storage. Ticket 09 compares
+  the `pages` table's own storage.
+- **`/queue/<run_id>/` and the secondary's directory are never deleted.** Each run leaves its feed or
+  RocksDB on the host mount.
+
+**Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/08-1.md`). One finding, valid and fixed:
+(high) under `--store all` the shared `runs` row was committed before the bulk arm's load, so a host
+dying between the two, or a failed load, stranded the run: `consume` then refused the existing row and
+never reached the load. The shared row is now the last step, `store.load(..., resume=True)` accepts
+its own earlier bulk commit when it matches, and `record_isolated` accepts an existing row only when
+pages, store kind and file match exactly. Checked offline against copies of a recorded run (each
+finalization state, and tampered rows refused), and the normal path rerun live as a replay
+(`logs/08-replay-25-all-after-review.txt`: 25 pages in each arm). A host killed inside finalization
+has not been run.
+
+### Ticket 09: the live queue compared with the bulk load
+
+Dated 2026-11-11. Same host, pins and machine as ticket 07. Three arms, each consumed into its own
+DuckDB file (ticket 08): `bulk` (today's path), `jsonl-tail` (the control: a line-flushed feed on the
+mount) and `rocks-queue`. Each number below is in a log under `ai_tmp/scrapy-duckdb/logs/`; facts and
+inferences are marked as in ticket 06.
+
+**The live crawls, network, once each, all arms in one crawl** (`--store all`): ticket 03's 25-page
+Graph command with `--path-prefix /` (`logs/09-01`, run during ticket 08), and ticket 04's Graph and
+Workspace 200-page commands (`logs/09-02`, `09-03`). All three closed `closespider_itemcount` with
+200 (or 25) pages of status 200, robots.txt 200, nothing throttled. Guest wall 26.5 s, 176.3 s and
+204.8 s, against tickets 03 and 04's 26.5 s, 175.9 s and 204.9 s: the extra writers did not slow the
+polite crawl. Graph's 176 downloads (`httpcache/firsthand`) and 26 hits are the 25-page run's cache
+reused; Workspace downloaded all 204. At real pace, from the guest's fetch to the page in host DuckDB
+(clock-corrected per run; offsets +11.3 and +11.4 ms, +- 1.9 and 1.4 ms):
+
+| Live, 200 pages | bulk | jsonl-tail | rocks-queue |
+| --- | --- | --- | --- |
+| Graph: fetch to host-visible, p50 / p95 | 87581 / 171263 ms | 61.7 / 115.1 ms | 57.3 / 107.9 ms |
+| Graph: first fetch to first row | 177990 ms | 62.1 ms | 48.7 ms |
+| Workspace: fetch to host-visible, p50 / p95 | 107183 / 196898 ms | 67.8 / 117.3 ms | 58.8 / 108.3 ms |
+| Workspace: first fetch to first row | 207016 ms | 27.7 ms | 16.4 ms |
+
+The 25-page live run predates the bulk arm's latency line: its live arms read p50 46.9 / 53.2 ms
+(rocks-queue / jsonl-tail), and its bulk rows landed at the done marker plus the load, 31.4 s after the
+launch. Every live-arm figure includes up to one 100 ms consumer tick; every bulk figure is the run's
+remaining length plus up to one 5 s guest poll plus the load. **These live figures were taken with the
+first timestamps, which review moment 1 found uneven** (below): a live arm's commit time was read
+before its batch was inserted, bulk's after the load's CHECKPOINT and close. The replays were rerun
+with the fix; the live crawls were not, being network. **Inference:** at the live pace a batch is one
+page, so the live figures read a few milliseconds low and bulk's tens of milliseconds high, against a
+gap of 88 to 107 s; no conclusion here rests on that difference.
+
+**The replays, offline, five per arm and size, arms rotated each round** (`logs/09-replay-*`, through
+`bench_queries.py wall`; `bench_queries.py table` gives `logs/09-table.txt`), run after review
+moment 1's fixes; the first set, with the uneven timestamps and bulk loading the shared store, is kept
+in `logs/09-before-review/`. Every replay served all its responses from the cache: `httpcache/firsthand`
+is absent in all 45. The 25-page and Workspace replays had no miss; each Graph 200-page replay had 202
+hits and 50 misses, every one ignored (dropped, not fetched: `miss` equals `ignore`). **Inference:** at
+replay speed the spider discovers links in another order than at the live 1 s pace and asks for 50
+links the live run never fetched; it still stored the live run's 200 pages (below). Each cell is the
+median of five, bulk / jsonl-tail / rocks-queue:
+
+| Replay | Graph 25 | Graph 200 | Workspace 200 |
+| --- | --- | --- | --- |
+| Fetch to host commit, p50 (ms) | 4865 / 64.5 / 62.1 | 4799 / 147.9 / 139.6 | 3526 / 101.3 / 97.3 |
+| Fetch to host commit, p95 (ms) | 4889 / 141.2 / 142.1 | 4986 / 246.6 / 219.9 | 5266 / 166.5 / 159.8 |
+| First fetch to first row (ms) | 4894 / 84.4 / 58.1 | 5009 / 65.0 / 47.8 | 5435 / 58.9 / 37.8 |
+| Done marker to summary (s) | 0.10 / 0.40 / 0.39 | 0.19 / 0.39 / 0.41 | 0.64 / 0.42 / 0.42 |
+| Process start to summary (s) | 5.224 / 5.638 / 5.560 | 5.330 / 5.588 / 5.644 | 5.780 / 5.626 / 5.673 |
+| Guest wall (s) | 0.3 / 0.3 / 0.3 | 0.7 / 0.8 / 0.8 | 3.6 / 3.7 / 3.7 |
+| Spider peak RSS (MiB) | 88.8 / 88.8 / 101.7 | 90.4 / 90.9 / 117.1 | 126.1 / 126.1 / 205.0 |
+
+Ranges are in `logs/09-table.txt`. No range of a live arm overlaps bulk's in the first three rows.
+The two live arms' ranges overlap in every row except RSS and three on Graph 200: p50 (jsonl-tail
+145.4 to 153.1 against rocks-queue 132.9 to 143.0 ms) and p95 (237.3 to 250.8 against 216.9 to 229.3
+ms), both lower for rocks-queue, and process start to summary (5.583 to 5.623 against 5.625 to 5.672
+s), higher for it. How each was taken, one line each:
+
+- **Fetch to host commit:** per page, the host time at which the COMMIT that made the row visible to
+  the writing connection returned, minus the guest's `fetched_at`, plus the guest-minus-host offset
+  measured over the mount after the run (20 rounds; the guest clock drifts by milliseconds over
+  minutes, ticket 07). Live arms: each batch's COMMIT, before any CHECKPOINT. Bulk: the load's one
+  COMMIT, for every page, before its CHECKPOINT. Each arm loads into a fresh file of its own. This is
+  visibility to the host process that holds the file, not to another process: DuckDB's lock keeps
+  others out until the run is recorded.
+- **First fetch to first row:** the first commit minus the earliest `fetched_at`, offset-corrected.
+- **Done marker to summary:** the `crawl` command's `[time] host:` line. Bulk: pull and load. Live
+  arms: drain (three empty 100 ms ticks), finish, record and read back.
+- **Process start to summary:** `bench_queries.py wall`. It is set by the 5 s guest poll on every arm,
+  so it cannot separate them; the clock offset is taken after the summary, outside it.
+- **Guest wall:** `started.at` to `finished.at`, guest clock. **Peak RSS:** `ru_maxrss` in the
+  spider's `closed` handler.
+
+Since review moment 1 the rocks-queue pipeline also lists its directory after every put to count the
+bytes it writes (below); that cost is in its replay figures and in no other arm's. **Inference:** it
+is small against the tick, but it is not measured apart.
+
+**Same pages** (`logs/09-compare-replays.txt`): all 30 replay pairs, each live arm against the same
+round's bulk file, and both 200-page bulk replays against their live crawls' bulk files: 32 of 32 equal
+in rows, URLs, `content_hash` and `(url, content_hash, md5(html))`.
+
+**Bytes written across the boundary**, from the replays. Bulk moves the guest-disk feed through
+`read_file`, and jsonl-tail appends the same JSON lines to the mount, so each moves the feed's size.
+For rocks-queue the pipeline counts what it wrote to the mount (`proto/queue/written_bytes_total`):
+the largest size seen of every WAL file, sampled after every put, so a WAL that a mid-run flush deletes
+is counted; plus RocksDB's flush and compaction write counters read after the close, which include the
+SST written at close; plus the other files' largest sizes. It leaves out the first open's files
+deleted at the reopen, a rolled MANIFEST's predecessors, the mount's own overhead and, for both live
+arms, the host's reads. Beside them, the same feed compressed whole on the host (`gzip -6`, `zstd
+-3`), as a reference for what a compressed stream could move; neither was built as an arm.
+
+| Bytes | Graph 25 | Graph 200 | Workspace 200 |
+| --- | --- | --- | --- |
+| JSONL feed (bulk and jsonl-tail) | 2255499 | 14869403 to 14869411 | 76284386 |
+| rocks-queue, written in all | 908577 to 908606 | 5877568 to 5877610 | 13215502 to 13215562 |
+| of which WAL (ZSTD per record) | 419417 to 419429 | 2903013 to 2903037 | 6560159 to 6560193 |
+| of which SSTs, flush (at close, and mid-run on Workspace) | 420838 to 420857 | 2906213 to 2906236 | 6563284 to 6563315 |
+| RocksDB's logical WAL bytes | 2256699 | 14877976 | 76395576 to 76395577 |
+| The feed, `gzip -6` | 376301 | 2541847 | 6702142 |
+| The feed, `zstd -3` | 127237 | 425612 | 1325533 |
+
+The ranges are the five replays of each size; the JSONL row adds the live run (Graph's live feed
+is 14869411 bytes, its replays' 14869403 to 14869410, since `fetched_at` is written to the
+microsecond). The gzip and zstd rows compress the live runs' feeds (`logs/09-feed-compression.txt`,
+Apple gzip 479 and zstd 1.5.7 on the host). So rocks-queue wrote 40.3%, 39.5% and 17.3% of the feed's bytes, about half of it the SSTs
+that rewrite the same records; the WAL alone, which is what a secondary follows live, is 18.6%, 19.5%
+and 8.6%. Against the feed compressed whole, rocks-queue wrote 2.0x to 2.4x gzip's bytes and 7.1x to
+13.8x zstd's. **Inference:** RocksDB compresses each record alone, without the shared template the
+next page repeats; a stream compressor keeps it. A JSONL feed written through a streaming ZSTD frame
+flushed per line is not measured.
+
+**Host DuckDB storage** (`logs/09-sizes-live.txt`, `bench_queries.py sizes` on the live runs' files).
+The `pages` table's own blocks after `CHECKPOINT`, 256 KiB each, bulk against the live arms (both live
+arms are identical): 1 against 1 (25 pages), 4 against 4 (Graph), 8 against 7 (Workspace). So 200
+per-tick commits into the run's own file did not inflate page storage once checkpointed. **This does
+not contradict the DuckDB study**, whose single-row figures were 10000 inserts into a 50000-row base;
+here every file starts empty and ends with one CHECKPOINT. The live files are larger (2895872,
+5517312, 6565888 bytes against 1323008, 2109440, 3158016) because of their three extra tables.
+
+**Crash probe** (`logs/09-crash-*-all.txt`, `09-crash-held.txt`). `--store all --crash-after 100` on
+both 200-page caches: the spider SIGKILLed itself in its 101st parse, exit 137, no stats. The run was
+refused, not recorded, and the error said what each arm held. Every arm held the same 99 pages: both
+live arms 99 rows at cursors `p:000000000098` and byte 7251910 (Graph) or 42109951 (Workspace), with 0
+bytes past the last line; a fresh secondary over the queue found 99 keys and no `meta:closed`; the
+guest-disk feed, pulled anyway, held 99 complete lines, and `scrapyproto load` loaded all 99.
+**Inference:** the 100th item had not reached the pipeline or the exporter when the 101st parse ran.
+The buffered guest-disk feed lost nothing because every line here is far over Python's 8 KiB write
+buffer; a page small enough to sit in that buffer would be lost from it, not measured. **So the crash
+does not separate the arms here**: what differs is that the live arms had the 99 pages in host DuckDB
+during the run, while bulk needs its feed pulled and loaded after. A sharp edge met on the way:
+`scrapyproto load` loads a crashed run's feed as a whole run (`runs.pages = 99`), with no sign of the
+crash in the `runs` row; the manifest beside it records exit 137.
+
+**Host-resume probe** (`logs/09-resume-w200-*.txt`). A Workspace `--store all` replay's host was
+SIGKILLed 1.5 s after the launch line, with rocks-queue at 55 committed rows and jsonl-tail at 57.
+`scrapyproto consume` resumed both, finished and recorded the run: 200 rows each, 0 duplicates, and
+both equal to the run's bulk file in every set.
+
+**The probes again, after review moment 1's fixes** (`logs/09-after-review-*.txt`), since the crash
+probe, the resume probe and `--store all` ran before them. On Workspace, offline: `--store all` stored
+200 pages in each arm, both live arms equal to bulk in every set; `--crash-after 100` left 99 rows in
+each live arm (cursors `p:000000000098` and byte 42109951, 0 bytes past the last line) and the run
+unrecorded; a host SIGKILLed at 57 and 59 committed rows resumed through `consume` to 200 each, 0
+duplicates, equal to bulk. So the outcomes above hold on the committed code. These runs came after a
+`vm down` and `vm up`, and the guest clock offset had moved to -443 ms (+- 1.4 ms): a reboot resets the
+guest's clock from the host's, which is why every latency here takes its own offset. The resumed
+run's latency line counts only the pages its `consume` committed (143 and 141): arrivals are written
+by the process that committed them.
+
+**Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/09-1.md`). Three findings, all valid
+and fixed, after which the 45 replays were rerun and every replay figure above is from the rerun:
+(high) the arms' visibility times were taken at different points, a live batch's before its insert and
+bulk's after its CHECKPOINT and close; both are now read when COMMIT returns. (medium) The bulk replays
+loaded the shared, growing `prototype.duckdb` while the live arms loaded fresh files; `--store bulk`
+now loads a fresh `<run_id>-bulk.duckdb` too, recorded in the shared store as the live arms are.
+(medium) The bytes for rocks-queue were a snapshot of the files resident before close, which missed
+the deleted WAL and the SST written at close, yet read as savings; the pipeline now counts what it
+wrote, as above.
+
+**Review moment 1, second round** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/09-2.md`), run because
+the bulk path's store changed. It found round 1's three fixes in place and the written-bytes ranges
+matching the logs, and one new finding, valid and fixed in the main thread (it was one small change):
+(medium) with every arm now in a file of its own, `scrapyproto sql` against the shared store returned
+no pages for a new run, silently. `sql --run <run_id>` now queries the file `runs.store_file` names,
+and a plain `sql` says on stderr how many runs keep their pages elsewhere (checked: 0 rows from the
+shared store, then 200 with `--run`, on a Workspace bulk replay). Its notes were applied too: the
+logical-WAL row now gives the replays' figures, and the compression figures have a log.
+
+**What RocksDB added over the tailed JSONL, as measured:**
+
+- Latency: little, inside one tick. The live p50s are 57.3 against 61.7 ms and 58.8 against 67.8 ms
+  (first timestamps); the replay p50s 62.1 against 64.5, 139.6 against 147.9 and 97.3 against 101.3
+  ms. Only on the Graph 200-page replays do the ranges part, by about 8 ms at p50 and 20 ms at p95,
+  less than the 100 ms tick both share. **Inference:** the tail re-reads its file from the last
+  offset each tick and the secondary reads only new records; not traced.
+- Crash and resume: nothing. Both arms held the same pages after a spider crash, both resumed exactly
+  after a host crash.
+- Bytes across the boundary: 2.5x to 5.8x fewer than the JSONL (40.3%, 39.5% and 17.3% of it), but
+  2.0x to 2.4x more than the same feed under `gzip -6` and 7.1x to 13.8x more than under `zstd -3`.
+- Cost: 13 to 79 MiB more spider memory in the replays (Workspace 205.0 against 126.1 MiB;
+  **inference:** the 64 MiB default memtable holding uncompressed values), the OPTIONS-file edit to
+  compress the WAL, every record written twice (WAL, then SST), a lock that does not cross the mount,
+  and a host interpreter pinned below 3.15.
+
+### Recommendation for tickets 07 to 09
+
+**A live queue from the guest spider to host DuckDB: candidate with conditions, delivered through a
+smol host mount. RocksDB as that queue: not a candidate over a line-flushed JSONL feed on the same
+mount.** What was shown: on two sites at 200 pages, both live arms put each page in host DuckDB about
+60 ms after its fetch (p95 about 110 ms, first timestamps) at real pace, against 88 to 107 s for the
+bulk load, and 62 to 148 ms (p50) in the replays against 3.5 to 4.9 s; they stored
+the same pages as bulk, survived a spider crash with what had been sent and a host crash with exactly
+what had been committed. The mount, not RocksDB, is what made them live: the tailed JSONL matched
+RocksDB on every measure but memory and bytes, and it beat RocksDB on memory and simplicity. On bytes,
+RocksDB's per-record compression wrote 2.5x to 5.8x fewer than the plain feed but 2x more than gzip
+and 7x to 14x more than zstd of the same feed. The conditions:
+
+- **The mount is decided at create.** smol 1.32.4 takes `MountSpec` only in `MachineConfig`; a machine
+  made without it cannot gain one. That is why `rocks-proto` exists.
+- **One consumer per run, which holds that run's DuckDB file.** DuckDB's one-writer lock means nothing
+  else reads the file until the run is recorded (ticket 05's finding, unchanged).
+- **The cursor and the rows commit together**, as here; that is what made the host restart exact.
+- **The host never writes the guest's files while the guest may.** For a tailed file that is natural;
+  for RocksDB it rests on convention alone, since the lock does not cross the mount.
+- **If the bytes on the mount matter**, the next thing to measure is a line-flushed streaming ZSTD
+  frame on the JSONL feed, not RocksDB.
+
+**What a decision record citing this should not claim:** that RocksDB was faster (the difference is
+inside the tick); that the queue survives a guest kernel crash, a `vm down` or a VM process kill
+mid-run (only a spider SIGKILL and a host SIGKILL ran); that it holds past 200 pages, at a rate above
+the 1 s delay, or with RocksDB compaction running (none occurred); that a small page survives a crash
+in the buffered feed (not measured); that a host killed during finalization resumes (checked offline
+only, ticket 08).
+
+**Not measured:** a guest crash, a stop or a reboot mid-run with the mount; more than one run at a time
+on the mount; crawls longer than 200 pages; the streaming-ZSTD JSONL feed; reading a live arm's DuckDB
+file from another process; RocksDB's Rung 2 and 3 transports (ticket 07).

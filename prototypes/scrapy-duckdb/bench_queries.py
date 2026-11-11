@@ -12,6 +12,10 @@ Run from `prototypes/scrapy-duckdb` with `uv run --offline python bench_queries.
     then N measured rounds, the files interleaved within each round, so every file is equally warm.
 - `edges DIR --rows-from DB`: the per-item path's sharp edges, measured on scratch files in DIR, which must not
     exist yet: two writers on one file, a reader beside a writer, and a writer SIGKILLed before CHECKPOINT.
+- `sizes FILE ...` (ticket 09): each DuckDB file's bytes and blocks, and the blocks the `pages` table's own
+    segments occupy, so a live arm's extra tables are not counted as page storage.
+- `table LOG ...` (ticket 09): the replay logs `wall` captured, one median [min to max] per measure and arm;
+    refuses a log that made a site request or missed the cache.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import resource
 import shutil
 import signal
@@ -276,6 +281,83 @@ def edges(scratch: Path, rows_from: str) -> None:
     print("after a read-write open and close:", listing(d), "|", count_rows(path))
 
 
+# ---------------------------------------------------------------- sizes ---
+
+
+def sizes(files: list[str]) -> None:
+    """Ticket 09: a file's size, its blocks, and the blocks the `pages` table's own segments occupy, so a live
+    arm's extra tables (consumer_offsets, arrivals, clock) are not counted as page storage."""
+    for f in files:
+        con = duckdb.connect(f, read_only=True, config=NO_EXTENSIONS)
+        block, total, used, free = con.execute(
+            "SELECT block_size, total_blocks, used_blocks, free_blocks FROM pragma_database_size()").fetchall()[0]
+        pages_blocks = con.execute(  # a segment's own block plus any overflow blocks it lists
+            "SELECT count(DISTINCT b) FROM (SELECT block_id AS b FROM pragma_storage_info('pages') UNION ALL "
+            "SELECT unnest(additional_block_ids) FROM pragma_storage_info('pages')) WHERE b >= 0").fetchall()[0][0]
+        html = con.execute(
+            "SELECT compression, count(*) FROM pragma_storage_info('pages') WHERE column_name = 'html' "
+            "GROUP BY 1 ORDER BY 1").fetchall()
+        rows, html_bytes = con.execute("SELECT count(*), coalesce(sum(strlen(html)), 0) FROM pages").fetchall()[0]
+        tables = [r[0] for r in con.execute("SELECT table_name FROM duckdb_tables() ORDER BY 1").fetchall()]
+        con.close()
+        wal = f + ".wal"
+        print(json.dumps({"file": f, "bytes": os.path.getsize(f), "wal": os.path.getsize(wal) if os.path.exists(wal) else 0,
+            "block_size": block, "total_blocks": total, "used_blocks": used, "free_blocks": free,
+            "pages_blocks": pages_blocks, "pages_bytes_by_blocks": pages_blocks * block, "rows": rows,
+            "html_bytes": html_bytes, "html_segments": html, "tables": tables}))
+
+
+# ---------------------------------------------------------------- table ---
+
+RE_WALL = re.compile(r"^wall time: ([0-9.]+) s")
+RE_HOST = re.compile(r"done marker seen to summary printed ([0-9.]+)s")
+RE_RSS = re.compile(r"^proto/ru_maxrss_kib: (\d+)")
+RE_LAT = re.compile(r"^\[latency\] (\S+): (\d+) pages, fetch -> host (?:commit|visible) ms: min ([0-9.]+), p50 ([0-9.]+), "
+    r"p95 ([0-9.]+), max ([0-9.]+); first fetch -> first (?:commit|row) ([0-9.]+) ms")
+RE_WALLX = re.compile(r"^\[wall\] process start to summary printed: ([0-9.]+)s")
+RE_STAT = re.compile(r"^(proto/queue/before_close/wal_bytes|proto/queue/before_close/dir_bytes|"
+    r"proto/queue/written_bytes_total|proto/queue/written/wal_bytes|proto/queue/written/wal_files_seen|"
+    r"proto/queue/rocksdb\.wal\.bytes_before_close|"
+    r"httpcache/firsthand|httpcache/miss|httpcache/ignore|httpcache/hit|proto/pages): (\d+)")
+RE_STORE = re.compile(r"^\[crawl\] run (\S+): .* store (\S+)$")
+
+
+def table(logs: list[str]) -> None:
+    """Ticket 09: one line per arm, median [min to max], from the replay logs `wall` captured."""
+    by_arm: dict[str, dict[str, list[float]]] = {}
+    for log in logs:
+        arm = None
+        got: dict[str, float] = {}
+        for line in Path(log).read_text().splitlines():
+            if m := RE_STORE.match(line):
+                arm = m.group(2)
+            elif m := RE_WALLX.match(line):
+                got["process start to summary s"] = float(m.group(1))
+            elif m := RE_WALL.match(line):
+                got["guest wall s"] = float(m.group(1))
+            elif m := RE_HOST.search(line):
+                got["done marker to summary s"] = float(m.group(1))
+            elif m := RE_RSS.match(line):
+                got["spider peak RSS MiB"] = int(m.group(1)) / 1024
+            elif m := RE_LAT.match(line):
+                got["fetch to host p50 ms"] = float(m.group(4))
+                got["fetch to host p95 ms"] = float(m.group(5))
+                got["first fetch to first row ms"] = float(m.group(7))
+            elif m := RE_STAT.match(line):
+                got[m.group(1)] = int(m.group(2))
+        if arm is None:
+            sys.exit(f"table: {log} has no run line")
+        # Offline, as ticket 04 put it: no response from the network, and every miss ignored (dropped, not fetched).
+        if got.get("httpcache/firsthand") or got.get("httpcache/miss", 0) != got.get("httpcache/ignore", 0):
+            sys.exit(f"table: {log} made a site request or fetched a cache miss; not a replay to compare")
+        for k, v in got.items():
+            by_arm.setdefault(arm, {}).setdefault(k, []).append(v)
+    for arm, cols in by_arm.items():
+        print(f"## {arm}: {len(next(iter(cols.values())))} runs")
+        for k, vs in cols.items():
+            print(f"  {k}: {statistics.median(vs):.4g} [{min(vs):.4g} to {max(vs):.4g}] (n {len(vs)})")
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--child":
         child(*sys.argv[2:5])
@@ -301,7 +383,17 @@ def main() -> None:
     e = sub.add_parser("edges")
     e.add_argument("scratch", type=Path)
     e.add_argument("--rows-from", required=True)
+    sz = sub.add_parser("sizes")
+    sz.add_argument("files", nargs="+")
+    tb = sub.add_parser("table")
+    tb.add_argument("logs", nargs="+")
     args = parser.parse_args()
+    if args.mode == "sizes":
+        sizes(args.files)
+        return
+    if args.mode == "table":
+        table(args.logs)
+        return
     if args.mode == "compare":
         sys.exit(compare(args.a_db, args.a_run, args.b_db, args.b_run))
     if args.mode == "bench":

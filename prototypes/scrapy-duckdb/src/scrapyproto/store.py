@@ -9,6 +9,8 @@ load <run_id>` loads it later; a run is never half in the store.
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -144,15 +146,26 @@ def _ts(epoch: float | None) -> datetime | None:
     return datetime.fromtimestamp(epoch, UTC) if epoch is not None else None
 
 
-def load(db: Path, manifest: dict[str, Any], feed: Path) -> tuple[int, FeedCheck]:
+def load(
+    db: Path, manifest: dict[str, Any], feed: Path, *, resume: bool = False,
+    on_commit: Callable[[float], object] | None = None,
+) -> tuple[int, FeedCheck]:
     """Insert one run's pages and its runs row together. Duplicate URLs keep the earliest fetch, and are
-    counted and reported, never silently merged. Raises FeedError, or duckdb.Error, with nothing written."""
+    counted and reported, never silently merged. Raises FeedError, or duckdb.Error, with nothing written.
+    With `resume` (ticket 08's rerun), a bulk runs row already counting the feed's unique URLs is accepted:
+    it was committed with its pages in one transaction, so the run is loaded already, and 0 pages are loaded now.
+    `on_commit` (ticket 09) gets the time the COMMIT returned, before CHECKPOINT; it is not called when nothing loads."""
     check = check_feed(feed)
     run_id = manifest["run_id"]
     con = connect(db)
     try:
-        if con.execute("SELECT count(*) FROM runs WHERE run_id = ?", [run_id]).fetchall() != [(0,)]:
-            msg = f"run {run_id} is already in {db}; nothing loaded"
+        found = con.execute("SELECT pages, store FROM runs WHERE run_id = ?", [run_id]).fetchall()
+        if resume and found == [(check.unique_urls, "bulk")]:
+            sys.stderr.write(f"note: run {run_id} is already in {db} with {check.unique_urls} pages; not loaded again"
+                "\n")
+            return 0, check
+        if found:
+            msg = f"run {run_id} is already in {db} as {found}; nothing loaded"
             raise FeedError(msg)
         con.execute("BEGIN TRANSACTION")
         try:
@@ -181,9 +194,12 @@ def load(db: Path, manifest: dict[str, Any], feed: Path) -> tuple[int, FeedCheck
                 raise FeedError(msg)
             con.execute(RUNS_INSERT, _runs_row(manifest, pages, "bulk", db))
             con.execute("COMMIT")
+            committed_at = time.time()
         except BaseException:
             con.execute("ROLLBACK")
             raise
+        if on_commit is not None:
+            on_commit(committed_at)
         try:
             con.execute("CHECKPOINT")
         except duckdb.Error as exc:  # Committed already: the run is in the WAL and replays on the next open.
@@ -207,11 +223,21 @@ def _runs_row(manifest: dict[str, Any], pages: int, kind: str, file: Path) -> li
     ]
 
 
+runs_row = _runs_row  # Ticket 08's consumers write the runs row of their own file.
+
+
 def record_per_item(db: Path, manifest: dict[str, Any], pulled: Path) -> int:
     """Ticket 05: check the pulled per-item file and record its run in the host store's runs table.
 
     The file must hold this run's runs row, which the pipeline writes only at close, and as many pages as
     that row says; otherwise nothing is recorded. Returns the page count."""
+    return record_isolated(db, manifest, pulled, "per-item")
+
+
+def record_isolated(db: Path, manifest: dict[str, Any], pulled: Path, file_kind: str, kind: str | None = None) -> int:
+    """Record a run held in its own file (ticket 05's per-item file, ticket 08's consumer files) in `db`'s runs
+    table, as `kind` (default: the file's own). The file must hold the run's runs row of kind `file_kind`, and
+    exactly the pages that row counts; otherwise nothing is recorded. Returns the page count."""
     run_id = manifest["run_id"]
     item = connect(pulled, read_only=True)
     try:
@@ -220,17 +246,24 @@ def record_per_item(db: Path, manifest: dict[str, Any], pulled: Path) -> int:
         others = item.execute("SELECT count(*) FROM pages WHERE run_id <> ?", [run_id]).fetchall()[0][0]
     finally:
         item.close()
-    if found != [(rows[0], "per-item")] or rows[0] != rows[1] or others:
+    if found != [(rows[0], file_kind)] or rows[0] != rows[1] or others:
         msg = (f"{pulled}: runs row {found}, pages {rows[0]} ({rows[1]} distinct URLs), {others} rows of other runs;"
             " a file the pipeline did not close holds no runs row; nothing recorded")
         raise FeedError(msg)
     con = connect(db)
     try:
-        if con.execute("SELECT count(*) FROM runs WHERE run_id = ?", [run_id]).fetchall() != [(0,)]:
-            msg = f"run {run_id} is already in {db}; nothing recorded"
+        # A rerun (ticket 08's `consume` after the host died here) finds its own record: the same row is accepted.
+        shared = con.execute("SELECT pages, store, store_file FROM runs WHERE run_id = ?", [run_id]).fetchall()
+        if shared == [(rows[0], kind or file_kind, str(pulled))]:
+            return rows[0]
+        if shared:
+            msg = f"run {run_id} is already in {db} as {shared}; nothing recorded"
             raise FeedError(msg)
-        con.execute(RUNS_INSERT, _runs_row(manifest, rows[0], "per-item", pulled))
-        con.execute("CHECKPOINT")
+        con.execute(RUNS_INSERT, _runs_row(manifest, rows[0], kind or file_kind, pulled))
+        try:
+            con.execute("CHECKPOINT")
+        except duckdb.Error as exc:  # Committed already: the row is in the WAL and replays on the next open.
+            sys.stderr.write(f"warning: run {run_id} is recorded (committed), but CHECKPOINT failed: {exc}\n")
     finally:
         con.close()
     return rows[0]
@@ -325,6 +358,30 @@ def sql(db: Path, query: str) -> str:
     con = connect(db, read_only=True)
     try:
         return _table(con, query)
+    finally:
+        con.close()
+
+
+def run_file(db: Path, run_id: str) -> Path:
+    """The file that holds a run's pages: its own (tickets 05, 08, 09), or the shared store for older bulk runs."""
+    con = connect(db, read_only=True)
+    try:
+        found = con.execute("SELECT store_file FROM runs WHERE run_id = ?", [run_id]).fetchall()
+    finally:
+        con.close()
+    if not found:
+        msg = f"run {run_id} is not in {db}"
+        raise FeedError(msg)
+    return Path(found[0][0]) if found[0][0] else db
+
+
+def elsewhere(db: Path) -> int:
+    """How many runs keep their pages in a file of their own, not in `db`'s pages table."""
+    con = connect(db, read_only=True)
+    try:
+        return con.execute(
+            "SELECT count(*) FROM runs WHERE store_file IS NOT NULL AND store_file <> ?", [str(db)],
+        ).fetchall()[0][0]
     finally:
         con.close()
 
