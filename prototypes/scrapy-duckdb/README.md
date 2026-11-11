@@ -1161,3 +1161,88 @@ running, as `cli._running_or_fail` does. The review found no path to `scrapy-pro
 **Rung.** Rung 1 held: a guest primary on the mount, a host secondary following it. Rungs 2 and 3
 (checkpoints into the mount, or SSTs pulled with `read_file`) were not tried, so nothing is known
 about them.
+
+### Ticket 08: the queue store and its host consumer
+
+**What was built.** `crawl --store` takes three new values on `rocks-proto`:
+
+- `jsonl-tail`, the control: Scrapy's feed is written to `/queue/<run_id>/feed.jsonl` on the mount,
+  through a `tailfile://` feed storage that flushes after every write (Scrapy's own file is buffered),
+  and the host inserts each complete line past its byte offset. A partial line is never read.
+- `rocks-queue`: `RocksQueuePipeline` puts each item's JSON into RocksDB at `/queue/<run_id>/rocks`
+  under `p:%012d`, SSTs and WAL ZSTD-compressed (the WAL through ticket 07's OPTIONS-file edit), and at
+  close writes `meta:closed` with the page count and the depth corrections, syncs the WAL and closes.
+  The host follows it as a secondary (`queue.RocksTail`) and never opens it read-write.
+- `all`: both live arms and the guest-disk feed at once, so one crawl yields all three arms.
+
+Each live arm is consumed into its own DuckDB file, `ai_tmp/scrapy-duckdb/<run_id>-<arm>.duckdb`, with
+the host store's schema plus `consumer_offsets`, `arrivals` (host commit time per page) and `clock`.
+The consumers tick every 100 ms inside the existing watch loop; the guest poll stays at 5 s. Every tick
+inserts its batch and moves its cursor in one transaction, so a killed host resumes exactly where its
+last commit left off. After the done marker the consumers drain, then `finish` refuses a run whose
+rows plus duplicates differ from the spider's `proto/pages` (or from `meta:closed`), applies the depth
+corrections and writes the file's `runs` row; the shared `prototype.duckdb` records the run as
+ticket 05's per-item file was recorded (`store.record_isolated`). Under `all`, the guest-disk feed is
+bulk-loaded into `<run_id>-bulk.duckdb` too, before the shared row is written, so a run recorded in
+`prototype.duckdb` has every arm (see the review below). `crawl` writes `feeds/<run_id>.plan.json`
+before the launch, and `scrapyproto consume <run_id>` picks a live-arm run up again from that plan and the
+committed cursors. `--crash-after N` (prototype only) makes the spider SIGKILL itself before its
+`N+1`th page. After the summary, the host measures the clock offset over the mount (ticket 07's
+method, 20 rounds) and prints fetch-to-commit latency per arm; it is outside the wall time that
+`bench_queries.py wall` stops at the summary. The plan's 0.5 s tick became 100 ms, since every latency
+includes up to one tick.
+
+**The first run** (`logs/09-01-live-25-all.txt`) was ticket 09's first live crawl, run early as this
+ticket's integration test, since `rocks-proto` had no cache: ticket 03's seed, `--max-pages 25
+--path-prefix /` (ticket 05's form, so the replays match), `--store all`. It closed
+`closespider_itemcount` with 25 pages in a guest wall of 26.5 s, ticket 03's figure. Each arm holds 25
+pages. Rocks-queue's first commit came 46.9 ms after the first fetch; the bulk path's first row
+landed after the done marker, at 30.59 s plus 0.77 s after the launch.
+
+**Same pages** (`logs/08-compare-25.txt`): `bench_queries.py compare` on four pairs, each live arm
+against bulk in the live run and in single-arm replays (`logs/08-replay-25-{bulk,jsonl-tail,
+rocks-queue}.txt`, `httpcache/hit: 27` each, no miss and no `firsthand`): equal row counts, URL sets,
+`content_hash` sets and `(url, content_hash, md5(html))` sets in every pair.
+
+**Host resume** (`logs/08-resume-25-*.txt`). A `--store all` replay's host process was SIGKILLed 0.35
+s after the launch line. The guest run went on and finished. The two consumer files were left with a
+DuckDB WAL each (986 KB and 1.4 MB beside 12 KB files); a read-only open replayed them: rocks-queue had
+committed 14 rows at cursor `p:000000000013`, jsonl-tail 21 rows at byte 1688945. `scrapyproto
+consume` resumed both from those cursors, drained, finished and recorded the run: 25 rows each, 0
+duplicates, and `compare` against bulk equal in every set. The latency it printed has a 16.6 s tail,
+which is the time between the kill and the `consume`.
+
+**Bytes across the mount, a first figure** (the rocks-queue replay): the WAL before close held 419419
+bytes, against 2256699 logical bytes by RocksDB's own `rocksdb.wal.bytes` (which counts before the
+WAL's ZSTD), with no flush or compaction yet. So on these 25 real pages the queue moved 18.6% of the
+bytes it was given. The comparison with JSONL and gzip is ticket 09's.
+
+**Sharp edges of the queue path.**
+
+- **rocksdict cannot set `wal_compression`.** The pipeline creates the database, closes it, edits the
+  OPTIONS file and reopens with `Options.load_latest`; it refuses an OPTIONS file without exactly one
+  `wal_compression=kNoCompression`. A rocksdict release that adds the setter would retire this.
+- **The guest's LOCK does not cross the mount** (ticket 07). Nothing but convention keeps the host to
+  a secondary: one host process opening the queue read-write while the spider runs would corrupt it.
+- **`rocksdb.wal.bytes` is logical.** The bytes on the mount come from the directory listing just
+  before close; the close can flush the memtable into an SST and empty the WAL, so the directory after
+  close is not what crossed.
+- **Each consumer holds its DuckDB file read-write for the whole run.** DuckDB's one-writer lock
+  (ticket 05) means `scrapyproto sql` cannot read a live arm's file until the run is recorded; the host
+  sees the pages, other processes do not. **Inference:** a reader during the run would need its own
+  copy or another store.
+- **A live arm's file holds three more tables** than the bulk file, so at 25 pages its size (2371584
+  bytes) against bulk's (1323008) counts blocks those tables take, not page storage. Ticket 09 compares
+  the `pages` table's own storage.
+- **`/queue/<run_id>/` and the secondary's directory are never deleted.** Each run leaves its feed or
+  RocksDB on the host mount.
+
+**Review moment 1** (gpt-6-astra, `ai_tmp/scrapy-duckdb/reviews/08-1.md`). One finding, valid and fixed:
+(high) under `--store all` the shared `runs` row was committed before the bulk arm's load, so a host
+dying between the two, or a failed load, stranded the run: `consume` then refused the existing row and
+never reached the load. The shared row is now the last step, `store.load(..., resume=True)` accepts
+its own earlier bulk commit when it matches, and `record_isolated` accepts an existing row only when
+pages, store kind and file match exactly. Checked offline against copies of a recorded run (each
+finalization state, and tampered rows refused), and the normal path rerun live as a replay
+(`logs/08-replay-25-all-after-review.txt`: 25 pages in each arm). A host killed inside finalization
+has not been run.
