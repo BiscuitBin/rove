@@ -90,6 +90,11 @@ pulling or crawling anything. Each ticket is picked up in a fresh context, in or
 04 and 05 are independent once 03 lands. Each ticket names its review moments, at which
 the agent runs the adversarial review loop below.
 
+Tickets 07 to 09, RocksDB as a live queue, live on PR #14 (`rocksdb-scrapy-duckdb-prototype`);
+their numbers are kept there. Tickets 10 to 15 carry that PR's JSONL tail here without RocksDB
+and close the gaps it left. 11 to 14 are independent once 10 lands, but they share `tail-proto`
+and its crawl lock, so they run one at a time, with 12 last because it can destroy the machine.
+
 | Ticket | Title | Blocked by |
 | --- | --- | --- |
 | `01-scaffold-spike-scrapy-in-smol.md` | Scaffold and spike: Scrapy runs inside a smol microVM and its feed reaches the host | none |
@@ -98,6 +103,12 @@ the agent runs the adversarial review loop below.
 | `04-guiding-and-filtering-parameters.md` | Guiding and filtering parameters, proven on Graph and Workspace | 03 |
 | `05-per-item-duckdb-versus-bulk-load.md` | The per-item DuckDB path, compared with the bulk load | 03 |
 | `06-verdict.md` | Verdict | 04, 05 |
+| `10-jsonl-tail-without-rocksdb.md` | The JSONL tail, ported without RocksDB (tracer) | none |
+| `11-streaming-zstd-feed-on-the-tail.md` | A line-flushed streaming ZSTD feed on the tail | 10 |
+| `12-vm-dies-mid-run-with-the-mount.md` | The VM dies mid-run with the mount attached | 10 |
+| `13-host-dies-during-finalization.md` | The host dies during finalization, live | 10 |
+| `14-two-runs-on-one-mount-and-a-long-crawl.md` | Two runs on one mount, and a crawl past 200 pages | 10 |
+| `15-verdict-revised-for-the-tail.md` | The Verdict, revised for the tail | 11, 12, 13, 14 |
 
 ## Adversarial review
 
